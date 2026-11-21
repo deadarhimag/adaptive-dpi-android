@@ -1,6 +1,7 @@
 package org.adaptivedpi.android.vpn.diagnostics
 
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -46,6 +47,20 @@ class CombinedDiagnosticReportTest {
         assertTrue(report.contains("Модель устройства: неизвестна"))
         assertTrue(report.contains("Хранилище журнала недоступно"))
         assertTrue(report.contains("Журнал ошибок\nЗаписей нет."))
+    }
+
+    @Test
+    fun includesAggregatesAndDistinguishesEngineReadinessFromBidirectionalTraffic() {
+        val transport = TransportSnapshot(true, 3, 2, 30, 0, 1, 2)
+        val report = combinedDiagnosticReport(
+            "0.1.1", "16", 36, "Pixel 7", VpnState.EngineRunning,
+            VpnEventHistoryState(), emptyList(), transport,
+        )
+        assertTrue(report.contains("локальный транспорт запущен"))
+        assertTrue(report.contains("Передача данных в обе стороны: ожидается"))
+        assertTrue(report.contains("Пакеты TUN: отправлено 3, получено 2"))
+        assertTrue(transport.copy(receivedBytes = 24).transferred)
+        assertFalse(transport.transferred)
     }
 
     @Test

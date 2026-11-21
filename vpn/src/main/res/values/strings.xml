@@ -4,6 +4,8 @@
     <string name="vpn_channel_name">Служба VPN</string>
     <string name="vpn_notification_title">Проверочный сеанс VPN</string>
     <string name="vpn_notification_message">Сетевой движок пока не подключён</string>
+    <string name="vpn_notification_experiment_title">Экспериментальный сеанс VPN</string>
+    <string name="vpn_notification_experiment">Локальный транспорт для одного IPv4-адреса</string>
     <string name="vpn_notification_stop">Остановить</string>
     <string name="vpn_error_channel">Критические ошибки VPN</string>
     <string name="vpn_error_title">VPN отключён из-за ошибки</string>

@@ -28,7 +28,10 @@ jobs:
       - name: Подготовить Android SDK
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-36" "build-tools;35.0.0"
+            "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358"
+
+      - name: Подготовить зафиксированные исходники HEV
+        run: python3 scripts/prepare-hev.py
 
       - name: Подготовить Gradle Wrapper
         run: chmod +x ./gradlew
@@ -56,9 +59,20 @@ jobs:
       - name: Проверить Android-код и собрать инструментальные тесты
         run: ./gradlew :app:lintDebug :app:assembleDebugAndroidTest
 
-      - name: Проверить экран диагностики на Android
-        timeout-minutes: 12
+      - name: Проверить Compose и TCP, UDP, DNS через Android TUN
+        id: device_tests
+        timeout-minutes: 15
         run: bash .github/scripts/test-diagnostics-on-emulator.sh
+
+      - name: Сохранить диагностику сбоя Android-тестов
+        if: failure() && steps.device_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: tun-test-diagnostics-${{ github.run_number }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tun-ci/
+            app/build/outputs/androidTest-results/connected/**/*.xml
+          if-no-files-found: warn
 
       - name: Проверить содержимое APK и создать сведения о сборке
         id: apk

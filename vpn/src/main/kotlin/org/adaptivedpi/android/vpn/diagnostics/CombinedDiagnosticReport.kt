@@ -1,6 +1,7 @@
 package org.adaptivedpi.android.vpn.diagnostics
 
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.TransportSnapshot
 import java.time.format.DateTimeFormatter
 
 fun combinedDiagnosticReport(
@@ -11,6 +12,7 @@ fun combinedDiagnosticReport(
     vpnState: VpnState,
     vpnHistory: VpnEventHistoryState,
     errors: List<DiagnosticEvent>,
+    transport: TransportSnapshot? = null,
 ): String = buildString {
     appendLine("Диагностика adaptive-dpi-android")
     appendLine("Версия приложения: ${DiagnosticEvent.safeVersion(appVersion)}")
@@ -19,8 +21,20 @@ fun combinedDiagnosticReport(
         .take(100).trim().ifEmpty { "неизвестна" }
     appendLine("Модель устройства: $model")
     appendLine("Состояние VPN: ${vpnState.name}")
-    val engine = if (vpnState == VpnState.EngineRunning) "работа подтверждена" else "пока не подключён"
+    val engine = when {
+        vpnState == VpnState.TransportStarting -> "инициализируется"
+        transport?.running == true -> "экспериментальный локальный транспорт запущен"
+        transport != null -> "экспериментальный локальный транспорт остановлен"
+        else -> "пока не подключён"
+    }
     appendLine("Сетевой движок: $engine")
+    if (transport != null) {
+        appendLine("Ограничение маршрутизации: один частный IPv4-адрес, IPv6 заблокирован для пакета VPN.")
+        appendLine("Передача данных в обе стороны: ${if (transport.transferred) "зафиксирована" else "ожидается"}")
+        appendLine("Пакеты TUN: отправлено ${transport.tunSentPackets}, получено ${transport.tunReceivedPackets}")
+        appendLine("Байты прямого тракта: отправлено ${transport.sentBytes}, получено ${transport.receivedBytes}")
+        appendLine("Соединения: ${transport.connections}. Операции с ошибками: ${transport.errors}.")
+    }
 
     appendLine()
     appendLine("Журнал событий VPN")

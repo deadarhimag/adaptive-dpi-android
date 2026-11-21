@@ -40,6 +40,7 @@ internal class VpnLifecycle(private val record: (VpnJournalEvent) -> Unit = {}) 
             VpnEvent.ConsentAbandoned -> VpnEventType.PermissionAbandoned
             VpnEvent.StartRequested -> VpnEventType.StartRequested
             VpnEvent.ServiceStarted -> VpnEventType.Started
+            VpnEvent.TransportTunCreated -> VpnEventType.TransportTunCreated
             VpnEvent.ConsentRevoked -> VpnEventType.PermissionUnavailable
             VpnEvent.SystemConsentRevoked -> VpnEventType.SystemRevoked
             VpnEvent.CriticalFailure -> VpnEventType.UnexpectedStop

@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -40,6 +41,8 @@ import org.adaptivedpi.android.R
 import org.adaptivedpi.android.designsystem.AdaptivePanel
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.TransportSnapshot
+import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
@@ -62,6 +65,8 @@ internal fun AdaptiveDpiApp(
     onSaveCombinedReport: (String) -> Unit,
     onShareCombinedReport: (String) -> Unit,
     onStartVpn: () -> Unit,
+    onStartTransport: (String) -> Unit,
+    transport: TransportSnapshot?,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
     onThemeChange: (ThemeMode) -> Unit,
@@ -90,6 +95,8 @@ internal fun AdaptiveDpiApp(
                     HomeScreen(
                         vpnState = vpnState,
                         onStartVpn = onStartVpn,
+                        onStartTransport = onStartTransport,
+                        transport = transport,
                         onStopVpn = onStopVpn,
                         onVpnSettings = onVpnSettings,
                         onSettings = { screen = Screen.Settings },
@@ -104,7 +111,7 @@ internal fun AdaptiveDpiApp(
                 Screen.Diagnostics -> ScreenContent(R.string.diagnostics, onBack = { screen = Screen.Home }) {
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
-                    DiagnosticsScreen(vpnState)
+                    DiagnosticsScreen(vpnState, transport)
                     VpnStopHelp(onVpnSettings)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
                 }
@@ -170,6 +177,8 @@ private fun ScreenContent(
 private fun HomeScreen(
     vpnState: VpnState,
     onStartVpn: () -> Unit,
+    onStartTransport: (String) -> Unit,
+    transport: TransportSnapshot?,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
     onSettings: () -> Unit,
@@ -178,7 +187,10 @@ private fun HomeScreen(
     AdaptivePanel {
         VpnStatus(vpnState)
         Text(
-            text = stringResource(R.string.vpn_test_scope),
+            text = stringResource(
+                if (vpnState == VpnState.TransportStarting || vpnState == VpnState.EngineRunning)
+                    R.string.vpn_transport_scope else R.string.vpn_test_scope,
+            ),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -204,7 +216,7 @@ private fun HomeScreen(
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(stringResource(R.string.smart_bypass), style = MaterialTheme.typography.titleMedium)
-                EngineStatus(vpnState)
+                EngineStatus(vpnState, transport)
             }
             Switch(checked = false, onCheckedChange = null, enabled = false)
         }
@@ -216,6 +228,23 @@ private fun HomeScreen(
         }
         OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.diagnostics))
+        }
+    }
+    if (vpnState.canStart) {
+        var target by rememberSaveable { mutableStateOf("") }
+        AdaptivePanel {
+            Text(stringResource(R.string.vpn_transport_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.vpn_transport_scope))
+            OutlinedTextField(
+                value = target,
+                onValueChange = { if (it.length <= 15) target = it },
+                label = { Text(stringResource(R.string.vpn_transport_address)) },
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = { onStartTransport(target) },
+                enabled = ExperimentalTarget.parse(target) != null,
+            ) { Text(stringResource(R.string.vpn_transport_start)) }
         }
     }
 }
@@ -277,13 +306,21 @@ private fun VpnStopHelp(onVpnSettings: () -> Unit) {
 }
 
 @Composable
-private fun DiagnosticsScreen(vpnState: VpnState) {
+private fun DiagnosticsScreen(vpnState: VpnState, transport: TransportSnapshot?) {
     AdaptivePanel {
         VpnStatus(vpnState)
     }
     AdaptivePanel {
         Text(stringResource(R.string.engine_status), style = MaterialTheme.typography.titleMedium)
-        EngineStatus(vpnState)
+        EngineStatus(vpnState, transport)
+        if (transport != null) {
+            Text(
+                stringResource(
+                    R.string.vpn_transport_counters, transport.tunSentPackets, transport.tunReceivedPackets,
+                    transport.sentBytes, transport.receivedBytes, transport.connections, transport.errors,
+                ),
+            )
+        }
         Text(stringResource(R.string.diagnostics_description), style = MaterialTheme.typography.bodyMedium)
     }
 }
@@ -295,6 +332,7 @@ private fun VpnStatus(state: VpnState) {
         VpnState.AwaitingConsent -> R.string.vpn_awaiting_consent
         VpnState.Starting -> R.string.vpn_starting
         VpnState.TestSessionRunning -> R.string.vpn_test_session_running
+        VpnState.TransportStarting -> R.string.vpn_transport_initializing
         VpnState.EngineRunning -> R.string.vpn_engine_running
         VpnState.Stopping -> R.string.vpn_stopping
         VpnState.ConsentDenied -> R.string.vpn_consent_denied
@@ -311,9 +349,17 @@ private fun VpnStatus(state: VpnState) {
 }
 
 @Composable
-private fun EngineStatus(vpnState: VpnState) {
+private fun EngineStatus(vpnState: VpnState, transport: TransportSnapshot?) {
     Text(
-        text = stringResource(if (vpnState == VpnState.EngineRunning) R.string.engine_confirmed else R.string.engine_unavailable),
+        text = stringResource(
+            when {
+                vpnState == VpnState.TransportStarting -> R.string.vpn_transport_initializing
+                transport?.running == true && transport.transferred -> R.string.vpn_transport_transferred
+                transport?.running == true -> R.string.vpn_transport_running
+                transport != null -> R.string.vpn_transport_stopped
+                else -> R.string.engine_unavailable
+            },
+        ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

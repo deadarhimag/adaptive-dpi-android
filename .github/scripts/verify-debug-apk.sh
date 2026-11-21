@@ -36,6 +36,21 @@ verify_string vpn_journal_title "Журнал событий VPN"
 verify_string build_git_revision "$revision"
 verify_string build_number "$build_number"
 
+entries=$(unzip -Z1 "$apk")
+for abi in arm64-v8a x86_64; do
+  if ! grep -Fxq "lib/$abi/libadaptive-hev.so" <<< "$entries"; then
+    echo "В APK нет HEV для $abi." >&2
+    exit 1
+  fi
+done
+for component in hev-socks5-tunnel hev-socks5-core hev-task-system lwip yaml; do
+  if ! grep -Fxq "assets/native-licenses/$component.txt" <<< "$entries"; then
+    echo "В APK нет лицензии $component." >&2
+    exit 1
+  fi
+done
+"$tools/zipalign" -c -P 16 4 "$apk"
+
 signers=$(java -jar "$tools/lib/apksigner.jar" verify --print-certs "$apk")
 fingerprint=$(grep -F 'certificate SHA-256 digest:' <<< "$signers")
 mkdir -p "$(dirname "$destination")"

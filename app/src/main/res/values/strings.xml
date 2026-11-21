@@ -7,6 +7,15 @@
     <string name="vpn_starting">Запускается служба VPN</string>
     <string name="vpn_test_session_running">Проверочный сеанс запущен</string>
     <string name="vpn_engine_running">Сетевой движок запущен</string>
+    <string name="vpn_transport_title">Экспериментальный локальный транспорт</string>
+    <string name="vpn_transport_scope">Только трафик этого приложения к одному частному IPv4-адресу проходит через TUN. IPv6 для этого приложения заблокирован на время сеанса.</string>
+    <string name="vpn_transport_address">Частный IPv4-адрес тестового сервера</string>
+    <string name="vpn_transport_start">Запустить экспериментальный транспорт</string>
+    <string name="vpn_transport_initializing">TUN создан. Движок инициализируется</string>
+    <string name="vpn_transport_running">Движок запущен. Ожидается передача в обе стороны</string>
+    <string name="vpn_transport_transferred">Передача через TUN в обе стороны зафиксирована</string>
+    <string name="vpn_transport_stopped">Экспериментальный транспорт остановлен</string>
+    <string name="vpn_transport_counters">Пакеты TUN %1$d / %2$d. Байты прямого тракта %3$d / %4$d. Соединения %5$d. Ошибки %6$d.</string>
     <string name="vpn_stopping">Служба останавливается</string>
     <string name="vpn_consent_denied">Разрешение отклонено</string>
     <string name="vpn_consent_revoked">Разрешение отозвано</string>

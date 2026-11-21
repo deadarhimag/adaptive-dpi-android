@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
     private val settings by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private val themeMode = mutableStateOf(ThemeMode.System)
     private var pendingConsentId: String? = null
+    private var pendingTransportTarget: String? = null
     private var pendingReportId: String? = null
     private val pendingExport by lazy { ViewModelProvider(this)[PendingDiagnosticExport::class.java] }
     private val diagnosticRequest = mutableStateOf<UUID?>(null)
@@ -46,7 +47,8 @@ class MainActivity : ComponentActivity() {
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val id = pendingConsentId ?: return@registerForActivityResult
         pendingConsentId = null
-        VpnController.completeConsent(this, id, result.resultCode == Activity.RESULT_OK)
+        val target = pendingTransportTarget.also { pendingTransportTarget = null }
+        VpnController.completeConsent(this, id, result.resultCode == Activity.RESULT_OK, target)
         if (VpnController.state.value == VpnState.Starting) requestNotificationsOnce()
     }
 
@@ -77,6 +79,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingConsentId = savedInstanceState?.getString(PENDING_VPN_CONSENT)
+        pendingTransportTarget = savedInstanceState?.getString("pending_transport_target")
         pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)
         savedInstanceState?.getString(PREVIOUS_PROCESS)?.let(VpnController::activityRestored)
         diagnosticRequest.value = if (savedInstanceState == null) {
@@ -109,7 +112,9 @@ class MainActivity : ComponentActivity() {
                     onBuildCombinedReport = ::buildCombinedReport,
                     onSaveCombinedReport = ::saveCombinedReport,
                     onShareCombinedReport = { shareReport(DiagnosticExports.COMBINED_FILE_NAME, it) },
-                    onStartVpn = ::startVpn,
+                    onStartVpn = { startVpn() },
+                    onStartTransport = { startVpn(it) },
+                    transport = VpnController.transport.collectAsStateWithLifecycle().value,
                     onStopVpn = VpnController::stop,
                     onVpnSettings = ::openVpnSettings,
                     onThemeChange = ::saveTheme,
@@ -121,6 +126,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(PENDING_VPN_CONSENT, pendingConsentId)
+        outState.putString("pending_transport_target", pendingTransportTarget)
         outState.putString(PENDING_REPORT_ID, pendingReportId)
         outState.putString(PREVIOUS_PROCESS, VpnController.processIdentity)
         outState.putString(PENDING_DIAGNOSTIC_REQUEST, diagnosticRequest.value?.toString())
@@ -143,15 +149,17 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun startVpn() {
-        val request = VpnController.requestStart(this)
+    private fun startVpn(target: String? = null) {
+        val request = VpnController.requestStart(this, target)
         if (request != null) {
             pendingConsentId = request.id
+            pendingTransportTarget = target
             try {
                 vpnConsent.launch(request.intent)
                 VpnController.consentLaunched(request.id)
             } catch (exception: RuntimeException) {
                 pendingConsentId = null
+                pendingTransportTarget = null
                 VpnController.consentLaunchFailed(request.id, exception)
             }
         } else if (VpnController.state.value == VpnState.Starting) {
@@ -216,6 +224,7 @@ class MainActivity : ComponentActivity() {
         return combinedDiagnosticReport(
             version, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL,
             VpnController.state.value, VpnEventHistory.state.value, VpnDiagnostics.events.value,
+            VpnController.transport.value,
         )
     }
 

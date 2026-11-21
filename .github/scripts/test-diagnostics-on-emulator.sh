@@ -8,8 +8,11 @@ image='system-images;android-34;default;x86_64'
 avd_name=diagnostics-ci
 port=5554
 serial="emulator-$port"
-emulator_log="${RUNNER_TEMP:?}/diagnostics-emulator.log"
+log_dir="${RUNNER_TEMP:?}/tun-ci"
+mkdir -p "$log_dir"
+emulator_log="$log_dir/emulator.log"
 emulator_pid=
+fixture_pid=
 
 fail() {
   echo "::error::$*" >&2
@@ -18,14 +21,26 @@ fail() {
 
 cleanup() {
   local status=$?
-  if (( status != 0 )) && [[ -n "$emulator_pid" ]]; then
-    echo 'Список устройств ADB:' >&2
-    timeout 10s "$adb" devices -l >&2 || true
-    echo 'Последние строки журнала эмулятора:' >&2
-    tail -n 100 "$emulator_log" >&2 || true
+  if (( status != 0 )); then
+    printf 'Код выхода шага: %s\n' "$status" > "$log_dir/status.txt"
+    if [[ -n "$emulator_pid" ]]; then
+      timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
+      timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
+        TunTransportTest:I AdaptiveHev:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
+        > "$log_dir/android.log" 2>&1 || true
+      timeout 10s "$adb" -s "$serial" shell run-as org.adaptivedpi.android cat no_backup/vpn-events/journal \
+        > "$log_dir/vpn-journal.txt" 2>&1 || true
+      echo 'Последние строки журнала эмулятора:' >&2
+      tail -n 100 "$emulator_log" >&2 || true
+      echo 'Диагностика инструментального теста:' >&2
+      tail -n 100 "$log_dir/android.log" >&2 || true
+    fi
   fi
   if [[ -n "$emulator_pid" ]]; then
     kill "$emulator_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$fixture_pid" ]]; then
+    kill "$fixture_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -72,5 +87,24 @@ until [[ "$boot_completed" == 1 ]]; do
 done
 
 "$adb" -s "$serial" shell input keyevent 82 || fail "ADB не смог разблокировать экран $serial."
+"$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
+"$adb" -s "$serial" shell appops set org.adaptivedpi.android ACTIVATE_VPN allow
+fixture_log="$log_dir/fixture.log"
+# 10.0.2.2 в госте — адрес loopback хоста. VPN направляет только этот /32.
+python3 scripts/transport-fixture.py --bind 127.0.0.1 > "$fixture_log" 2>&1 &
+fixture_pid=$!
+for ((attempt=0; attempt<20; attempt++)); do
+  if grep -qx ready "$fixture_log"; then break; fi
+  if ! kill -0 "$fixture_pid" 2>/dev/null; then break; fi
+  sleep 1
+done
+if ! grep -qx ready "$fixture_log"; then
+  cat "$fixture_log" >&2
+  fail "Локальный стенд TCP/UDP/DNS не запустился."
+fi
 ANDROID_SERIAL="$serial" ./gradlew :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest
+  -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest,org.adaptivedpi.android.TunTransportInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
+  -Pandroid.testInstrumentationRunnerArguments.requireTransportFixture=true \
+  2>&1 | tee "$log_dir/gradle-tests.log"
+timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I '*:S' || true
