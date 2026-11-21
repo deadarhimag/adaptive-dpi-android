@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vpn_service_name">adaptive-dpi-android</string>
+    <string name="vpn_channel_name">Служба VPN</string>
+    <string name="vpn_notification_title">Проверочный сеанс VPN</string>
+    <string name="vpn_notification_message">Сетевой движок пока не подключён</string>
+    <string name="vpn_notification_stop">Остановить</string>
+    <string name="vpn_error_channel">Критические ошибки VPN</string>
+    <string name="vpn_error_title">VPN отключён из-за ошибки</string>
+    <string name="vpn_error_stopped">Сеанс VPN остановлен.</string>
+    <string name="vpn_error_details">Подробнее</string>
+    <string name="vpn_error_report_available">Отчёт доступен в разделе диагностики.</string>
+</resources>

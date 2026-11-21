@@ -1,0 +1,212 @@
+package org.adaptivedpi.android.vpn.diagnostics
+
+import org.adaptivedpi.android.vpn.VpnState
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.io.IOException
+
+class DiagnosticCenterTest {
+    @get:Rule val temporary = TemporaryFolder()
+    private val idle = VpnSnapshot(VpnState.Idle)
+    private val running = VpnSnapshot(VpnState.TestSessionRunning, KnownFlag.Yes, KnownFlag.Yes)
+
+    @Test
+    fun writesAndReadsAnEventWithItsMetadataAndAcknowledgement() {
+        val journal = DiagnosticJournal(temporary.root)
+        val original = center(journal)
+        val event = original.record(DiagnosticCode.TunnelFailed, running, IOException())
+        original.acknowledge(event.id)
+
+        val read = center(DiagnosticJournal(temporary.root)).events.value.single()
+        assertEquals(event.id, read.id)
+        assertEquals(event.time, read.time)
+        assertEquals(DiagnosticCode.TunnelFailed, read.code)
+        assertEquals("0.1.0", read.appVersion)
+        assertEquals("16", read.androidVersion)
+        assertEquals(running, read.vpn)
+        assertTrue(read.acknowledged)
+    }
+
+    @Test
+    fun rotatesByCountAndPreservesTheMostRecentItems() {
+        val journal = DiagnosticJournal(temporary.root, maxEntries = 3)
+        val center = center(journal)
+        val ids = List(6) { center.record(DiagnosticCode.ConsentFailed, idle).id }
+        assertEquals(ids.takeLast(3).reversed(), journal.read().map(DiagnosticEvent::id))
+    }
+
+    @Test
+    fun rotatesByByteSizeAndKeepsTheLatestEntry() {
+        val journal = DiagnosticJournal(temporary.root, maxBytes = 360)
+        val center = center(journal)
+        val ids = List(8) { center.record(DiagnosticCode.VpnCleanupFailed, running).id }
+        assertTrue(File(temporary.root, "journal").length() in 1L..360L)
+        assertEquals(ids.last(), journal.read().first().id)
+        assertTrue(journal.read().size < ids.size)
+    }
+
+    @Test
+    fun persistenceAndNotificationFailuresDoNotCrashTheRecorder() {
+        val journal = DiagnosticJournal(temporary.newFile())
+        val center = center(journal) { throw SecurityException("Запрет отправки") }
+        val event = center.record(DiagnosticCode.VpnUnexpectedStop, running)
+        assertEquals(event.id, center.events.value.single().id)
+        assertFalse(center.events.value.single().notified)
+
+        center.acknowledge(event.id)
+        assertTrue(center.events.value.single().acknowledged)
+        assertNotNull(center.record(DiagnosticCode.SaveFailed, idle))
+    }
+
+    @Test
+    fun crashIsRecoveredOnceAndMatchedWithTheActiveSessionMarker() {
+        val journal = DiagnosticJournal(temporary.root)
+        var notifications = 0
+        val first = center(journal) { notifications++; true }
+        first.markActive(running)
+        first.captureCrash(running, IllegalStateException("первый crash"))
+        first.captureCrash(running, IllegalArgumentException("повторный callback"))
+        assertEquals(0, notifications)
+
+        val restarted = center(journal)
+        val crash = restarted.events.value.single()
+        assertEquals(DiagnosticCode.AppCrash, crash.code)
+        assertEquals(ExceptionKind.IllegalStateException, crash.exceptionKind)
+        assertTrue(crash.vpnStopped)
+        restarted.acknowledge(crash.id)
+        assertEquals(crash.id, center(journal).events.value.single().id)
+        assertTrue(center(journal).events.value.single().acknowledged)
+    }
+
+    @Test
+    fun abandonedProcessLeavesMarkerButAnOrdinaryStopDoesNot() {
+        val journal = DiagnosticJournal(temporary.root)
+        val first = center(journal)
+        first.markActive(running)
+        first.clearActive()
+        assertTrue(center(journal).events.value.isEmpty())
+
+        first.markActive(running)
+        val afterKill = center(journal).events.value.single()
+        assertEquals(DiagnosticCode.VpnInterrupted, afterKill.code)
+        assertTrue(afterKill.connectionNotice().contains("может остаться недоступным"))
+        assertEquals(afterKill.id, center(journal).events.value.single().id)
+    }
+
+    @Test
+    fun anEventRemainsUnreadWhenNotificationsAreDeniedAndIsPostedOnlyOnceAfterPermission() {
+        val journal = DiagnosticJournal(temporary.root)
+        var posted = 0
+        val denied = center(journal) { false }
+        val event = denied.record(DiagnosticCode.EngineHung, running)
+        assertFalse(denied.events.value.single().acknowledged)
+        assertFalse(denied.events.value.single().notified)
+
+        val allowed = center(journal) { posted++; true }
+        allowed.notifyOnce(event.id)
+        allowed.notifyOnce(event.id)
+        center(journal) { posted++; true }.notifyOnce(event.id)
+        assertEquals(1, posted)
+    }
+
+    @Test
+    fun reportAndJournalExcludeExceptionMessagesFileNamesAndUntrustedFrames() {
+        val message = "https://private.example/path password=hunter cookie=abc token=secret"
+        val cause = IOException(message).apply {
+            stackTrace = arrayOf(
+                StackTraceElement("org.adaptivedpi.android.vpn.AdaptiveVpnService", "startTestSession", "private-path", 24),
+                StackTraceElement("com.private.application", "tokenSecret", "Cookie123", 42),
+            )
+        }
+        val journal = DiagnosticJournal(temporary.root)
+        val event = DiagnosticCenter(journal, "token-secret", 36, "release-secret") { false }
+            .record(DiagnosticCode.TunnelFailed, running, cause)
+        val report = journal.read().single().report()
+        assertTrue(report.contains(event.id.toString()))
+        assertTrue(report.contains("AdaptiveVpnService.startTestSession:24"))
+        assertTrue(report.contains("кадр скрыт:42"))
+        assertTrue(report.contains("Версия Android"))
+        assertTrue(report.contains("Дата и время"))
+        val bytesOnDisk = File(temporary.root, "journal").readText()
+        for (secret in listOf("private.example", "hunter", "token=secret", "private-path",
+            "com.private.application", "tokenSecret", "Cookie123", "token-secret", "release-secret")) {
+            assertFalse(report.contains(secret))
+            assertFalse(bytesOnDisk.contains(secret))
+        }
+    }
+
+    @Test
+    fun expiredRecordsAndCrashSlotAreDeletedFromTheDisk() {
+        var now = 10_000L
+        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now })
+        val first = center(journal)
+        val expired = first.record(DiagnosticCode.ConsentFailed, idle)
+        first.captureCrash(idle, IllegalStateException())
+        now += 400
+        val fresh = first.record(DiagnosticCode.SaveFailed, idle)
+        now += 100
+
+        val reloaded = center(DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now }))
+        assertEquals(listOf(fresh.id), reloaded.events.value.map(DiagnosticEvent::id))
+        assertFalse(File(temporary.root, "last-crash").exists())
+        assertFalse(File(temporary.root, "journal").readText().contains(expired.id.toString()))
+
+        now += 500
+        reloaded.prune()
+        assertTrue(reloaded.events.value.isEmpty())
+        assertEquals("", File(temporary.root, "journal").readText())
+    }
+
+    @Test
+    fun aPersistedCriticalReasonReplacesTheInterruptedSessionMarker() {
+        val journal = DiagnosticJournal(temporary.root)
+        val first = center(journal)
+        first.markActive(running)
+        val marker = checkNotNull(journal.readActive())
+        val id = first.persistCritical(DiagnosticCode.EngineHung, running, null, marker.id)
+        assertEquals(marker.id, id)
+
+        val recovered = center(journal).events.value.single()
+        assertEquals(DiagnosticCode.EngineHung, recovered.code)
+        assertEquals(id, recovered.id)
+    }
+
+    @Test
+    fun aLateCriticalWriteCannotClearTheMarkerOfANewerSession() {
+        val journal = DiagnosticJournal(temporary.root)
+        val first = center(journal)
+        first.markActive(running)
+        val old = checkNotNull(journal.readActive())
+        first.markActive(running)
+        val next = checkNotNull(journal.readActive())
+
+        first.persistCritical(DiagnosticCode.EngineHung, running, null, old.id)
+        assertEquals(next.id, journal.readActive()?.id)
+    }
+
+    @Test
+    fun repeatedFaultsKeepJournalEntriesButShareAnAlertCooldown() {
+        var now = 100_000L
+        var notifications = 0
+        val journal = DiagnosticJournal(temporary.root, clock = { now })
+        val first = center(journal) { notifications++; true }
+        first.record(DiagnosticCode.EngineHung, running)
+        now += 1_000
+        val second = center(journal) { notifications++; true }
+        second.record(DiagnosticCode.EngineHung, running)
+        assertEquals(2, second.events.value.size)
+        assertEquals(1, notifications)
+        now += 61_000
+        second.record(DiagnosticCode.EngineHung, running)
+        assertEquals(2, notifications)
+    }
+
+    private fun center(journal: DiagnosticJournal, notify: (DiagnosticEvent) -> Boolean = { false }) =
+        DiagnosticCenter(journal, "0.1.0", 36, "16", notify)
+}
