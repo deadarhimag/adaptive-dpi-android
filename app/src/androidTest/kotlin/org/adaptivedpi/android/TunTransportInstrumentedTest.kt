@@ -17,6 +17,7 @@ import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -69,6 +70,8 @@ class TunTransportInstrumentedTest {
                     assertTrue(before.transferred)
                 } catch (error: Throwable) {
                     failure = error
+                    val eventTypes = VpnEventHistory.state.value.entries.take(12).joinToString(", ") { it.type.name }
+                    Log.w(TAG, "Сбой в состоянии ${VpnController.state.value}, события VPN: $eventTypes")
                     throw error
                 } finally {
                     try {

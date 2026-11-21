@@ -4,6 +4,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.util.Log
 import org.adaptivedpi.android.engine.OutboundSocketPolicy
 import java.net.DatagramSocket
 import java.net.Socket
@@ -18,14 +19,22 @@ internal class VpnOutboundSocketPolicy(
 
     override fun prepare(socket: Socket) {
         requirePhysicalNetwork()
-        if (!vpn.protect(socket)) throw SocketException("Android не разрешил исключить TCP-сокет из VPN.")
+        // Android создаёт дескриптор TCP лениво. Чтение опции создаёт его без bind/connect.
+        socket.reuseAddress
+        if (!vpn.protect(socket)) rejectProtection("TCP")
         network.bindSocket(socket)
     }
 
     override fun prepare(socket: DatagramSocket) {
         requirePhysicalNetwork()
-        if (!vpn.protect(socket)) throw SocketException("Android не разрешил исключить UDP-сокет из VPN.")
+        socket.reuseAddress
+        if (!vpn.protect(socket)) rejectProtection("UDP")
         network.bindSocket(socket)
+    }
+
+    private fun rejectProtection(protocol: String): Nothing {
+        Log.w("AdaptiveTun", "protect отклонён: $protocol")
+        throw SocketException("Android не разрешил исключить исходящий сокет из VPN.")
     }
 
     private fun requirePhysicalNetwork() {

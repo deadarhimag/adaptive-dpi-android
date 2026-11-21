@@ -26,11 +26,12 @@ cleanup() {
     if [[ -n "$emulator_pid" ]]; then
       timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
-        TunTransportTest:I AdaptiveHev:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
+        TunTransportTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
         > "$log_dir/android.log" 2>&1 || true
       timeout 10s "$adb" -s "$serial" shell run-as org.adaptivedpi.android cat no_backup/vpn-events/journal \
         > "$log_dir/vpn-journal.txt" 2>&1 || true
       echo 'Последние строки журнала эмулятора:' >&2
+      sed -i '/Sending adb public key/d; /androidboot\.qemu\.adb\.pubkey=/d' "$emulator_log" || true
       tail -n 100 "$emulator_log" >&2 || true
       echo 'Диагностика инструментального теста:' >&2
       tail -n 100 "$log_dir/android.log" >&2 || true
