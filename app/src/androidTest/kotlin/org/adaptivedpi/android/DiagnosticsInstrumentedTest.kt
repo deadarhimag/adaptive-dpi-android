@@ -13,6 +13,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
+import org.adaptivedpi.android.vpn.diagnostics.combinedDiagnosticReport
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
 import org.junit.Assert.assertEquals
@@ -61,6 +64,26 @@ class DiagnosticsInstrumentedTest {
             outside.delete()
             VpnDiagnostics.acknowledge(event.id)
         }
+    }
+
+    @Test
+    fun sharesTheExactCombinedReportSnapshotAsUtf8() {
+        val report = combinedDiagnosticReport(
+            "0.1.0", Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL, VpnController.state.value,
+            VpnEventHistory.state.value, VpnDiagnostics.events.value,
+        )
+        val send = DiagnosticExports.shareIntent(context, DiagnosticExports.COMBINED_FILE_NAME, report)
+        val uri = checkNotNull(send.clipData).getItemAt(0).uri
+        assertEquals(Intent.ACTION_SEND, send.action)
+        assertEquals("content", uri.scheme)
+        assertEquals(
+            report,
+            checkNotNull(context.contentResolver.openInputStream(uri)).bufferedReader(Charsets.UTF_8).use { it.readText() },
+        )
+        val save = ActivityResultContracts.CreateDocument("text/plain")
+            .createIntent(context, DiagnosticExports.COMBINED_FILE_NAME)
+        assertEquals(Intent.ACTION_CREATE_DOCUMENT, save.action)
+        assertEquals(DiagnosticExports.COMBINED_FILE_NAME, save.getStringExtra(Intent.EXTRA_TITLE))
     }
 
     @Test
@@ -119,6 +142,8 @@ class DiagnosticsInstrumentedTest {
             assertTrue(event.vpnStopped)
             assertEquals(VpnState.Idle, VpnController.state.value)
             assertTrue(event.report().contains(event.id.toString()))
+            val type = if (code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
+            await { VpnEventHistory.state.value.entries.any { it.id == event.id && it.type == type } }
         } finally {
             VpnDiagnostics.acknowledge(event.id)
         }

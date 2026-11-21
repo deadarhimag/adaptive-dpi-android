@@ -19,6 +19,8 @@ import org.adaptivedpi.android.engine.EngineNetwork
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.KnownFlag
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.adaptivedpi.android.vpn.diagnostics.VpnSnapshot
 import java.util.UUID
 
@@ -27,6 +29,8 @@ class AdaptiveVpnService : VpnService() {
     private var tunnel: ParcelFileDescriptor? = null
     private var foregroundRequested = false
     private var termination = VpnEvent.ServiceDestroyed
+    private var terminationCode: DiagnosticCode? = null
+    private var cleanupErrorRecorded = false
     private val shutdown = VpnShutdown(::releaseResources) {
         runCatching { stopSelf() }.onFailure(::recordCleanupFailure)
     }
@@ -45,7 +49,7 @@ class AdaptiveVpnService : VpnService() {
         when (intent?.action) {
             ACTION_START -> if (sessionId == null) startTestSession(id)
             ACTION_STOP -> {
-                if (id != null) VpnController.stop(id)
+                if (id != null) VpnController.stopFromNotification(id)
                 if (sessionId == null) stopDeliveredStart(startId)
             }
             else -> if (sessionId == null) stopDeliveredStart(startId)
@@ -58,6 +62,12 @@ class AdaptiveVpnService : VpnService() {
     }
 
     private fun recordCleanupFailure(error: Throwable) {
+        if (!cleanupErrorRecorded) {
+            cleanupErrorRecorded = true
+            VpnEventHistory.record(
+                VpnEventType.StopError, sessionId?.toSessionUuid(), DiagnosticCode.VpnCleanupFailed, VpnController.state.value,
+            )
+        }
         VpnDiagnostics.recordAsync(DiagnosticCode.VpnCleanupFailed, error, diagnosticSnapshot())
     }
 
@@ -87,7 +97,7 @@ class AdaptiveVpnService : VpnService() {
             if (tunnel == null) {
                 finishSession(VpnEvent.ConsentRevoked)
             } else {
-                activeMarker = VpnDiagnostics.markActive(diagnosticSnapshot(VpnState.TestSessionRunning))
+                activeMarker = VpnDiagnostics.markActive(diagnosticSnapshot(VpnState.TestSessionRunning), attachedId.toSessionUuid())
                 VpnController.serviceStarted(attachedId)
             }
         } catch (exception: RuntimeException) {
@@ -118,7 +128,7 @@ class AdaptiveVpnService : VpnService() {
     override fun onRevoke() {
         // Android может вызвать отзыв разрешения вне главного потока.
         mainExecutor.execute {
-            if (sessionId != null) finishSession(VpnEvent.ConsentRevoked)
+            if (sessionId != null && !shutdown.started) finishSession(VpnEvent.SystemConsentRevoked)
         }
     }
 
@@ -134,7 +144,11 @@ class AdaptiveVpnService : VpnService() {
             val id = sessionId
             sessionId = null
             if (id != null) {
-                VpnController.serviceEnded(id, if (unexpected) VpnEvent.CriticalFailure else termination)
+                VpnController.serviceEnded(
+                    id,
+                    if (unexpected) VpnEvent.CriticalFailure else termination,
+                    if (unexpected) DiagnosticCode.VpnUnexpectedStop else terminationCode,
+                )
                 if (unexpected) VpnDiagnostics.persistCritical(DiagnosticCode.VpnUnexpectedStop, null, snapshot, marker)
             }
             super.onDestroy()
@@ -152,6 +166,7 @@ class AdaptiveVpnService : VpnService() {
             return
         }
         termination = event
+        terminationCode = code
         if (code == null) {
             shutdown.stop()
             return

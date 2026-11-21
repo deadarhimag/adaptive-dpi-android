@@ -5,14 +5,21 @@ import android.content.Intent
 import android.net.VpnService
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import java.util.UUID
 
 data class VpnConsentRequest(val id: String, val intent: Intent)
 
 object VpnController {
     private val processId = UUID.randomUUID().toString()
-    private val lifecycle = VpnLifecycle()
+    private val lifecycle = VpnLifecycle(VpnEventHistory::record)
     val state = lifecycle.state
+    val processIdentity get() = processId
+
+    fun activityRestored(previousProcessIdentity: String) {
+        lifecycle.activityRestored(previousProcessIdentity == processId)
+    }
 
     // Запросы Activity и события службы обрабатываются в главном потоке.
     fun requestStart(context: Context): VpnConsentRequest? {
@@ -22,6 +29,7 @@ object VpnController {
         return try {
             val intent = VpnService.prepare(context)
             if (intent == null) {
+                lifecycle.permissionResult(id, VpnEventType.PermissionAlreadyGranted)
                 start(context, id)
                 null
             } else {
@@ -33,6 +41,8 @@ object VpnController {
         }
     }
 
+    fun consentLaunched(id: String) = lifecycle.permissionResult(id, VpnEventType.PermissionRequested)
+
     fun completeConsent(context: Context, id: String, granted: Boolean) {
         // В новом процессе восстанавливается только запрос, для которого Android доставил результат.
         if (!id.startsWith("$processId:")) lifecycle.beginConsent(id, restoring = true)
@@ -43,6 +53,7 @@ object VpnController {
             return
         }
 
+        lifecycle.permissionResult(id, VpnEventType.PermissionGranted)
         try {
             if (VpnService.prepare(context) == null) {
                 start(context, id)
@@ -60,19 +71,20 @@ object VpnController {
 
     fun consentLaunchFailed(id: String, exception: RuntimeException) {
         if (lifecycle.isAwaitingConsent(id)) {
-            lifecycle.update(id, VpnEvent.ServiceFailed)
+            lifecycle.update(id, VpnEvent.ServiceFailed, DiagnosticCode.ConsentFailed)
             VpnDiagnostics.record(DiagnosticCode.ConsentFailed, exception)
         }
     }
 
     fun stop() = lifecycle.stop()
 
-    internal fun stop(id: String) = lifecycle.stop(id)
+    internal fun stopFromNotification(id: String) = lifecycle.stop(id, fromNotification = true)
     internal fun attachService(id: String, stop: () -> Unit) = lifecycle.attachService(id, stop)
     internal fun serviceStarted(id: String) = lifecycle.update(id, VpnEvent.ServiceStarted)
     internal fun engineConfirmed(id: String) = lifecycle.update(id, VpnEvent.EngineConfirmed)
     internal fun serviceStopping(id: String) = lifecycle.update(id, VpnEvent.StopRequested)
-    internal fun serviceEnded(id: String, event: VpnEvent) = lifecycle.serviceEnded(id, event)
+    internal fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode?) =
+        lifecycle.serviceEnded(id, event, code)
 
     private fun start(context: Context, id: String) {
         lifecycle.update(id, VpnEvent.StartRequested)
@@ -82,7 +94,7 @@ object VpnController {
         try {
             checkNotNull(context.startForegroundService(intent))
         } catch (exception: RuntimeException) {
-            lifecycle.update(id, VpnEvent.ServiceFailed)
+            lifecycle.update(id, VpnEvent.ServiceFailed, DiagnosticCode.VpnStartFailed)
             VpnDiagnostics.record(DiagnosticCode.VpnStartFailed, exception)
         }
     }

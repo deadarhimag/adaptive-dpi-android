@@ -13,11 +13,14 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assume.assumeTrue
 import org.junit.Test
+import java.util.UUID
 
 class VpnLifecycleInstrumentedTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -27,10 +30,19 @@ class VpnLifecycleInstrumentedTest {
 
     @Test
     fun recreatingTheActivityDoesNotStartVpn() {
+        val before = runBlocking { withTimeout(10_000) { VpnEventHistory.state.first { it.loaded } } }.entries
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { assertEquals(VpnState.Idle, VpnController.state.value) }
             scenario.recreate()
             scenario.onActivity { assertEquals(VpnState.Idle, VpnController.state.value) }
+            val entries = runBlocking {
+                withTimeout(10_000) {
+                    VpnEventHistory.state.first { history ->
+                        history.entries.any { it.type == VpnEventType.ActivityRestored && it !in before }
+                    }.entries
+                }
+            }
+            assertEquals(listOf(VpnEventType.ActivityRestored), entries.filterNot { it in before }.map { it.type })
         }
     }
 
@@ -48,7 +60,7 @@ class VpnLifecycleInstrumentedTest {
             )
 
             try {
-                startSession(scenario)
+                val first = startSession(scenario)
                 val oldStop = awaitNotification().notification.actions.single().actionIntent
                 scenario.recreate()
                 scenario.onActivity { assertEquals(VpnState.TestSessionRunning, VpnController.state.value) }
@@ -59,8 +71,9 @@ class VpnLifecycleInstrumentedTest {
                 }
                 awaitState(VpnState.Idle)
                 awaitNotificationRemoval()
+                assertStopRecorded(first, VpnEventType.StopFromApp)
 
-                startSession(scenario)
+                val second = startSession(scenario)
                 val currentStop = awaitNotification().notification.actions.single().actionIntent
                 assertNotEquals(oldStop, currentStop)
                 oldStop.send()
@@ -71,15 +84,38 @@ class VpnLifecycleInstrumentedTest {
                 currentStop.send()
                 awaitState(VpnState.Idle)
                 awaitNotificationRemoval()
+                assertStopRecorded(second, VpnEventType.StopFromNotification)
             } finally {
                 scenario.onActivity { VpnController.stop() }
             }
         }
     }
 
-    private fun startSession(scenario: ActivityScenario<MainActivity>) {
+    private fun assertStopRecorded(session: UUID, source: VpnEventType) = runBlocking {
+        val entries = withTimeout(10_000) {
+            VpnEventHistory.state.first { history ->
+                history.entries.any { it.sessionId == session && it.type == VpnEventType.Stopped }
+            }.entries
+        }
+        val stops = entries.filter {
+            it.sessionId == session && it.type in listOf(VpnEventType.StopFromApp, VpnEventType.StopFromNotification)
+        }
+        assertEquals(listOf(source), stops.map { it.type })
+    }
+
+    private fun startSession(scenario: ActivityScenario<MainActivity>): UUID {
+        val initialized = runBlocking { withTimeout(10_000) { VpnEventHistory.state.first { it.loaded } } }
+        val before = initialized.entries.map { it.id }.toSet()
         scenario.onActivity { assertNull(VpnController.requestStart(it)) }
         awaitState(VpnState.TestSessionRunning)
+        return runBlocking {
+            withTimeout(10_000) {
+                val history = VpnEventHistory.state.first { state ->
+                    state.entries.any { it.type == VpnEventType.Started && it.id !in before }
+                }
+                checkNotNull(history.entries.first { it.type == VpnEventType.Started && it.id !in before }.sessionId)
+            }
+        }
     }
 
     private fun awaitState(expected: VpnState) = runBlocking {

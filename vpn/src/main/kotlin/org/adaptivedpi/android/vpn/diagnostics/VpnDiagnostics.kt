@@ -55,6 +55,10 @@ object VpnDiagnostics {
         )
         notifications = dispatcher
         center = initialized
+        initialized.recovered.forEach { (event, sessionId) ->
+            val type = if (event.code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
+            VpnEventHistory.record(type, sessionId, event.code, event.vpn.state, id = event.id)
+        }
         runCatching(dispatcher::ensureChannel)
         installCrashHandler(initialized)
         initialized.events.value.firstOrNull {
@@ -79,8 +83,8 @@ object VpnDiagnostics {
         runCatching { notifications?.cancel(id) }
     }
 
-    internal fun markActive(vpn: VpnSnapshot): UUID {
-        val id = UUID.randomUUID()
+    internal fun markActive(vpn: VpnSnapshot, sessionId: UUID?): UUID {
+        val id = sessionId ?: UUID.randomUUID()
         activeVpn = id to vpn
         io.launch { center?.markActive(vpn, id) }
         return id
@@ -114,16 +118,19 @@ object VpnDiagnostics {
         intent.getStringExtra(EXTRA_EVENT_ID)?.let(UUID::fromString)
     }.getOrNull()
 
-    private fun snapshot(): VpnSnapshot {
+    private fun snapshot(active: Pair<UUID, VpnSnapshot>? = activeVpn): VpnSnapshot {
         val state = VpnController.state.value
-        return activeVpn?.second?.copy(state = state) ?: VpnSnapshot(state)
+        return active?.second?.copy(state = state) ?: VpnSnapshot(state)
     }
 
     private fun installCrashHandler(center: DiagnosticCenter) {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             try {
-                runCatching { center.captureCrash(snapshot(), error) }
+                runCatching {
+                    val active = activeVpn
+                    center.captureCrash(snapshot(active), error, active?.first)
+                }
             } finally {
                 if (previous != null) {
                     previous.uncaughtException(thread, error)

@@ -16,9 +16,7 @@ internal class DiagnosticCenter(
     val events = current.asStateFlow()
     private val collectingCrash = AtomicBoolean()
 
-    init {
-        recover()
-    }
+    val recovered = recover()
 
     @Synchronized
     fun record(code: DiagnosticCode, vpn: VpnSnapshot, error: Throwable? = null): DiagnosticEvent {
@@ -76,18 +74,18 @@ internal class DiagnosticCenter(
         }
     }
 
-    fun captureCrash(vpn: VpnSnapshot, error: Throwable) {
+    fun captureCrash(vpn: VpnSnapshot, error: Throwable, activeId: UUID? = null) {
         // Отдельный слот не берёт монитор обычного журнала, который мог держать упавший поток.
         if (!collectingCrash.compareAndSet(false, true)) return
         runCatching {
-            journal.writeCrash(newEvent(DiagnosticCode.AppCrash, vpn, error))
+            journal.writeCrash(newEvent(DiagnosticCode.AppCrash, vpn, error, activeId ?: UUID.randomUUID()))
         }
     }
 
-    private fun recover() {
+    private fun recover(): List<Pair<DiagnosticEvent, UUID?>> {
         val crash = runCatching(journal::readCrash).getOrNull()
         val interrupted = runCatching(journal::readActive).getOrNull()
-        if (crash == null && interrupted == null) return
+        if (crash == null && interrupted == null) return emptyList()
         val recovered = buildList {
             if (crash != null) add(crash)
             if (interrupted != null && crash?.vpn?.mayHaveActiveVpn != true) {
@@ -95,10 +93,15 @@ internal class DiagnosticCenter(
             }
         }
         // Уже прочитанные события сохраняют свои отметки, если удаление слота не удалось.
-        val merged = recovered.filter { event -> current.value.none { it.id == event.id } } + current.value
+        val newEvents = recovered.filter { event -> current.value.none { it.id == event.id } }
+        val merged = newEvents + current.value
         if (store(merged)) {
             runCatching(journal::clearCrash)
             runCatching(journal::clearActive)
+        }
+        return newEvents.map { event ->
+            val sessionId = interrupted?.id?.takeIf { it == event.id }
+            event to sessionId
         }
     }
 

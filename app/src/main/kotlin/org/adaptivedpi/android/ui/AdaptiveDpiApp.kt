@@ -41,6 +41,7 @@ import org.adaptivedpi.android.designsystem.AdaptivePanel
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
 
 private enum class Screen { Home, Settings, Diagnostics, About }
@@ -55,6 +56,11 @@ internal fun AdaptiveDpiApp(
     onDiagnosticAcknowledge: (UUID) -> Unit,
     onSaveDiagnostic: (DiagnosticEvent) -> Unit,
     onShareDiagnostic: (DiagnosticEvent) -> Unit,
+    vpnEventHistory: VpnEventHistoryState,
+    onClearVpnEventHistory: () -> Unit,
+    onBuildCombinedReport: () -> String,
+    onSaveCombinedReport: (String) -> Unit,
+    onShareCombinedReport: (String) -> Unit,
     onStartVpn: () -> Unit,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
@@ -98,6 +104,8 @@ internal fun AdaptiveDpiApp(
                 Screen.Diagnostics -> ScreenContent(R.string.diagnostics, onBack = { screen = Screen.Home }) {
                     DiagnosticsScreen(vpnState)
                     VpnStopHelp(onVpnSettings)
+                    DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
+                    VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
                 }
 

@@ -18,6 +18,8 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,6 +31,8 @@ import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
+import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
+import org.adaptivedpi.android.vpn.diagnostics.combinedDiagnosticReport
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
@@ -36,6 +40,7 @@ class MainActivity : ComponentActivity() {
     private val themeMode = mutableStateOf(ThemeMode.System)
     private var pendingConsentId: String? = null
     private var pendingReportId: String? = null
+    private val pendingExport by lazy { ViewModelProvider(this)[PendingDiagnosticExport::class.java] }
     private val diagnosticRequest = mutableStateOf<UUID?>(null)
 
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -51,15 +56,18 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
             val id = pendingReportId
             pendingReportId = null
+            val snapshot = if (id == COMBINED_REPORT_ID) pendingExport.report.also { pendingExport.report = null } else null
             if (uri == null || id == null) return@registerForActivityResult
-            val event = VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }
-            if (event == null) {
+            val report = if (id == COMBINED_REPORT_ID) snapshot else {
+                VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
+            }
+            if (report == null) {
                 Toast.makeText(this, R.string.diagnostic_missing, Toast.LENGTH_SHORT).show()
                 return@registerForActivityResult
             }
             lifecycleScope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { DiagnosticExports.save(applicationContext, uri, event) }
+                    runCatching { DiagnosticExports.save(applicationContext, uri, report) }
                 }
                 result.onSuccess { Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show() }
                     .onFailure { VpnDiagnostics.record(DiagnosticCode.SaveFailed, it) }
@@ -70,6 +78,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         pendingConsentId = savedInstanceState?.getString(PENDING_VPN_CONSENT)
         pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)
+        savedInstanceState?.getString(PREVIOUS_PROCESS)?.let(VpnController::activityRestored)
         diagnosticRequest.value = if (savedInstanceState == null) {
             VpnDiagnostics.eventId(intent)
         } else {
@@ -95,6 +104,11 @@ class MainActivity : ComponentActivity() {
                     onDiagnosticAcknowledge = VpnDiagnostics::acknowledge,
                     onSaveDiagnostic = ::saveDiagnostic,
                     onShareDiagnostic = ::shareDiagnostic,
+                    vpnEventHistory = VpnEventHistory.state.collectAsStateWithLifecycle().value,
+                    onClearVpnEventHistory = ::clearVpnEventHistory,
+                    onBuildCombinedReport = ::buildCombinedReport,
+                    onSaveCombinedReport = ::saveCombinedReport,
+                    onShareCombinedReport = { shareReport(DiagnosticExports.COMBINED_FILE_NAME, it) },
                     onStartVpn = ::startVpn,
                     onStopVpn = VpnController::stop,
                     onVpnSettings = ::openVpnSettings,
@@ -108,6 +122,7 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(PENDING_VPN_CONSENT, pendingConsentId)
         outState.putString(PENDING_REPORT_ID, pendingReportId)
+        outState.putString(PREVIOUS_PROCESS, VpnController.processIdentity)
         outState.putString(PENDING_DIAGNOSTIC_REQUEST, diagnosticRequest.value?.toString())
         super.onSaveInstanceState(outState)
     }
@@ -134,6 +149,7 @@ class MainActivity : ComponentActivity() {
             pendingConsentId = request.id
             try {
                 vpnConsent.launch(request.intent)
+                VpnController.consentLaunched(request.id)
             } catch (exception: RuntimeException) {
                 pendingConsentId = null
                 VpnController.consentLaunchFailed(request.id, exception)
@@ -148,21 +164,29 @@ class MainActivity : ComponentActivity() {
         settings.edit().putString("theme", mode.name).apply()
     }
 
-    private fun saveDiagnostic(event: DiagnosticEvent) {
+    private fun saveDiagnostic(event: DiagnosticEvent) = requestSave(event.id.toString(), DiagnosticExports.fileName(event))
+
+    private fun saveCombinedReport(report: String) = requestSave(COMBINED_REPORT_ID, DiagnosticExports.COMBINED_FILE_NAME, report)
+
+    private fun requestSave(id: String, fileName: String, report: String? = null) {
         if (pendingReportId != null) return
-        pendingReportId = event.id.toString()
+        pendingReportId = id
+        if (id == COMBINED_REPORT_ID) pendingExport.report = report
         try {
-            createDiagnosticDocument.launch(DiagnosticExports.fileName(event))
+            createDiagnosticDocument.launch(fileName)
         } catch (exception: RuntimeException) {
             pendingReportId = null
+            if (id == COMBINED_REPORT_ID) pendingExport.report = null
             VpnDiagnostics.record(DiagnosticCode.SaveFailed, exception)
         }
     }
 
-    private fun shareDiagnostic(event: DiagnosticEvent) {
+    private fun shareDiagnostic(event: DiagnosticEvent) = shareReport(DiagnosticExports.fileName(event), event.report())
+
+    private fun shareReport(fileName: String, report: String) {
         lifecycleScope.launch {
             try {
-                val send = withContext(Dispatchers.IO) { DiagnosticExports.shareIntent(applicationContext, event) }
+                val send = withContext(Dispatchers.IO) { DiagnosticExports.shareIntent(applicationContext, fileName, report) }
                 val chooser = Intent.createChooser(send, getString(R.string.diagnostic_share))
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 chooser.clipData = send.clipData
@@ -174,6 +198,25 @@ class MainActivity : ComponentActivity() {
                 VpnDiagnostics.record(DiagnosticCode.ShareFailed, exception)
             }
         }
+    }
+
+    private fun clearVpnEventHistory() {
+        lifecycleScope.launch {
+            if (!VpnEventHistory.clear()) {
+                Toast.makeText(this@MainActivity, R.string.vpn_journal_clear_failed, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun buildCombinedReport(): String {
+        val version = runCatching {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull()
+        return combinedDiagnosticReport(
+            version, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL,
+            VpnController.state.value, VpnEventHistory.state.value, VpnDiagnostics.events.value,
+        )
     }
 
     private fun requestNotificationsOnce() {
@@ -211,6 +254,12 @@ class MainActivity : ComponentActivity() {
         private const val PENDING_VPN_CONSENT = "pending_vpn_consent"
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
+        private const val COMBINED_REPORT_ID = "combined"
+        private const val PREVIOUS_PROCESS = "previous_process"
         private const val PENDING_DIAGNOSTIC_REQUEST = "pending_diagnostic_request"
     }
+}
+
+internal class PendingDiagnosticExport : ViewModel() {
+    var report: String? = null
 }

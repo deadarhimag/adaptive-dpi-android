@@ -65,20 +65,9 @@ internal class DiagnosticJournal(
     }
 
     private fun writeFile(file: File, events: List<DiagnosticEvent>) {
-        Files.createDirectories(directory.toPath())
         val bytes = events.joinToString(separator = "") { it.encode() + "\n" }.toByteArray(Charsets.UTF_8)
         require(bytes.size <= maxBytes)
-        // У каждого слота свой временный файл. После сбоя старая либо новая запись остаётся целой.
-        val temporary = File(directory, "${file.name}.tmp")
-        try {
-            FileOutputStream(temporary).use {
-                it.write(bytes)
-                it.fd.sync()
-            }
-            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-        } finally {
-            Files.deleteIfExists(temporary.toPath())
-        }
+        writeDiagnosticFile(file, bytes)
     }
 
     private fun DiagnosticEvent.encode(): String = listOf(
@@ -105,5 +94,21 @@ internal class DiagnosticJournal(
             parts[11].toBooleanStrict(),
             parts[12].toBooleanStrict(),
         )
+    }
+}
+
+internal fun writeDiagnosticFile(file: File, bytes: ByteArray) {
+    val directory = checkNotNull(file.parentFile)
+    Files.createDirectories(directory.toPath())
+    // У каждого файла свой временный слот для атомарной замены.
+    val temporary = File(directory, "${file.name}.tmp")
+    try {
+        FileOutputStream(temporary).use {
+            it.write(bytes)
+            it.fd.sync()
+        }
+        Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    } finally {
+        Files.deleteIfExists(temporary.toPath())
     }
 }

@@ -48,6 +48,16 @@
     <string name="diagnostic_empty">В журнале пока нет ошибок</string>
     <string name="diagnostic_saved">Отчёт сохранён</string>
     <string name="diagnostic_missing">Отчёт больше недоступен</string>
+    <string name="diagnostic_export_all">Экспортировать диагностику</string>
+    <string name="vpn_journal_title">Журнал событий VPN</string>
+    <string name="vpn_journal_empty">В журнале пока нет событий VPN</string>
+    <string name="vpn_journal_loading">Загрузка журнала событий</string>
+    <string name="vpn_journal_storage_error">Не удалось прочитать или записать журнал. Часть событий может быть недоступна после перезапуска.</string>
+    <string name="vpn_journal_clear">Очистить журнал</string>
+    <string name="vpn_journal_clear_title">Очистить журнал событий VPN?</string>
+    <string name="vpn_journal_clear_message">Записи событий VPN будут удалены с устройства.</string>
+    <string name="vpn_journal_cancel">Отмена</string>
+    <string name="vpn_journal_clear_failed">Не удалось очистить журнал событий VPN</string>
     <string name="about_title">О приложении</string>
     <string name="about_version">Версия %1$s</string>
     <string name="about_build">Номер сборки %1$s</string>
