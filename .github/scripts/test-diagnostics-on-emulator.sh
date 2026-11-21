@@ -62,6 +62,10 @@ if [[ ! -s "$ANDROID_AVD_HOME/$avd_name.ini" || ! -s "$avd_path/config.ini" ]]; 
   ls -la "$ANDROID_AVD_HOME" >&2
   fail "avdmanager не записал конфигурацию AVD $avd_name в $ANDROID_AVD_HOME."
 fi
+# Вместо 6 ГиБ из профиля Pixel 7 выделяем 2 ГиБ для тестовых APK и данных.
+sed -i '/^disk\.dataPartition\.size=/d' "$avd_path/config.ini"
+printf '\ndisk.dataPartition.size=2G\n' >> "$avd_path/config.ini"
+df -h "$avd_path" > "$log_dir/disk-space.txt"
 
 avds=$("$emulator" -list-avds) || fail "Эмулятор не смог прочитать каталог AVD $ANDROID_AVD_HOME."
 if ! grep -Fxq "$avd_name" <<< "$avds"; then
