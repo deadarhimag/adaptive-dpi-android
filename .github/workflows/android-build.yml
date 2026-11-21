@@ -27,8 +27,18 @@ jobs:
 
       - name: Подготовить Android SDK
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          # Для AVD требуется свободное место. Проект использует NDK 28.2.
+          installed=$("$sdkmanager" --list_installed)
+          mapfile -t unused_ndk < <(awk '$1 ~ /^ndk;[0-9]+\.[0-9]+\.[0-9]+$/ {
+            split($1, version, /[;.]/)
+            if (version[2] >= 29) print $1
+          }' <<< "$installed")
+          if (( ${#unused_ndk[@]} > 0 )); then
+            "$sdkmanager" --uninstall "${unused_ndk[@]}"
+          fi
+          df -h "$ANDROID_HOME"
+          "$sdkmanager" "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358"
 
       - name: Подготовить зафиксированные исходники HEV
         run: python3 scripts/prepare-hev.py
