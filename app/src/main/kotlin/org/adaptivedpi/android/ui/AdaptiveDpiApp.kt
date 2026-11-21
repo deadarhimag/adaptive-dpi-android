@@ -102,10 +102,10 @@ internal fun AdaptiveDpiApp(
                 }
 
                 Screen.Diagnostics -> ScreenContent(R.string.diagnostics, onBack = { screen = Screen.Home }) {
-                    DiagnosticsScreen(vpnState)
-                    VpnStopHelp(onVpnSettings)
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
+                    DiagnosticsScreen(vpnState)
+                    VpnStopHelp(onVpnSettings)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
                 }
 

@@ -31,7 +31,11 @@ Debug APK появится в `app/build/outputs/apk/debug/app-debug.apk`. От�
 
 ## Сборка в GitHub Actions
 
-Workflow [«Сборка Android»](.github/workflows/android-build.yml) запускается при push в `main`, при pull request и вручную через **Run workflow**. После успешных тестов и сборки откройте в репозитории **Actions → Сборка Android → нужный запуск → Artifacts** и скачайте **adaptive-dpi-android-debug**. В архиве находится `app-debug.apk`. [Скачивание артефактов в GitHub](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+Workflow [«Сборка Android»](.github/workflows/android-build.yml) запускается при push в `main`, при pull request и вручную через **Run workflow**. После успешных тестов и сборки откройте в репозитории **Actions → Сборка Android → нужный запуск → Artifacts**. Имя архива и APK включает короткий коммит и номер запуска с номером попытки, например `adaptive-dpi-android-debug-e6d85bee6c19-2.1`. В `build-info.txt` указаны полный коммит, версия пакета, сертификат подписи и SHA-256 APK. На телефоне проверьте коммит и номер в **Настройки → О приложении**. [Скачивание артефактов в GitHub](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+
+Для обновления поверх установленной версии Android требует совпадения пакета и сертификата подписи. Сравните поле «certificate SHA-256 digest» из сведений о новой сборке с результатом `apksigner verify --print-certs` для установленного APK. Путь к установленному файлу можно получить командой `adb shell pm path org.adaptivedpi.android` и скопировать `base.apk` командой `adb pull`. Это не затрагивает данные приложения. [Правила обновления Android](https://developer.android.com/google/play/app-updates)
+
+Для последовательных CI-сборок `main` можно настроить один debug-ключ в секрете GitHub Actions `ANDROID_DEBUG_KEYSTORE_BASE64`. Секрет содержит Base64 существующего debug-keystore со стандартным псевдонимом `androiddebugkey` и стандартными паролями Android Debug. Для обновления уже установленного приложения нужен ключ, которым оно подписано. При отсутствии секрета runner подписывает APK своим debug-ключом. Сведения о сертификате каждой сборки доступны в `build-info.txt`. [Подпись Android-приложений](https://developer.android.com/studio/publish/app-signing)
 
 ## Модули
 

@@ -60,7 +60,11 @@
     <string name="vpn_journal_clear_failed">Не удалось очистить журнал событий VPN</string>
     <string name="about_title">О приложении</string>
     <string name="about_version">Версия %1$s</string>
+    <string name="about_version_code">Код версии Android %1$s</string>
     <string name="about_build">Номер сборки %1$s</string>
+    <string name="about_local_build">Локальная сборка %1$s</string>
+    <string name="about_git_commit">Коммит Git %1$s</string>
+    <string name="about_local_changes">В сборку включены незакоммиченные изменения.</string>
     <string name="about_unknown">неизвестно</string>
     <string name="about_github">Проект на GitHub</string>
     <string name="about_licenses">Лицензии</string>

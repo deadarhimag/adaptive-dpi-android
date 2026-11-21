@@ -2,6 +2,7 @@ package org.adaptivedpi.android.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -25,11 +26,23 @@ internal fun AboutScreen() {
         }.getOrNull()
     }
     val unknown = stringResource(R.string.about_unknown)
+    val revision = stringResource(R.string.build_git_revision).takeUnless { it == "unknown" }?.take(12)
+    val modified = stringResource(R.string.build_git_modified) == "true"
+    val buildNumber = stringResource(R.string.build_number)
 
     AdaptivePanel {
         Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
         Text(stringResource(R.string.about_version, info?.versionName ?: unknown))
-        Text(stringResource(R.string.about_build, info?.longVersionCode?.toString() ?: unknown))
+        val versionCode = info?.longVersionCode?.toString() ?: unknown
+        Text(stringResource(R.string.about_version_code, versionCode))
+        Text(
+            if (buildNumber == "local") stringResource(R.string.about_local_build, versionCode)
+            else stringResource(R.string.about_build, buildNumber),
+        )
+        SelectionContainer {
+            Text(stringResource(R.string.about_git_commit, revision ?: unknown))
+        }
+        if (modified) Text(stringResource(R.string.about_local_changes))
         OutlinedButton(
             onClick = {
                 runCatching { uriHandler.openUri(PROJECT_URL) }

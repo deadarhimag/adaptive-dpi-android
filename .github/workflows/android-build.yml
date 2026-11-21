@@ -33,18 +33,67 @@ jobs:
       - name: Подготовить Gradle Wrapper
         run: chmod +x ./gradlew
 
+      - name: Подготовить постоянную подпись для сборок main
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$DEBUG_KEYSTORE_BASE64" ]]; then
+            echo 'Постоянный ключ debug не настроен. APK может не обновить предыдущую сборку поверх установленной.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          umask 077
+          android_dir="${ANDROID_USER_HOME:-$HOME/.android}"
+          mkdir -p "$android_dir"
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$android_dir/debug.keystore"
+
       - name: Запустить модульные тесты
         run: ./gradlew testDebugUnitTest :engine:test
 
       - name: Собрать debug APK
-        run: ./gradlew assembleDebug
+        run: ./gradlew :app:assembleDebug
 
       - name: Проверить Android-код и собрать инструментальные тесты
         run: ./gradlew :app:lintDebug :app:assembleDebugAndroidTest
 
+      - name: Проверить экран диагностики на Android
+        timeout-minutes: 12
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin"
+          image='system-images;android-34;default;x86_64'
+          "$sdk/sdkmanager" "emulator" "platform-tools" "$image"
+          sudo chown "$(id -u)" /dev/kvm
+          printf 'no\n' | "$sdk/avdmanager" create avd --name diagnostics-ci --package "$image" --device pixel_7
+          adb="$ANDROID_HOME/platform-tools/adb"
+          "$ANDROID_HOME/emulator/emulator" -avd diagnostics-ci -no-window -no-audio \
+            -no-boot-anim -no-snapshot -gpu swiftshader_indirect > "$RUNNER_TEMP/diagnostics-emulator.log" 2>&1 &
+          emulator_pid=$!
+          trap 'kill "$emulator_pid" 2>/dev/null || true' EXIT
+          if ! timeout 300 bash -c 'until [[ "$("$1" shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" == 1 ]]; do sleep 2; done' bash "$adb"; then
+            tail -60 "$RUNNER_TEMP/diagnostics-emulator.log"
+            exit 1
+          fi
+          "$adb" shell input keyevent 82
+          ./gradlew :app:connectedDebugAndroidTest \
+            -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest
+
+      - name: Проверить содержимое APK и создать сведения о сборке
+        id: apk
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -c core.fileMode=false status --porcelain)"
+          build_number="$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+          artifact_name="adaptive-dpi-android-debug-${GITHUB_SHA:0:12}-$build_number"
+          output_dir="$RUNNER_TEMP/adaptive-dpi-artifact"
+          bash .github/scripts/verify-debug-apk.sh app/build/outputs/apk/debug/app-debug.apk \
+            "$ANDROID_HOME/build-tools/35.0.0" "$GITHUB_SHA" "$build_number" "$output_dir/$artifact_name.apk"
+          echo "name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "directory=$output_dir" >> "$GITHUB_OUTPUT"
+          cat "$output_dir/build-info.txt" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Загрузить APK
         uses: actions/upload-artifact@v7
         with:
-          name: adaptive-dpi-android-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.directory }}
           if-no-files-found: error
