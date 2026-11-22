@@ -1,7 +1,8 @@
 package org.adaptivedpi.android
 
+import android.app.Activity
+import android.app.Instrumentation
 import android.content.Intent
-import android.content.IntentFilter
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
@@ -22,6 +23,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
 
 class BuildAndDiagnosticsUiTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
@@ -70,8 +72,15 @@ class BuildAndDiagnosticsUiTest {
             compose.onAllNodes(label and isEnabled()).fetchSemanticsNodes().size == 1
         }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val saveMonitor = instrumentation.addMonitor(IntentFilter(Intent.ACTION_CREATE_DOCUMENT), null, true)
-        val shareMonitor = instrumentation.addMonitor(IntentFilter(Intent.ACTION_CHOOSER), null, true)
+        val launches = ConcurrentLinkedQueue<Intent>()
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_CREATE_DOCUMENT && intent.action != Intent.ACTION_CHOOSER) return null
+                launches.add(Intent(intent))
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(monitor)
         val cache = File(compose.activity.cacheDir, "diagnostic-reports")
         val existingFiles = cache.list().orEmpty().toSet()
         try {
@@ -81,22 +90,27 @@ class BuildAndDiagnosticsUiTest {
             compose.onNodeWithText(string(R.string.diagnostic_share)).assertIsDisplayed()
             compose.onNodeWithText(string(R.string.cancel)).performClick()
             compose.onNodeWithText(string(R.string.diagnostic_save)).assertDoesNotExist()
-            assertEquals(0, saveMonitor.hits)
-            assertEquals(0, shareMonitor.hits)
+            assertTrue(launches.isEmpty())
             assertTrue(cache.list().orEmpty().all { it in existingFiles })
 
             export.performClick()
             compose.onNodeWithText(string(R.string.diagnostic_save)).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) { saveMonitor.hits == 1 }
+            compose.waitUntil(timeoutMillis = 5_000) { launches.isNotEmpty() }
+            val save = launches.remove()
+            assertEquals(Intent.ACTION_CREATE_DOCUMENT, save.action)
+            assertEquals("text/plain", save.type)
+            assertEquals(DiagnosticExports.TRANSPORT_FILE_NAME, save.getStringExtra(Intent.EXTRA_TITLE))
             compose.onNodeWithText(string(R.string.diagnostic_save)).assertDoesNotExist()
 
             export.performClick()
             compose.onNodeWithText(string(R.string.diagnostic_share)).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) { shareMonitor.hits == 1 }
+            compose.waitUntil(timeoutMillis = 5_000) { launches.isNotEmpty() }
+            val share = launches.remove()
+            assertEquals(Intent.ACTION_CHOOSER, share.action)
+            assertEquals("content", checkNotNull(share.clipData).getItemAt(0).uri.scheme)
             compose.onNodeWithText(string(R.string.diagnostic_share)).assertDoesNotExist()
         } finally {
-            instrumentation.removeMonitor(saveMonitor)
-            instrumentation.removeMonitor(shareMonitor)
+            instrumentation.removeMonitor(monitor)
         }
     }
 
