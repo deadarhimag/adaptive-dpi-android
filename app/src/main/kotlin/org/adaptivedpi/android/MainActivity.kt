@@ -14,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -26,6 +27,8 @@ import kotlinx.coroutines.withContext
 import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.ui.AdaptiveDpiApp
+import org.adaptivedpi.android.ui.VpnSwitchDialog
+import org.adaptivedpi.android.vpn.VpnAvailability
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
@@ -39,6 +42,8 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     private val settings by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private val themeMode = mutableStateOf(ThemeMode.System)
+    private val vpnAvailability = mutableStateOf(VpnAvailability.Unknown)
+    private val pendingVpnSwitch = mutableStateOf<VpnSelection?>(null)
     private var pendingConsentId: String? = null
     private var pendingTransportTarget: String? = null
     private var pendingTransportApplication: String? = null
@@ -102,6 +107,9 @@ class MainActivity : ComponentActivity() {
         pendingConsentId = savedInstanceState?.getString(PENDING_VPN_CONSENT)
         pendingTransportTarget = savedInstanceState?.getString("pending_transport_target")
         pendingTransportApplication = savedInstanceState?.getString("pending_transport_application")
+        savedInstanceState?.getBundle(PENDING_VPN_SWITCH)?.let {
+            pendingVpnSwitch.value = VpnSelection(it.getString(SWITCH_TARGET), it.getString(SWITCH_APPLICATION))
+        }
         pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)
         savedInstanceState?.getString(PREVIOUS_PROCESS)?.let(VpnController::activityRestored)
         diagnosticRequest.value = if (savedInstanceState == null) {
@@ -120,8 +128,11 @@ class MainActivity : ComponentActivity() {
             SideEffect { updateSystemBars(useDarkTheme) }
 
             AdaptiveDpiTheme(mode) {
+                val vpnState = VpnController.state.collectAsStateWithLifecycle().value
+                LaunchedEffect(vpnState) { refreshVpnAvailability() }
                 AdaptiveDpiApp(
-                    vpnState = VpnController.state.collectAsStateWithLifecycle().value,
+                    vpnState = vpnState,
+                    vpnAvailability = vpnAvailability.value,
                     themeMode = mode,
                     diagnosticEvents = VpnDiagnostics.events.collectAsStateWithLifecycle().value,
                     diagnosticRequest = diagnosticRequest.value,
@@ -134,9 +145,9 @@ class MainActivity : ComponentActivity() {
                     onBuildCombinedReport = ::buildCombinedReport,
                     onSaveCombinedReport = ::saveCombinedReport,
                     onShareCombinedReport = { shareReport(DiagnosticExports.COMBINED_FILE_NAME, it) },
-                    onStartVpn = { startVpn() },
-                    onStartTransport = { startVpn(it) },
-                    onStartApplicationTransport = { startVpn(application = it) },
+                    onStartVpn = { requestVpnStart() },
+                    onStartTransport = { requestVpnStart(it) },
+                    onStartApplicationTransport = { requestVpnStart(application = it) },
                     transport = VpnController.transport.collectAsStateWithLifecycle().value,
                     transportJournal = TransportDiagnostics.state.collectAsStateWithLifecycle().value,
                     onSaveTransportJournal = { createTransportDocument.launch("adaptive-dpi-transport.txt") },
@@ -145,6 +156,17 @@ class MainActivity : ComponentActivity() {
                     onThemeChange = ::saveTheme,
                     onNotificationSettings = ::openNotificationSettings,
                 )
+                if (pendingVpnSwitch.value != null && vpnState.canStart) {
+                    VpnSwitchDialog(
+                        restricted = vpnAvailability.value == VpnAvailability.Restricted,
+                        onSwitch = ::confirmVpnSwitch,
+                        onVpnSettings = {
+                            pendingVpnSwitch.value = null
+                            openVpnSettings()
+                        },
+                        onDismiss = { pendingVpnSwitch.value = null },
+                    )
+                }
             }
         }
     }
@@ -153,6 +175,12 @@ class MainActivity : ComponentActivity() {
         outState.putString(PENDING_VPN_CONSENT, pendingConsentId)
         outState.putString("pending_transport_target", pendingTransportTarget)
         outState.putString("pending_transport_application", pendingTransportApplication)
+        pendingVpnSwitch.value?.let { selection ->
+            outState.putBundle(PENDING_VPN_SWITCH, Bundle().apply {
+                putString(SWITCH_TARGET, selection.target)
+                putString(SWITCH_APPLICATION, selection.application)
+            })
+        }
         outState.putString(PENDING_REPORT_ID, pendingReportId)
         outState.putString(PREVIOUS_PROCESS, VpnController.processIdentity)
         outState.putString(PENDING_DIAGNOSTIC_REQUEST, diagnosticRequest.value?.toString())
@@ -162,6 +190,11 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         VpnDiagnostics.prune()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshVpnAvailability()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -175,7 +208,26 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun startVpn(target: String? = null, application: String? = null) {
+    private fun refreshVpnAvailability(): VpnAvailability = VpnController.availability(this).also {
+        vpnAvailability.value = it
+    }
+
+    private fun requestVpnStart(target: String? = null, application: String? = null) {
+        if (!VpnController.state.value.canStart || pendingVpnSwitch.value != null) return
+        when (refreshVpnAvailability()) {
+            VpnAvailability.OtherVpn, VpnAvailability.Restricted -> pendingVpnSwitch.value = VpnSelection(target, application)
+            else -> startVpn(target, application)
+        }
+    }
+
+    private fun confirmVpnSwitch() {
+        val selection = pendingVpnSwitch.value ?: return
+        if (refreshVpnAvailability() == VpnAvailability.Restricted) return
+        pendingVpnSwitch.value = null
+        startVpn(selection.target, selection.application)
+    }
+
+    private fun startVpn(target: String?, application: String?) {
         val request = VpnController.requestStart(this, target, application)
         if (request != null) {
             pendingConsentId = request.id
@@ -290,12 +342,17 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val PENDING_VPN_CONSENT = "pending_vpn_consent"
+        private const val PENDING_VPN_SWITCH = "pending_vpn_switch"
+        private const val SWITCH_TARGET = "target"
+        private const val SWITCH_APPLICATION = "application"
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
         private const val COMBINED_REPORT_ID = "combined"
         private const val PREVIOUS_PROCESS = "previous_process"
         private const val PENDING_DIAGNOSTIC_REQUEST = "pending_diagnostic_request"
     }
+
+    private data class VpnSelection(val target: String?, val application: String?)
 }
 
 internal class PendingDiagnosticExport : ViewModel() {

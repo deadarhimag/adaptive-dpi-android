@@ -37,6 +37,14 @@
     <string name="vpn_failed">VPN отключён из-за ошибки</string>
     <string name="vpn_test_scope">Проверочный сеанс использует системный слот VPN. Трафик других приложений идёт по обычной сети.</string>
     <string name="vpn_start">Запустить проверочный сеанс</string>
+    <string name="vpn_switch_title">Обнаружен другой VPN</string>
+    <string name="vpn_switch_message">Для подключения Adaptive DPI может потребоваться переключить активное VPN-подключение.</string>
+    <string name="vpn_switch_confirm">Переключиться</string>
+    <string name="vpn_switch_settings">Настройки VPN</string>
+    <string name="vpn_switch_cancel">Отмена</string>
+    <string name="vpn_switch_restricted_title">Настройка VPN ограничена</string>
+    <string name="vpn_switch_restricted_message">Android ограничивает настройку VPN для этого профиля. Проверьте настройки VPN. На управляемом устройстве может потребоваться помощь администратора.</string>
+    <string name="vpn_switch_consent_hint">Для подключения нужно разрешение Android. Если система не предложила подтверждение, проверьте параметры «Постоянная VPN» и «Блокировать подключения без VPN» в настройках VPN. Пока другой VPN закреплён системой, переключение может быть недоступно.</string>
     <string name="vpn_stop">Остановить VPN</string>
     <string name="vpn_stop_help_title">Отключение VPN через Android</string>
     <string name="vpn_stop_help">Если VPN не останавливается, откройте Настройки → Сеть и интернет → VPN. Выберите adaptive-dpi-android и нажмите «Отключить». При системной блокировке подключений без VPN интернет может остаться недоступным.</string>

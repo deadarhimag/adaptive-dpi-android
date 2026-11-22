@@ -41,6 +41,7 @@ import org.adaptivedpi.android.R
 import org.adaptivedpi.android.designsystem.AdaptivePanel
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.VpnAvailability
 import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.ExperimentalApplication
@@ -54,6 +55,7 @@ private enum class Screen { Home, Settings, Diagnostics, About }
 @Composable
 internal fun AdaptiveDpiApp(
     vpnState: VpnState,
+    vpnAvailability: VpnAvailability,
     themeMode: ThemeMode,
     diagnosticEvents: List<DiagnosticEvent>,
     diagnosticRequest: UUID?,
@@ -99,6 +101,7 @@ internal fun AdaptiveDpiApp(
                 Screen.Home -> ScreenContent(R.string.app_name) {
                     HomeScreen(
                         vpnState = vpnState,
+                        vpnAvailability = vpnAvailability,
                         onStartVpn = onStartVpn,
                         onStartTransport = onStartTransport,
                         onStartApplicationTransport = onStartApplicationTransport,
@@ -118,6 +121,7 @@ internal fun AdaptiveDpiApp(
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
                     DiagnosticsScreen(vpnState, transport)
+                    VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
                     TransportJournalPanel(transportJournal, onSaveTransportJournal)
                     VpnStopHelp(onVpnSettings)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
@@ -183,6 +187,7 @@ private fun ScreenContent(
 @Composable
 private fun HomeScreen(
     vpnState: VpnState,
+    vpnAvailability: VpnAvailability,
     onStartVpn: () -> Unit,
     onStartTransport: (String) -> Unit,
     onStartApplicationTransport: (String) -> Unit,
@@ -216,6 +221,8 @@ private fun HomeScreen(
             Text(stringResource(if (canStop) R.string.vpn_stop else R.string.vpn_start))
         }
     }
+
+    VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
 
     if (vpnState == VpnState.Stopping || vpnState == VpnState.Failed || vpnState == VpnState.StartFailed) {
         VpnStopHelp(onVpnSettings)

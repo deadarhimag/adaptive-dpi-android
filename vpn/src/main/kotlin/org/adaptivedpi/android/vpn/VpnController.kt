@@ -25,6 +25,10 @@ object VpnController {
         lifecycle.activityRestored(previousProcessIdentity == processId)
     }
 
+    fun availability(context: Context): VpnAvailability = runCatching {
+        observeVpnAvailability(context, state.value)
+    }.getOrDefault(VpnAvailability.Unknown)
+
     // Запросы Activity и события службы обрабатываются в главном потоке.
     fun requestStart(context: Context, target: String? = null, applicationPackage: String? = null): VpnConsentRequest? {
         require(target == null || applicationPackage == null)
@@ -61,6 +65,7 @@ object VpnController {
 
         lifecycle.permissionResult(id, VpnEventType.PermissionGranted)
         try {
+            // После диалога Android право могло уже перейти другому приложению.
             if (VpnService.prepare(context) == null) {
                 start(context, id, target, applicationPackage)
             } else {

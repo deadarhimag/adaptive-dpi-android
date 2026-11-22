@@ -1,6 +1,7 @@
 package org.adaptivedpi.android
 
 import android.view.KeyEvent
+import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
@@ -9,6 +10,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.platform.app.InstrumentationRegistry
+import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
+import org.adaptivedpi.android.designsystem.ThemeMode
+import org.adaptivedpi.android.ui.VpnSwitchDialog
 import org.junit.Rule
 import org.junit.Test
 
@@ -52,6 +56,47 @@ class BuildAndDiagnosticsUiTest {
         compose.onNodeWithText(activity.getString(R.string.about_version, info.versionName)).assertIsDisplayed()
         compose.onNodeWithText(expectedBuild).assertIsDisplayed()
         compose.onNodeWithText(activity.getString(R.string.about_git_commit, expectedCommit)).assertIsDisplayed()
+    }
+
+    @Test
+    fun anotherVpnDialogOffersThreeIndependentActions() {
+        val actions = mutableListOf<String>()
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                AdaptiveDpiTheme(ThemeMode.System) {
+                    VpnSwitchDialog(
+                        restricted = false,
+                        onSwitch = { actions += "switch" },
+                        onVpnSettings = { actions += "settings" },
+                        onDismiss = { actions += "cancel" },
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText(string(R.string.vpn_switch_title)).assertIsDisplayed()
+        compose.onNodeWithText(string(R.string.vpn_switch_cancel)).performClick()
+        compose.onNodeWithText(string(R.string.vpn_switch_settings)).performClick()
+        compose.onNodeWithText(string(R.string.vpn_switch_confirm)).performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(listOf("cancel", "settings", "switch"), actions) }
+    }
+
+    @Test
+    fun configurationRestrictionOffersSettingsWithoutSwitching() {
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                AdaptiveDpiTheme(ThemeMode.System) {
+                    VpnSwitchDialog(
+                        restricted = true,
+                        onSwitch = { error("VPN ограничен системой") },
+                        onVpnSettings = {},
+                        onDismiss = {},
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText(string(R.string.vpn_switch_restricted_title)).assertIsDisplayed()
+        compose.onNodeWithText(string(R.string.vpn_switch_settings)).assertIsDisplayed()
+        compose.onNodeWithText(string(R.string.vpn_switch_confirm)).assertDoesNotExist()
     }
 
     private fun string(id: Int): String = compose.activity.getString(id)

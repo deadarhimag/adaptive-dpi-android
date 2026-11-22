@@ -135,6 +135,32 @@ class VpnLifecycleTest {
         assertTrue(lifecycle.isAwaitingConsent("next"))
     }
 
+    @Test
+    fun declinedSwitchCannotAttachAServiceAndRetryUsesASeparateSession() {
+        val lifecycle = VpnLifecycle()
+        assertTrue(lifecycle.beginConsent("declined"))
+        lifecycle.update("declined", VpnEvent.ConsentDenied)
+        assertEquals(VpnState.ConsentDenied, lifecycle.state.value)
+        assertFalse(lifecycle.attachService("declined") { error("Android не выдал разрешение") })
+
+        assertTrue(lifecycle.beginConsent("confirmed"))
+        assertFalse(lifecycle.beginConsent("duplicate"))
+        lifecycle.update("declined", VpnEvent.StartRequested)
+        assertTrue(lifecycle.isAwaitingConsent("confirmed"))
+        lifecycle.update("confirmed", VpnEvent.StartRequested)
+        assertTrue(lifecycle.attachService("confirmed") {})
+        assertFalse(lifecycle.beginConsent("duplicate"))
+        lifecycle.update("confirmed", VpnEvent.TransportTunCreated)
+        lifecycle.update("confirmed", VpnEvent.EngineConfirmed)
+        assertEquals(VpnState.EngineRunning, lifecycle.state.value)
+
+        lifecycle.update("confirmed", VpnEvent.StopRequested)
+        assertFalse(lifecycle.beginConsent("afterRevocation"))
+        lifecycle.serviceEnded("confirmed", VpnEvent.SystemConsentRevoked)
+        assertEquals(VpnState.ConsentRevoked, lifecycle.state.value)
+        assertTrue(lifecycle.beginConsent("afterRevocation"))
+    }
+
     private fun VpnLifecycle.start(id: String, stop: () -> Unit) {
         assertTrue(beginConsent(id))
         update(id, VpnEvent.StartRequested)
