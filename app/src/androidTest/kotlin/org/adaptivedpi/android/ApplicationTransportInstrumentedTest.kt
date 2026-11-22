@@ -12,9 +12,11 @@ import android.util.Log
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
 import org.junit.Assert.assertEquals
@@ -32,7 +34,7 @@ class ApplicationTransportInstrumentedTest {
     private val probePackage = instrumentation.context.packageName
 
     @Test
-    fun separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions() {
+    fun separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions() = runBlocking {
         val arguments = InstrumentationRegistry.getArguments()
         val target = arguments.getString("transportTarget")
         val certificate = arguments.getString("transportCertificate")
@@ -41,9 +43,8 @@ class ApplicationTransportInstrumentedTest {
             assertNotNull("Требуется публичный тестовый сертификат HTTPS", certificate)
         }
         assumeTrue("Нужен стенд с HTTPS", target != null && certificate != null)
-        val before = queryProbe()
+        val before = awaitProbeNetwork(vpn = false)
         assertNotEquals("Проверка должна идти из отдельного пакета с другим UID", Process.myUid(), before.getInt("uid"))
-        assertFalse("До теста пакет не должен использовать VPN", before.getBoolean("vpn"))
 
         ActivityScenario.launch(TransportTestActivity::class.java).use { scenario ->
             repeat(2) { index ->
@@ -56,6 +57,7 @@ class ApplicationTransportInstrumentedTest {
                     }
                     awaitState(VpnState.EngineRunning)
                     assertVpnPackageScope()
+                    awaitProbeNetwork(vpn = true)
                     val result = queryProbe(target, certificate)
                     assertEquals(before.getInt("uid"), result.getInt("uid"))
                     assertTrue("Тестовый пакет должен использовать VPN", result.getBoolean("vpn"))
@@ -65,18 +67,16 @@ class ApplicationTransportInstrumentedTest {
                     for (protocol in listOf("tcp", "udp", "dns", "https")) {
                         assertTrue("Отдельное приложение не получило ответ $protocol", result.getBoolean(protocol))
                     }
-                    runBlocking {
-                        withTimeout(8_000) {
-                            VpnController.transport.first { stats ->
-                                stats != null && stats.applicationMode && stats.transferred &&
-                                    stats.openedTcp >= 2 && stats.openedUdp >= 2
-                            }
+                    withTimeout(8_000) {
+                        VpnController.transport.first { stats ->
+                            stats != null && stats.applicationMode && stats.transferred &&
+                                stats.openedTcp >= 2 && stats.openedUdp >= 2
                         }
                     }
                     Log.i(TAG, "Сеанс ${index + 1}: отдельный UID подтвердил TCP, UDP, DNS/UDP и содержимое HTTPS")
                 } finally {
                     instrumentation.runOnMainSync { VpnController.stop() }
-                    runBlocking { withTimeout(20_000) { VpnController.state.first { it.canStart } } }
+                    withTimeout(20_000) { VpnController.state.first { it.canStart } }
                 }
                 assertEquals(VpnState.Idle, VpnController.state.value)
                 val stopped = checkNotNull(VpnController.transport.value)
@@ -84,7 +84,7 @@ class ApplicationTransportInstrumentedTest {
                 assertEquals(0, stopped.connections)
                 assertEquals(stopped.openedTcp, stopped.closedTcp)
                 assertEquals(stopped.openedUdp, stopped.closedUdp)
-                assertFalse("VPN-маршрут пакета должен быть снят", queryProbe().getBoolean("vpn"))
+                awaitProbeNetwork(vpn = false)
                 Log.i(TAG, "Сеанс ${index + 1}: маршрут пакета снят, TCP и UDP закрыты")
             }
         }
@@ -96,7 +96,20 @@ class ApplicationTransportInstrumentedTest {
         assertFalse(checkNotNull(connectivity.getNetworkCapabilities(active)).hasTransport(NetworkCapabilities.TRANSPORT_VPN))
     }
 
-    private fun queryProbe(target: String? = null, certificate: String? = null): Bundle = runBlocking {
+    private suspend fun awaitProbeNetwork(vpn: Boolean): Bundle {
+        val actual = withTimeoutOrNull(8_000) {
+            var result = queryProbe()
+            while (!result.getBoolean("network") || result.getBoolean("vpn") != vpn) {
+                delay(100)
+                result = queryProbe()
+            }
+            result
+        }
+        val expected = if (vpn) "VPN" else "физическая сеть"
+        return checkNotNull(actual) { "Отдельному приложению не стала доступна ожидаемая сеть ($expected)" }
+    }
+
+    private suspend fun queryProbe(target: String? = null, certificate: String? = null): Bundle {
         val response = CompletableDeferred<Pair<Int, Bundle>>()
         val reply = object : ResultReceiver(null) {
             override fun onReceiveResult(resultCode: Int, resultData: Bundle) {
@@ -110,10 +123,10 @@ class ApplicationTransportInstrumentedTest {
         app.sendBroadcast(intent)
         val (code, result) = withTimeout(20_000) { response.await() }
         assertEquals("Проверка отдельным приложением: ${result.getString("error")}", 0, code)
-        result
+        return result
     }
 
-    private fun awaitState(expected: VpnState) = runBlocking {
+    private suspend fun awaitState(expected: VpnState) {
         withTimeout(20_000) {
             val state = VpnController.state.first {
                 it == expected || it == VpnState.Failed || it == VpnState.StartFailed || it == VpnState.ConsentRevoked

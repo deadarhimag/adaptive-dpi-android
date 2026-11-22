@@ -68,7 +68,7 @@ jobs:
           ./gradlew --no-daemon --no-configuration-cache testDebugUnitTest :engine:test
           ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:assembleDebugAndroidTest
 
-      - name: Проверить Compose и TCP, UDP, DNS через Android TUN
+      - name: Проверить Compose и TCP, UDP, DNS, HTTPS через Android TUN
         id: device_tests
         timeout-minutes: 15
         env:

@@ -97,7 +97,7 @@ done
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 "$adb" -s "$serial" shell appops set org.adaptivedpi.android ACTIVATE_VPN allow
 fixture_log="$log_dir/fixture.log"
-# 10.0.2.2 в госте — адрес loopback хоста. VPN направляет только этот /32.
+# 10.0.2.2 в госте — адрес loopback хоста для обоих сценариев TUN.
 tls_dir=$(mktemp -d "$RUNNER_TEMP/transport-tls.XXXXXX")
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=10.0.2.2' \
   -addext 'subjectAltName=IP:10.0.2.2' -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \

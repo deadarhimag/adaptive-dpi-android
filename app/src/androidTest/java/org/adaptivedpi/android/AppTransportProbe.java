@@ -69,7 +69,9 @@ public final class AppTransportProbe extends BroadcastReceiver {
         Network network = manager.getActiveNetwork();
         if (network == null) return;
         NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
-        result.putBoolean("vpn", capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN));
+        if (capabilities == null) return;
+        result.putBoolean("network", true);
+        result.putBoolean("vpn", capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN));
         LinkProperties link = manager.getLinkProperties(network);
         if (link == null) return;
         result.putBoolean("ipv4Default", link.getRoutes().stream().anyMatch(route ->
