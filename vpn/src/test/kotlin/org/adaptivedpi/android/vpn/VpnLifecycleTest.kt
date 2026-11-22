@@ -39,6 +39,20 @@ class VpnLifecycleTest {
     }
 
     @Test
+    fun runningTestSessionRejectsTransportStartUntilItStops() {
+        val lifecycle = VpnLifecycle()
+        lifecycle.start("manual") {}
+
+        assertFalse(lifecycle.beginConsent("transport"))
+        lifecycle.update("transport", VpnEvent.TransportTunCreated)
+        assertEquals(VpnState.TestSessionRunning, lifecycle.state.value)
+
+        lifecycle.stop()
+        lifecycle.serviceEnded("manual", VpnEvent.ServiceDestroyed)
+        assertTrue(lifecycle.beginConsent("transport"))
+    }
+
+    @Test
     fun staleStopAndCleanupLeaveNewSessionIntact() {
         val lifecycle = VpnLifecycle()
         lifecycle.start("first") {}

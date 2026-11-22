@@ -35,9 +35,16 @@ function Find-Adb {
 
 function Invoke-Device {
     param([string[]]$ArgumentList)
-    $result = & $adb -s $selected @ArgumentList 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Ошибка ADB ($($ArgumentList[0])): $($result -join ' ')"
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $result = & $adb -s $selected @ArgumentList 2>&1 | ForEach-Object { $_.ToString() }
+        $adbExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($adbExitCode -ne 0) {
+        throw "Ошибка ADB ($($ArgumentList[0]), код $adbExitCode): $($result -join ' ')"
     }
     return $result
 }
@@ -171,7 +178,8 @@ try {
     if ($installTests) { Invoke-Device @('install', '--user', $userId, '-r', '-t', $testApk) | Write-Host }
     if (-not $installApp -and -not $installTests) { Write-Host 'Оба APK уже установлены.' }
 
-    Write-Host 'Разблокируйте Pixel 7. Если появится системный запрос на VPN, нажмите «ОК». Ожидание до двух минут.'
+    Write-Host 'Разблокируйте Pixel 7. Тест сам запустит оба VPN-сеанса. Подтвердите только системный запрос VPN, если он появится.'
+    Write-Host 'Согласие ожидается до двух минут. Кнопку «Запустить проверочный сеанс» нажимать не нужно.'
     $captureAndroidLog = $true
     $testLog = Join-Path $logs 'instrumentation.log'
     $testErrors = Join-Path $logs 'instrumentation-errors.log'

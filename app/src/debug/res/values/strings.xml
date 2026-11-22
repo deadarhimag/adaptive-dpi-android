@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transport_test_instruction">Идёт проверка VPN. Сеансы запускаются автоматически. Если Android запросит разрешение на VPN, нажмите «ОК».</string>
+</resources>

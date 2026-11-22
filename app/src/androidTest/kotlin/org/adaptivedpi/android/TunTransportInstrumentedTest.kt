@@ -1,5 +1,6 @@
 package org.adaptivedpi.android
 
+import android.app.Activity
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.NetworkCapabilities
@@ -10,10 +11,13 @@ import android.os.Bundle
 import android.util.Log
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.VpnController
@@ -41,32 +45,40 @@ class TunTransportInstrumentedTest {
     fun tcpUdpAndDnsTraverseTunAcrossTwoSessions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val arguments = InstrumentationRegistry.getArguments()
-        val target = arguments.getString("transportTarget")
+        val targetArg = arguments.getString("transportTarget")
         if (arguments.getString("requireTransportFixture") == "true") {
-            assertNotNull("Нужно передать transportTarget", target)
+            assertNotNull("Нужно передать transportTarget", targetArg)
         }
-        assumeTrue("Нужен локальный стенд и аргумент transportTarget", target != null)
-        val ip = checkNotNull(ExperimentalTarget.parse(checkNotNull(target)))
+        assumeTrue("Нужен локальный стенд и аргумент transportTarget", targetArg != null)
+        val target = checkNotNull(targetArg)
+        val ip = checkNotNull(ExperimentalTarget.parse(target))
         val connectivity = checkNotNull(instrumentation.targetContext.getSystemService(ConnectivityManager::class.java))
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            if (arguments.getString("waitForVpnConsent") == "true") {
-                scenario.onActivity { activity -> VpnService.prepare(activity)?.let { activity.startActivity(it) } }
-                runBlocking {
-                    withTimeout(120_000) {
-                        while (VpnService.prepare(instrumentation.targetContext) != null) delay(400)
-                    }
-                }
-            }
-            assertNull("Сначала требуется системное согласие VPN", VpnService.prepare(instrumentation.targetContext))
+        ActivityScenario.launch(TransportTestActivity::class.java).use { scenario ->
+            prepareVpn(scenario, arguments.getString("waitForVpnConsent") == "true")
+            reportPhase("Проверка маршрута и доступности стенда до VPN")
             awaitRouteRemoval(connectivity, ip)
             exchangeAll(ip) { protocol, sent, received ->
                 Log.i(TAG, "Стенд доступен до VPN: $protocol $sent/$received байт")
             }
             repeat(2) { index ->
+                val session = "Сеанс ${index + 1}"
+                var ownsSession = false
                 var failure: Throwable? = null
                 try {
-                    scenario.onActivity { assertNull(VpnController.requestStart(it, target)) }
-                    awaitState(VpnState.EngineRunning)
+                    scenario.onActivity { activity ->
+                        requireIdle()
+                        reportPhase("$session: запрашиваю запуск транспорта")
+                        val consent = VpnController.requestStart(activity, target)
+                        if (consent != null) {
+                            VpnController.abandonConsent(consent.id)
+                            error("$session: VPN-разрешение отозвано перед запуском. Повторите тест.")
+                        }
+                        assertEquals("$session: контроллер не принял запуск. ${vpnDetails()}", VpnState.Starting, VpnController.state.value)
+                        ownsSession = true
+                    }
+                    val started = awaitTransition("$session: запуск", VpnState.Starting, VpnState.TransportStarting)
+                    assertEquals("$session: ожидался EngineRunning. ${vpnDetails()}", VpnState.EngineRunning, started)
+                    reportPhase("$session: движок запущен, проверяю маршрут TUN")
                     assertOnlyFixtureRoute(connectivity, ip)
                     var before = snapshot()
                     assertTrue(before.running)
@@ -80,28 +92,76 @@ class TunTransportInstrumentedTest {
                     assertTrue(before.transferred)
                 } catch (error: Throwable) {
                     failure = error
-                    val eventTypes = VpnEventHistory.state.value.entries.take(12).joinToString(", ") { it.type.name }
-                    Log.w(TAG, "Сбой в состоянии ${VpnController.state.value}, события VPN: $eventTypes")
+                    Log.w(TAG, "$session: ${error.javaClass.simpleName}. ${vpnDetails()}")
                     throw error
                 } finally {
-                    try {
-                        scenario.onActivity { VpnController.stop() }
-                        runBlocking { withTimeout(20_000) { VpnController.state.first { it.canStart } } }
-                        awaitRouteRemoval(connectivity, ip)
-                        if (failure == null) {
-                            assertEquals(VpnState.Idle, VpnController.state.value)
-                            assertFalse(snapshot().running)
-                            assertEquals(0, snapshot().connections)
-                            Log.i(TAG, "Сеанс ${index + 1}: маршрут снят, активных соединений 0")
-                            reportProgress("session${index + 1}=closed")
+                    if (ownsSession) {
+                        try {
+                            reportPhase("$session: запрашиваю остановку")
+                            instrumentation.runOnMainSync { VpnController.stop() }
+                            val stopped = awaitTransition("$session: остановка", VpnState.Stopping)
+                            awaitRouteRemoval(connectivity, ip)
+                            if (failure == null) {
+                                assertEquals("$session: не завершён штатно. ${vpnDetails()}", VpnState.Idle, stopped)
+                                assertFalse(snapshot().running)
+                                assertEquals(0, snapshot().connections)
+                                reportPhase("$session: маршрут снят, активных соединений 0")
+                                reportProgress("session${index + 1}=closed")
+                            }
+                        } catch (cleanup: Throwable) {
+                            Log.w(TAG, "$session: ошибка остановки ${cleanup.javaClass.simpleName}. ${vpnDetails()}")
+                            if (failure == null) throw cleanup
+                            failure.addSuppressed(cleanup)
                         }
-                    } catch (cleanup: Throwable) {
-                        if (failure == null) throw cleanup
-                        failure.addSuppressed(cleanup)
                     }
                 }
             }
         }
+    }
+
+    private fun prepareVpn(scenario: ActivityScenario<TransportTestActivity>, waitForConsent: Boolean) {
+        var consentResult: StateFlow<Int?>? = null
+        scenario.onActivity { activity ->
+            requireIdle()
+            val request = VpnService.prepare(activity)
+            if (request == null) {
+                reportPhase("Разрешение VPN уже выдано")
+            } else {
+                check(waitForConsent) { "Требуется системное согласие VPN. ${vpnDetails()}" }
+                reportPhase("Открываю системный запрос на разрешение VPN")
+                consentResult = activity.consentResult
+                activity.launchConsent(request)
+            }
+        }
+        consentResult?.let { result ->
+            val code = runBlocking { withTimeoutOrNull(120_000) { result.filterNotNull().first() } }
+            check(code != null) { "За две минуты не получен ответ на системный запрос VPN. ${vpnDetails()}" }
+            reportPhase("Получен результат системного запроса VPN, код $code")
+            assertEquals("Системное разрешение VPN не подтверждено. ${vpnDetails()}", Activity.RESULT_OK, code)
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { assertNull("Разрешение VPN недоступно после подтверждения", VpnService.prepare(it)) }
+        }
+    }
+
+    private fun requireIdle() {
+        check(VpnController.state.value == VpnState.Idle) {
+            "Занят контроллер VPN. Остановите действующий сеанс перед тестом. ${vpnDetails()}"
+        }
+    }
+
+    private fun reportPhase(message: String) {
+        val status = "$message. Состояние VPN: ${VpnController.state.value}"
+        Log.i(TAG, status)
+        InstrumentationRegistry.getInstrumentation().sendStatus(2, Bundle().apply {
+            putString("transportPhase", status)
+        })
+    }
+
+    private fun vpnDetails(): String {
+        val events = VpnEventHistory.state.value.entries.take(12).joinToString(", ") {
+            listOfNotNull(it.type.name, it.state?.name, it.code?.name).joinToString("/")
+        }
+        return "Состояние VPN: ${VpnController.state.value}. События VPN: $events"
     }
 
     private fun reportProgress(value: String) {
@@ -197,8 +257,13 @@ class TunTransportInstrumentedTest {
         }
     }
 
-    private fun awaitState(expected: VpnState) = runBlocking {
-        withTimeout(20_000) { VpnController.state.first { it == expected } }
+    private fun awaitTransition(phase: String, vararg pending: VpnState): VpnState = runBlocking {
+        withTimeoutOrNull(20_000) {
+            VpnController.state.first { state ->
+                reportPhase("$phase, переход $state")
+                state !in pending
+            }
+        } ?: error("$phase: переход не завершён за 20 секунд. ${vpnDetails()}")
     }
 
     private companion object {
