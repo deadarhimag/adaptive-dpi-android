@@ -4,7 +4,9 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <lwip/init.h>
 #include <hev-task-system.h>
@@ -20,20 +22,65 @@ static jlong owner;
 static bool ready;
 static bool stopping;
 
-/* Задачи HEV исполняются на потоке JNI, запустившем цикл. */
-static _Thread_local JNIEnv *fault_env;
-static _Thread_local jobject fault_observer;
-static _Thread_local jmethodID fault_method;
+/* Рабочие задачи HEV используют отдельные стеки. Отсюда нельзя вызывать JNI. */
+enum { FAULT_LIMIT = 16, FAULT_FIELDS = 8, FAULT_CATEGORIES = 6 };
+enum { FAULT_HEV_INIT, FAULT_INTERNAL, FAULT_TUN_IO, FAULT_CANCELLED, FAULT_BACKPRESSURE, FAULT_LIMITED };
+static pthread_mutex_t fault_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int fault_state;
+static _Atomic jlong fault_dropped[FAULT_CATEGORIES];
+static _Atomic jlong fault_last_drop;
+static jlong faults[FAULT_LIMIT][FAULT_FIELDS];
+static size_t fault_count;
+
+static int fault_category(int phase, int result, int err)
+{
+    switch (phase) {
+    case ADAPTIVE_HEV_LOOP: return FAULT_INTERNAL;
+    case ADAPTIVE_TUN_READ: return result == -2 ? FAULT_CANCELLED : FAULT_TUN_IO;
+    case ADAPTIVE_TUN_WRITE:
+        return err == EAGAIN || err == ENOBUFS || err == ENOMEM ? FAULT_BACKPRESSURE : FAULT_TUN_IO;
+    case ADAPTIVE_TUN_BUFFER: return FAULT_LIMITED;
+    default: return FAULT_HEV_INIT;
+    }
+}
 
 void adaptive_transport_fault(int phase, int result, int native_errno)
 {
     int saved_errno = errno;
-    if (fault_env && fault_method) {
-        (*fault_env)->CallVoidMethod(fault_env, fault_observer, fault_method, phase, result, native_errno);
-        // Диагностика не влияет на возврат и состояние рабочего цикла.
-        if ((*fault_env)->ExceptionCheck(fault_env))
-            (*fault_env)->ExceptionClear(fault_env);
+    struct timespec now = { 0 };
+    clock_gettime(CLOCK_REALTIME, &now);
+    jlong millis = (jlong)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    int category = fault_category(phase, result, native_errno);
+    int state = atomic_load(&fault_state);
+    if (pthread_mutex_trylock(&fault_lock) == 0) {
+        for (size_t i = 0; i < fault_count; i++) {
+            jlong *entry = faults[i];
+            if (entry[0] == phase && entry[1] == result && entry[2] == native_errno && entry[4] == state) {
+                entry[5]++;
+                if (millis < entry[6]) entry[6] = millis;
+                if (millis > entry[7]) entry[7] = millis;
+                pthread_mutex_unlock(&fault_lock);
+                errno = saved_errno;
+                return;
+            }
+        }
+        if (fault_count < FAULT_LIMIT) {
+            jlong *entry = faults[fault_count++];
+            entry[0] = phase;
+            entry[1] = result;
+            entry[2] = native_errno;
+            entry[3] = category;
+            entry[4] = state;
+            entry[5] = 1;
+            entry[6] = entry[7] = millis;
+            pthread_mutex_unlock(&fault_lock);
+            errno = saved_errno;
+            return;
+        }
+        pthread_mutex_unlock(&fault_lock);
     }
+    atomic_store(&fault_last_drop, millis);
+    atomic_fetch_add(&fault_dropped[category], 1);
     errno = saved_errno;
 }
 
@@ -44,28 +91,68 @@ static void log_phase(const char *phase, int result)
 }
 
 JNIEXPORT jboolean JNICALL
-Java_org_adaptivedpi_android_vpn_HevBridge_reserve(JNIEnv *env, jobject instance, jlong token)
+Java_org_adaptivedpi_android_vpn_HevBridge_reserve(JNIEnv *env, jobject instance, jlong token, jint state)
 {
     pthread_mutex_lock(&lock);
     bool accepted = owner == 0;
     if (accepted) {
         owner = token;
         stopping = false;
+        fault_count = 0;
+        atomic_store(&fault_state, state);
+        atomic_store(&fault_last_drop, 0);
+        for (size_t i = 0; i < FAULT_CATEGORIES; i++) atomic_store(&fault_dropped[i], 0);
     }
     pthread_mutex_unlock(&lock);
     return accepted;
 }
 
 JNIEXPORT void JNICALL
-Java_org_adaptivedpi_android_vpn_HevBridge_stop(JNIEnv *env, jobject instance, jlong token)
+Java_org_adaptivedpi_android_vpn_HevBridge_stop(JNIEnv *env, jobject instance, jlong token, jint state)
 {
     pthread_mutex_lock(&lock);
     if (owner == token && !stopping) {
+        atomic_store(&fault_state, state);
         stopping = true;
         if (ready)
             hev_socks5_tunnel_stop();
     }
     pthread_mutex_unlock(&lock);
+}
+
+JNIEXPORT void JNICALL
+Java_org_adaptivedpi_android_vpn_HevBridge_setFaultState(JNIEnv *env, jobject instance, jlong token, jint state)
+{
+    pthread_mutex_lock(&lock);
+    if (owner == token && !stopping) atomic_store(&fault_state, state);
+    pthread_mutex_unlock(&lock);
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_org_adaptivedpi_android_vpn_HevBridge_takeFaults(JNIEnv *env, jobject instance, jlong token)
+{
+    jlong values[1 + FAULT_CATEGORIES + FAULT_LIMIT * FAULT_FIELDS];
+    size_t length = 1 + FAULT_CATEGORIES;
+    pthread_mutex_lock(&lock);
+    if (owner != token || pthread_mutex_trylock(&fault_lock) != 0) {
+        pthread_mutex_unlock(&lock);
+        return NULL;
+    }
+    bool any = fault_count != 0;
+    for (size_t i = 0; i < FAULT_CATEGORIES; i++) {
+        values[1 + i] = atomic_exchange(&fault_dropped[i], 0);
+        any = any || values[1 + i] != 0;
+    }
+    values[0] = atomic_load(&fault_last_drop);
+    for (size_t i = 0; i < fault_count; i++)
+        for (size_t field = 0; field < FAULT_FIELDS; field++) values[length++] = faults[i][field];
+    fault_count = 0;
+    pthread_mutex_unlock(&fault_lock);
+    pthread_mutex_unlock(&lock);
+    if (!any) return NULL;
+    jlongArray output = (*env)->NewLongArray(env, (jsize)length);
+    if (output) (*env)->SetLongArrayRegion(env, output, 0, (jsize)length, values);
+    return output;
 }
 
 JNIEXPORT void JNICALL
@@ -101,7 +188,9 @@ Java_org_adaptivedpi_android_vpn_HevBridge_counters(JNIEnv *env, jobject instanc
     return result;
 }
 
-static int run_tunnel(JNIEnv *env, jlong token, jbyteArray config, jint fd)
+JNIEXPORT jint JNICALL
+Java_org_adaptivedpi_android_vpn_HevBridge_run(JNIEnv *env, jobject instance, jlong token,
+                                            jbyteArray config, jint fd)
 {
     jbyte *bytes = (*env)->GetByteArrayElements(env, config, NULL);
     if (!bytes) {
@@ -167,25 +256,5 @@ socks_logger:
     hev_socks5_logger_fini();
 logger:
     hev_logger_fini();
-    return result;
-}
-
-JNIEXPORT jint JNICALL
-Java_org_adaptivedpi_android_vpn_HevBridge_run(JNIEnv *env, jobject instance, jlong token,
-                                             jbyteArray config, jint fd, jobject observer)
-{
-    jclass type = (*env)->GetObjectClass(env, observer);
-    if (type) {
-        fault_method = (*env)->GetMethodID(env, type, "report", "(III)V");
-        (*env)->DeleteLocalRef(env, type);
-    }
-    if ((*env)->ExceptionCheck(env))
-        (*env)->ExceptionClear(env);
-    fault_env = env;
-    fault_observer = observer;
-    int result = run_tunnel(env, token, config, fd);
-    fault_env = NULL;
-    fault_observer = NULL;
-    fault_method = NULL;
     return result;
 }

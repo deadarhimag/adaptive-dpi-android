@@ -131,7 +131,7 @@ def apk_info(name, badging):
 
 app = apk_info("app-debug.apk", app_info)
 test = apk_info("app-debug-androidTest.apk", test_info)
-if build != "local" and app["versionCode"] != 2 + int(build.split(".")[0]):
+if build != "local" and app["versionCode"] != max(16, 1 + int(build.split(".")[0])):
     sys.exit("В APK указан неверный versionCode для этого запуска CI.")
 test.update(targetPackage=app["package"], runner="androidx.test.runner.AndroidJUnitRunner")
 print(json.dumps({"commit": commit, "build": build, "certificateSha256": certificate,

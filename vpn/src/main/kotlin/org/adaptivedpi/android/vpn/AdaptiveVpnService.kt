@@ -267,6 +267,7 @@ class AdaptiveVpnService : VpnService() {
         if (stats.running && !transportConfirmed) {
             transportConfirmed = true
             VpnController.engineConfirmed(id)
+            engine.stateChanged(VpnController.state.value)
             recordTransportEvent(VpnEventType.TransportStarted)
         }
         if (stats.transferred && !trafficConfirmed) {

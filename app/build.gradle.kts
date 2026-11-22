@@ -23,7 +23,7 @@ fun requiredCiVariable(name: String): String =
         ?: throw GradleException("Для подписи debug APK в GitHub Actions требуется $name.")
 
 val ciRun = if (githubActions) {
-    requiredCiVariable("GITHUB_RUN_NUMBER").toIntOrNull()?.takeIf { it in 1..2_099_999_998 }
+    requiredCiVariable("GITHUB_RUN_NUMBER").toIntOrNull()?.takeIf { it in 1..2_099_999_999 }
         ?: throw GradleException("Некорректный GITHUB_RUN_NUMBER для versionCode.")
 } else null
 val buildNumber = if (ciRun != null) {
@@ -75,8 +75,8 @@ android {
 
 if (ciRun != null) {
     androidComponents.onVariants(androidComponents.selector().withBuildType("debug")) { variant ->
-        // У повторной попытки того же запуска код сохраняется.
-        variant.outputs.forEach { it.versionCode.set(2 + ciRun) }
+        // Запуск №14 отменён до публикации. С №15 код версии продолжает ряд 15, 16, 17.
+        variant.outputs.forEach { it.versionCode.set(maxOf(16, 1 + ciRun)) }
     }
 }
 

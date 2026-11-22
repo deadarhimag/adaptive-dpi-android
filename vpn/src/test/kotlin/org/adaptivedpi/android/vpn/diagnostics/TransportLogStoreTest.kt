@@ -32,7 +32,7 @@ class TransportLogStoreTest {
         assertTrue(store.bytes <= 5L * 1024 * 1024)
         assertEquals(5, directory.listFiles().orEmpty().count { it.name.startsWith("transport-log-") })
         assertTrue(directory.listFiles().orEmpty().all { it.length() <= 1024L * 1024 })
-        assertEquals(500, store.entries.size + 2 * TransportJournal.PENDING_LIMIT)
+        assertEquals(500, store.entries.size + 2 * TransportJournal.PENDING_LIMIT + 2 * TransportJournal.NATIVE_LIMIT)
 
         val recovered = TransportLogStore(directory)
         assertEquals(store.storedRecords, recovered.storedRecords)

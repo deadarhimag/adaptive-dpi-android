@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
 
 object ExperimentalTarget {
     fun parse(value: String): Inet4Address? {
@@ -55,9 +56,11 @@ data class TransportSnapshot(
 
 internal object HevBridge {
     init { System.loadLibrary("adaptive-hev") }
-    external fun reserve(token: Long): Boolean
-    external fun run(token: Long, config: ByteArray, fd: Int, observer: NativeTransportObserver): Int
-    external fun stop(token: Long)
+    external fun reserve(token: Long, state: Int): Boolean
+    external fun run(token: Long, config: ByteArray, fd: Int): Int
+    external fun stop(token: Long, state: Int)
+    external fun setFaultState(token: Long, state: Int)
+    external fun takeFaults(token: Long): LongArray?
     external fun release(token: Long)
     external fun isReady(token: Long): Boolean
     external fun counters(token: Long): LongArray
@@ -75,7 +78,8 @@ internal class ExperimentalTransport(
     private val stopping = AtomicBoolean()
     private val sessionLimit = if (target == null) 32 else 16
     private val failures = diagnostics.reporter()
-    private val observer = NativeTransportObserver(failures)
+    private val observer = NativeTransportObserver(diagnostics)
+    private val drainLock = ReentrantLock()
     private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000, failures = failures)
     private val relay: HevLoopbackRelay
     val finished = CompletableDeferred<Unit>()
@@ -83,7 +87,9 @@ internal class ExperimentalTransport(
         private set
 
     init {
-        if (!HevBridge.reserve(token)) throw TransportSocketException(TransportCode.HEV_RESERVE, TransportCategory.HEV_INIT)
+        if (!HevBridge.reserve(token, VpnController.state.value.ordinal)) {
+            throw TransportSocketException(TransportCode.HEV_RESERVE, TransportCategory.HEV_INIT)
+        }
         try {
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
             relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, onFailure)
@@ -101,7 +107,7 @@ internal class ExperimentalTransport(
                 try {
                     val config = config().toByteArray(Charsets.UTF_8)
                     try {
-                        val result = HevBridge.run(token, config, tunnel.fd, observer)
+                        val result = HevBridge.run(token, config, tunnel.fd)
                         failure = result < 0 || !stopping.get()
                         if (result >= 0 && failure) failures.record(TransportFailure(
                             NATIVE_RUN, TransportCategory.INTERNAL, TransportCode.UNEXPECTED_EXIT, result = result,
@@ -126,12 +132,13 @@ internal class ExperimentalTransport(
 
     fun stop() {
         if (stopping.compareAndSet(false, true)) {
-            HevBridge.stop(token)
+            HevBridge.stop(token, VpnController.state.value.ordinal)
             relay.close()
         }
     }
 
     fun snapshot(): TransportSnapshot {
+        drainFaults()
         val counters = HevBridge.counters(token)
         val stats = outbound.statistics()
         return TransportSnapshot(
@@ -141,8 +148,20 @@ internal class ExperimentalTransport(
         )
     }
 
+    fun stateChanged(state: VpnState) = HevBridge.setFaultState(token, state.ordinal)
+
+    private fun drainFaults(final: Boolean = false) {
+        if (final) drainLock.lock() else if (!drainLock.tryLock()) return
+        try {
+            HevBridge.takeFaults(token)?.let(observer::accept)
+        } finally {
+            drainLock.unlock()
+        }
+    }
+
     private fun finish(): Boolean {
         try {
+            runCatching { drainFaults(final = true) }
             tunClosed = runCatching(tunnel::close).onFailure {
                 failures.recordError(TUN_CLOSE, it, fallback = TransportCategory.CLEANUP)
             }.isSuccess

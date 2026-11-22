@@ -58,13 +58,30 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     val total get() = operations.get()
 
     fun record(state: VpnState, failure: TransportFailure, millis: Long = System.currentTimeMillis()) {
-        counts.incrementAndGet(failure.category.ordinal)
-        operations.incrementAndGet()
-        last.accumulateAndGet(millis, ::maxOf)
-        journal?.offer(this, state, failure, millis)
+        recordBatch(state, failure, millis, millis, 1)
     }
 
-    fun merge() { merged.incrementAndGet() }
+    fun recordBatch(state: VpnState, failure: TransportFailure, first: Long, end: Long, count: Long) {
+        incrementCounts(failure.category, end, count)
+        journal?.let {
+            merge(count - 1)
+            it.offer(this, state, failure, first, end, count)
+        }
+    }
+
+    fun recordDropped(category: TransportCategory, end: Long, count: Long) {
+        incrementCounts(category, end, count)
+        drop(count)
+        journal?.requestFlush()
+    }
+
+    private fun incrementCounts(category: TransportCategory, end: Long, count: Long) {
+        counts.addAndGet(category.ordinal, count)
+        operations.addAndGet(count)
+        last.accumulateAndGet(end, ::maxOf)
+    }
+
+    fun merge(count: Long) { if (count > 0) merged.addAndGet(count) }
     fun drop(count: Long = 1) { dropped.addAndGet(count) }
 
     fun finish() {
@@ -91,7 +108,7 @@ internal class TransportJournal(
     private val storeFactory: () -> TransportLogStore,
 ) {
     private data class Key(val session: UUID, val state: VpnState, val failure: TransportFailure)
-    private data class Bucket(val session: TransportSessionDiagnostics, var first: Long, var last: Long, var repeats: Long = 1)
+    private data class Bucket(val session: TransportSessionDiagnostics, var first: Long, var last: Long, var repeats: Long)
     private val pendingLock = ReentrantLock()
     private val pending = LinkedHashMap<Key, Bucket>()
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -115,36 +132,38 @@ internal class TransportJournal(
 
     fun useSession(session: TransportSessionDiagnostics) {
         selected.set(session)
-        wake.trySend(Unit)
+        requestFlush()
     }
 
     fun completed(session: TransportSessionDiagnostics) {
         completed.set(session)
-        wake.trySend(Unit)
+        requestFlush()
     }
 
-    fun offer(session: TransportSessionDiagnostics, state: VpnState, failure: TransportFailure, millis: Long) {
+    fun requestFlush() { wake.trySend(Unit) }
+
+    fun offer(session: TransportSessionDiagnostics, state: VpnState, failure: TransportFailure, first: Long, last: Long, count: Long) {
         if (!pendingLock.tryLock()) {
-            session.drop()
+            session.drop(count)
         } else {
             try {
                 val key = Key(session.id, state, failure)
                 val bucket = pending[key]
                 when {
                     bucket != null -> {
-                        bucket.repeats++
-                        bucket.first = minOf(bucket.first, millis)
-                        bucket.last = maxOf(bucket.last, millis)
-                        session.merge()
+                        bucket.repeats += count
+                        bucket.first = minOf(bucket.first, first)
+                        bucket.last = maxOf(bucket.last, last)
+                        session.merge(1)
                     }
-                    pending.size < PENDING_LIMIT -> pending[key] = Bucket(session, millis, millis)
-                    else -> session.drop()
+                    pending.size < PENDING_LIMIT -> pending[key] = Bucket(session, first, last, count)
+                    else -> session.drop(count)
                 }
             } finally {
                 pendingLock.unlock()
             }
         }
-        wake.trySend(Unit)
+        requestFlush()
     }
 
     suspend fun flush() = io.withLock { flushLocked() }
@@ -202,7 +221,8 @@ internal class TransportJournal(
     companion object {
         const val MAX_RAM_RECORDS = 500
         const val PENDING_LIMIT = 64
-        // Два набора по 64 записи предназначены для приёма и одновременно записываемого пакета.
-        const val VISIBLE_LIMIT = MAX_RAM_RECORDS - 2 * PENDING_LIMIT
+        const val NATIVE_LIMIT = 16
+        // Каждый слой может принимать новые записи, пока его предыдущий пакет обрабатывается.
+        const val VISIBLE_LIMIT = MAX_RAM_RECORDS - 2 * PENDING_LIMIT - 2 * NATIVE_LIMIT
     }
 }
