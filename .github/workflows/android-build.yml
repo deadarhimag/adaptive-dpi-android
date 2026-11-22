@@ -13,6 +13,12 @@ jobs:
   debug:
     runs-on: ubuntu-24.04
     steps:
+      - name: Проверить источник pull request для подписанной сборки
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo '::error::Подписанный debug APK собирается только в доверенных ветках репозитория. В workflow из форка ключ подписи недоступен.'
+          exit 1
+
       - name: Получить исходники
         uses: actions/checkout@v5
         with:
@@ -24,6 +30,14 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+
+      - name: Проверить параметры постоянной подписи debug APK
+        env:
+          ANDROID_CI_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_CI_DEBUG_KEYSTORE_BASE64 }}
+          ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}
+          ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
+          ANDROID_CI_DEBUG_CERT_SHA256: ${{ vars.ANDROID_CI_DEBUG_CERT_SHA256 }}
+        run: bash .github/scripts/prepare-ci-debug-signing.sh
 
       - name: Подготовить Android SDK
         run: |
@@ -46,32 +60,20 @@ jobs:
       - name: Подготовить Gradle Wrapper
         run: chmod +x ./gradlew
 
-      - name: Подготовить постоянную подпись для сборок main
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - name: Запустить модульные тесты, lint и сборку APK
         env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+          ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}
+          ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
         run: |
-          if [[ -z "$DEBUG_KEYSTORE_BASE64" ]]; then
-            echo 'Постоянный ключ debug не настроен. APK может не обновить предыдущую сборку поверх установленной.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          umask 077
-          android_dir="${ANDROID_USER_HOME:-$HOME/.android}"
-          mkdir -p "$android_dir"
-          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$android_dir/debug.keystore"
-
-      - name: Запустить модульные тесты
-        run: ./gradlew testDebugUnitTest :engine:test
-
-      - name: Собрать debug APK
-        run: ./gradlew :app:assembleDebug
-
-      - name: Проверить Android-код и собрать инструментальные тесты
-        run: ./gradlew :app:lintDebug :app:assembleDebugAndroidTest
+          ./gradlew --no-daemon --no-configuration-cache testDebugUnitTest :engine:test
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:assembleDebugAndroidTest
 
       - name: Проверить Compose и TCP, UDP, DNS через Android TUN
         id: device_tests
         timeout-minutes: 15
+        env:
+          ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}
+          ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
         run: bash .github/scripts/test-diagnostics-on-emulator.sh
 
       - name: Сохранить диагностику сбоя Android-тестов
@@ -92,15 +94,24 @@ jobs:
           build_number="$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           artifact_name="adaptive-dpi-android-debug-${GITHUB_SHA:0:12}-$build_number"
           output_dir="$RUNNER_TEMP/adaptive-dpi-artifact"
-          bash .github/scripts/verify-debug-apk.sh app/build/outputs/apk/debug/app-debug.apk \
-            "$ANDROID_HOME/build-tools/35.0.0" "$GITHUB_SHA" "$build_number" "$output_dir/$artifact_name.apk"
+          CI_TESTS_VERIFIED=true bash .github/scripts/verify-debug-apk.sh \
+            app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+            "$ANDROID_HOME/build-tools/35.0.0" "$GITHUB_SHA" "$build_number" "$output_dir"
+          cp scripts/test-pixel7.ps1 scripts/transport-fixture.py scripts/apk-certificate.py \
+            docs/PIXEL7_TESTING_RU.md "$output_dir/"
           echo "name=$artifact_name" >> "$GITHUB_OUTPUT"
           echo "directory=$output_dir" >> "$GITHUB_OUTPUT"
           cat "$output_dir/build-info.txt" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Загрузить APK
+      - name: Загрузить APK приложения, Android-тесты и скрипт для Pixel 7
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.apk.outputs.name }}
           path: ${{ steps.apk.outputs.directory }}
           if-no-files-found: error
+
+      - name: Удалить временный CI debug keystore
+        if: always() && env.ANDROID_CI_DEBUG_KEYSTORE_PATH != ''
+        run: |
+          rm -f -- "$ANDROID_CI_DEBUG_KEYSTORE_PATH"
+          rmdir -- "$(dirname "$ANDROID_CI_DEBUG_KEYSTORE_PATH")"

@@ -33,11 +33,29 @@ Debug APK появится в `app/build/outputs/apk/debug/app-debug.apk`. От�
 
 ## Сборка в GitHub Actions
 
-Workflow [«Сборка Android»](.github/workflows/android-build.yml) запускается при push в `main`, при pull request и вручную через **Run workflow**. После успешных тестов и сборки откройте в репозитории **Actions → Сборка Android → нужный запуск → Artifacts**. Имя архива и APK включает короткий коммит и номер запуска с номером попытки, например `adaptive-dpi-android-debug-e6d85bee6c19-2.1`. В `build-info.txt` указаны полный коммит, версия пакета, сертификат подписи и SHA-256 APK. На телефоне проверьте коммит и номер в **Настройки → О приложении**. [Скачивание артефактов в GitHub](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+Workflow [«Сборка Android»](.github/workflows/android-build.yml) запускается при push в `main`, при pull request и вручную через **Run workflow**. После успешных тестов и сборки откройте в репозитории **Actions → Сборка Android → нужный запуск → Artifacts**. В архиве `adaptive-dpi-android-debug-<коммит>-<запуск>.<попытка>` лежат `app-debug.apk`, `app-debug-androidTest.apk`, сведения о сборке и скрипт тестирования Pixel 7. На телефоне проверьте коммит и номер в **Настройки → О приложении**. [Инструкция для Pixel 7](docs/PIXEL7_TESTING_RU.md) · [Скачивание артефактов в GitHub](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
 
 Для обновления поверх установленной версии Android требует совпадения пакета и сертификата подписи. Сравните поле «certificate SHA-256 digest» из сведений о новой сборке с результатом `apksigner verify --print-certs` для установленного APK. Путь к установленному файлу можно получить командой `adb shell pm path org.adaptivedpi.android` и скопировать `base.apk` командой `adb pull`. Это не затрагивает данные приложения. [Правила обновления Android](https://developer.android.com/google/play/app-updates)
 
-Для последовательных CI-сборок `main` можно настроить один debug-ключ в секрете GitHub Actions `ANDROID_DEBUG_KEYSTORE_BASE64`. Секрет содержит Base64 существующего debug-keystore со стандартным псевдонимом `androiddebugkey` и стандартными паролями Android Debug. Для обновления уже установленного приложения нужен ключ, которым оно подписано. При отсутствии секрета runner подписывает APK своим debug-ключом. Сведения о сертификате каждой сборки доступны в `build-info.txt`. [Подпись Android-приложений](https://developer.android.com/studio/publish/app-signing)
+### Однократная настройка подписи CI debug
+
+Создайте отдельный ключ только для CI debug. На Windows запустите команду из PowerShell с JDK в `PATH`. Введите два собственных пароля в приглашениях `keytool`. Сохраните keystore и пароли в своём защищённом хранилище для последующих обновлений.
+
+```powershell
+$ciKeystore = Join-Path $env:USERPROFILE 'adaptive-dpi-ci-debug.jks'
+keytool -genkeypair -storetype JKS -keystore $ciKeystore -alias adaptive-dpi-ci-debug -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=adaptive-dpi-android CI Debug'
+```
+
+В GitHub откройте **Settings → Secrets and variables → Actions → Secrets**. Создайте `ANDROID_CI_DEBUG_STORE_PASSWORD` и `ANDROID_CI_DEBUG_KEY_PASSWORD` с паролями хранилища и ключа. Чтобы загрузить `ANDROID_CI_DEBUG_KEYSTORE_BASE64` без вывода секретного значения в терминал, используйте авторизованный [GitHub CLI](https://cli.github.com/):
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes($ciKeystore)) | gh secret set ANDROID_CI_DEBUG_KEYSTORE_BASE64 --repo deadarhimag/adaptive-dpi-android
+keytool -list -v -storetype JKS -keystore $ciKeystore -alias adaptive-dpi-ci-debug
+```
+
+Во вкладке **Variables** создайте `ANDROID_CI_DEBUG_CERT_SHA256` со значением строки SHA-256 сертификата из `keytool` (двоеточия и любой регистр допустимы). Workflow проверяет оба пароля и отпечаток до сборки, а затем сверяет подпись готового APK. Сборки pull request из форка завершаются с явным сообщением о недоступности подписи. Локальный Gradle продолжает использовать стандартный debug-ключ. [Настройка GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets) · [Подпись Android-приложений](https://developer.android.com/studio/publish/app-signing)
+
+Для CI debug `versionCode` равен `2 + GITHUB_RUN_NUMBER`. Повторная попытка одного запуска сохраняет код, следующий отдельный запуск увеличивает его. Проверьте два APK из последовательных запусков командой `apksigner verify --print-certs` или по `build-info.txt`. Отпечатки должны совпасть с переменной, а код второй сборки должен быть выше. APK со старым сертификатом потребует однократной переустановки. [Номера запусков GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/variables) · [Версии Android-приложения](https://developer.android.com/studio/publish/versioning)
 
 ## Модули
 

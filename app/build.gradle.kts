@@ -16,10 +16,23 @@ fun gitOutput(vararg arguments: String): String = runCatching {
 val gitRevision = gitOutput("rev-parse", "HEAD").takeIf { it.matches(Regex("[0-9a-f]{40}")) }
 val hasLocalChanges = gitRevision != null &&
     gitOutput("-c", "core.fileMode=false", "status", "--porcelain").isNotEmpty()
-val buildNumber = listOf("GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT")
-    .map { providers.environmentVariable(it).orNull }
-    .takeIf { parts -> parts.all { it != null && it.matches(Regex("[1-9][0-9]*")) } }
-    ?.joinToString(".") ?: "local"
+val githubActions = providers.environmentVariable("GITHUB_ACTIONS").orNull == "true"
+
+fun requiredCiVariable(name: String): String =
+    providers.environmentVariable(name).orNull?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException("Для подписи debug APK в GitHub Actions требуется $name.")
+
+val ciRun = if (githubActions) {
+    requiredCiVariable("GITHUB_RUN_NUMBER").toIntOrNull()?.takeIf { it in 1..2_099_999_998 }
+        ?: throw GradleException("Некорректный GITHUB_RUN_NUMBER для versionCode.")
+} else null
+val buildNumber = if (ciRun != null) {
+    val attempt = requiredCiVariable("GITHUB_RUN_ATTEMPT")
+    if (!attempt.matches(Regex("[1-9][0-9]*"))) {
+        throw GradleException("Некорректный GITHUB_RUN_ATTEMPT.")
+    }
+    "$ciRun.$attempt"
+} else "local"
 
 android {
     namespace = "org.adaptivedpi.android"
@@ -41,9 +54,29 @@ android {
         compose = true
     }
 
+    if (githubActions) {
+        val ciDebug = signingConfigs.create("ciDebug") {
+            storeFile = file(requiredCiVariable("ANDROID_CI_DEBUG_KEYSTORE_PATH")).also {
+                if (!it.isFile) throw GradleException("Файл CI debug keystore недоступен.")
+            }
+            storeType = "JKS"
+            storePassword = requiredCiVariable("ANDROID_CI_DEBUG_STORE_PASSWORD")
+            keyAlias = "adaptive-dpi-ci-debug"
+            keyPassword = requiredCiVariable("ANDROID_CI_DEBUG_KEY_PASSWORD")
+        }
+        buildTypes.getByName("debug").signingConfig = ciDebug
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+if (ciRun != null) {
+    androidComponents.onVariants(androidComponents.selector().withBuildType("debug")) { variant ->
+        // У повторной попытки того же запуска код сохраняется.
+        variant.outputs.forEach { it.versionCode.set(2 + ciRun) }
     }
 }
 

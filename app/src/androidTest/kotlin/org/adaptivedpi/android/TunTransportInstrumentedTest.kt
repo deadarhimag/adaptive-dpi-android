@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import android.net.RouteInfo
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
@@ -42,13 +43,21 @@ class TunTransportInstrumentedTest {
         val arguments = InstrumentationRegistry.getArguments()
         val target = arguments.getString("transportTarget")
         if (arguments.getString("requireTransportFixture") == "true") {
-            assertNotNull("CI обязан передать transportTarget", target)
+            assertNotNull("Нужно передать transportTarget", target)
         }
         assumeTrue("Нужен локальный стенд и аргумент transportTarget", target != null)
         val ip = checkNotNull(ExperimentalTarget.parse(checkNotNull(target)))
         val connectivity = checkNotNull(instrumentation.targetContext.getSystemService(ConnectivityManager::class.java))
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            scenario.onActivity { assertNull("Сначала требуется системное согласие VPN", VpnService.prepare(it)) }
+            if (arguments.getString("waitForVpnConsent") == "true") {
+                scenario.onActivity { activity -> VpnService.prepare(activity)?.let { activity.startActivity(it) } }
+                runBlocking {
+                    withTimeout(120_000) {
+                        while (VpnService.prepare(instrumentation.targetContext) != null) delay(400)
+                    }
+                }
+            }
+            assertNull("Сначала требуется системное согласие VPN", VpnService.prepare(instrumentation.targetContext))
             awaitRouteRemoval(connectivity, ip)
             exchangeAll(ip) { protocol, sent, received ->
                 Log.i(TAG, "Стенд доступен до VPN: $protocol $sent/$received байт")
@@ -65,6 +74,7 @@ class TunTransportInstrumentedTest {
                         val after = verifyTunAdvanced(before, sent, received)
                         Log.i(TAG, "Сеанс ${index + 1}: $protocol $sent/$received байт, TUN " +
                             "+${after.tunSentPackets - before.tunSentPackets}/+${after.tunReceivedPackets - before.tunReceivedPackets}")
+                        reportProgress("session${index + 1}=$protocol:$sent/$received")
                         before = after
                     }
                     assertTrue(before.transferred)
@@ -83,6 +93,7 @@ class TunTransportInstrumentedTest {
                             assertFalse(snapshot().running)
                             assertEquals(0, snapshot().connections)
                             Log.i(TAG, "Сеанс ${index + 1}: маршрут снят, активных соединений 0")
+                            reportProgress("session${index + 1}=closed")
                         }
                     } catch (cleanup: Throwable) {
                         if (failure == null) throw cleanup
@@ -91,6 +102,12 @@ class TunTransportInstrumentedTest {
                 }
             }
         }
+    }
+
+    private fun reportProgress(value: String) {
+        InstrumentationRegistry.getInstrumentation().sendStatus(2, Bundle().apply {
+            putString("transportProgress", value)
+        })
     }
 
     private fun exchangeAll(ip: InetAddress, verified: (String, Int, Int) -> Unit) {

@@ -104,7 +104,7 @@ if ! grep -qx ready "$fixture_log"; then
   cat "$fixture_log" >&2
   fail "Локальный стенд TCP/UDP/DNS не запустился."
 fi
-ANDROID_SERIAL="$serial" ./gradlew :app:connectedDebugAndroidTest \
+ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest,org.adaptivedpi.android.TunTransportInstrumentedTest \
   -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
   -Pandroid.testInstrumentationRunnerArguments.requireTransportFixture=true \
