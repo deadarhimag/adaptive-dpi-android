@@ -19,6 +19,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -85,6 +86,18 @@ class ApplicationTransportInstrumentedTest {
                 assertEquals(stopped.openedTcp, stopped.closedTcp)
                 assertEquals(stopped.openedUdp, stopped.closedUdp)
                 awaitProbeNetwork(vpn = false)
+                val sessionId = checkNotNull(stopped.sessionId)
+                val journal = withTimeout(8_000) {
+                    TransportDiagnostics.state.first { view ->
+                        val session = view.session
+                        session != null && session.finished && session.sessionId == sessionId &&
+                            view.entries.any { it.sessionId == sessionId }
+                    }
+                }
+                val summary = checkNotNull(journal.session)
+                assertEquals(stopped.errors, summary.total)
+                assertTrue("Ожидаемые отмены операций при остановке должны быть учтены", summary.expected > 0)
+                Log.i(TAG, "Сеанс ${index + 1}: журнал сохранил итог, отказов ${summary.total}, ожидаемых ${summary.expected}")
                 Log.i(TAG, "Сеанс ${index + 1}: маршрут пакета снят, TCP и UDP закрыты")
             }
         }

@@ -16,6 +16,15 @@
     <string name="vpn_app_transport_package">Имя пакета установленного приложения</string>
     <string name="vpn_app_transport_start">Запустить транспорт приложения</string>
     <string name="vpn_app_transport_connections">Соединения открыто/закрыто. TCP %1$d/%2$d, UDP %3$d/%4$d.</string>
+    <string name="transport_summary">Сводка транспорта</string>
+    <string name="transport_journal">Журнал транспорта</string>
+    <string name="transport_export">Сохранить журнал транспорта</string>
+    <string name="transport_storage">На диске %1$d байт, сохранено записей %2$d.</string>
+    <string name="transport_storage_error">Некоторые записи журнала недоступны.</string>
+    <string name="transport_privacy">TXT содержит время, коды, состояние VPN и счётчики. Адреса, порты и содержимое трафика не записываются.</string>
+    <string name="transport_empty">Записей об отказах транспорта пока нет.</string>
+    <string name="transport_loading">Журнал загружается.</string>
+    <string name="transport_show_more">Показать ещё</string>
     <string name="vpn_transport_initializing">TUN создан. Движок инициализируется</string>
     <string name="vpn_transport_running">Движок запущен. Ожидается передача в обе стороны</string>
     <string name="vpn_transport_transferred">Передача через TUN в обе стороны зафиксирована</string>

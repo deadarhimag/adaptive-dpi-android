@@ -42,7 +42,7 @@ android {
         applicationId = "org.adaptivedpi.android"
         minSdk = libs.versions.android.min.get().toInt()
         targetSdk = libs.versions.android.compile.get().toInt()
-        versionCode = 2
+        versionCode = 16
         versionName = "0.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "build_git_revision", gitRevision ?: "unknown")

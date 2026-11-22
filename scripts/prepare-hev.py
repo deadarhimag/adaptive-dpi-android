@@ -23,6 +23,18 @@ def git(path, *arguments):
     return subprocess.check_output(["git", "-C", str(path), *arguments], text=True).strip()
 
 
+def replace_at(text, before, after, count=1):
+    if text.count(before) != count:
+        raise SystemExit("Не найдено ожидаемое место для наблюдения за TUN в HEV.")
+    return text.replace(before, after)
+
+
+def write_generated(name, text):
+    path = CACHE / name
+    if not path.exists() or path.read_text(encoding="utf-8") != text:
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def main():
     HEV.mkdir(parents=True, exist_ok=True)
     if not (HEV / ".git").exists():
@@ -55,9 +67,25 @@ def main():
         if text.count(declaration) != 1:
             raise SystemExit("Расположение счётчиков HEV изменилось.")
         text = text.replace(declaration, f"static _Atomic size_t stat_{counter};")
-    generated = CACHE / "hev-socks5-tunnel-atomic.c"
-    if not generated.exists() or generated.read_text(encoding="utf-8") != text:
-        generated.write_text(text, encoding="utf-8", newline="\n")
+    text = '#include "transport-diagnostics.h"\n' + replace_at(
+        text, "    s = hev_tunnel_write (tun_fd, p);\n    if (s <= 0) {",
+        "    s = hev_tunnel_write (tun_fd, p);\n    if (s <= 0) {\n"
+        "        adaptive_transport_fault (ADAPTIVE_TUN_WRITE, (int)s, s < 0 ? errno : 0);",
+    )
+    write_generated("hev-socks5-tunnel-atomic.c", text)
+
+    # -1 — errno от read/readv. -2 возвращает yielder при остановке цикла.
+    text = (HEV / "src" / "hev-tunnel-linux.c").read_text(encoding="utf-8")
+    for call in (
+        "    s = hev_task_io_read (fd, buf->payload, buf->len, yielder, yielder_data);",
+        "    s = hev_task_io_readv (fd, iov, iovc, yielder, yielder_data);",
+    ):
+        text = replace_at(text, call, call + "\n    if (s <= 0)\n"
+                          "        adaptive_transport_fault (ADAPTIVE_TUN_READ, (int)s, s == -1 ? errno : 0);")
+    text = replace_at(text, "    if (!buf)\n        return NULL;",
+                      "    if (!buf) {\n        adaptive_transport_fault (ADAPTIVE_TUN_BUFFER, -1, 0);\n"
+                      "        return NULL;\n    }", count=2)
+    write_generated("hev-tunnel-linux-diagnostic.c", '#include "transport-diagnostics.h"\n' + text)
     print(f"HEV и четыре компонента проверены, ревизия {REVISION}.")
 
 

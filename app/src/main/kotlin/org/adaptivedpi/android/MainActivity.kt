@@ -30,6 +30,7 @@ import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.combinedDiagnosticReport
@@ -55,6 +56,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    private val createTransportDocument = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    checkNotNull(contentResolver.openOutputStream(uri, "wt")).bufferedWriter(Charsets.UTF_8).use {
+                        TransportDiagnostics.export(it)
+                    }
+                }
+                Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show()
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                VpnDiagnostics.record(DiagnosticCode.SaveFailed, error)
+            }
+        }
+    }
 
     private val createDiagnosticDocument =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
@@ -119,6 +138,8 @@ class MainActivity : ComponentActivity() {
                     onStartTransport = { startVpn(it) },
                     onStartApplicationTransport = { startVpn(application = it) },
                     transport = VpnController.transport.collectAsStateWithLifecycle().value,
+                    transportJournal = TransportDiagnostics.state.collectAsStateWithLifecycle().value,
+                    onSaveTransportJournal = { createTransportDocument.launch("adaptive-dpi-transport.txt") },
                     onStopVpn = VpnController::stop,
                     onVpnSettings = ::openVpnSettings,
                     onThemeChange = ::saveTheme,
@@ -232,6 +253,7 @@ class MainActivity : ComponentActivity() {
             version, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL,
             VpnController.state.value, VpnEventHistory.state.value, VpnDiagnostics.events.value,
             VpnController.transport.value,
+            TransportDiagnostics.state.value,
         )
     }
 

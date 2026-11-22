@@ -34,6 +34,34 @@ class OutboundTransportTest {
     }
 
     @Test
+    fun closingTransportReportsCancelledDatagramReceiveOnce() {
+        val recorded = mutableListOf<TransportFailure>()
+        val transport = OutboundTransport(failures = TransportFailureReporter(sink = recorded::add))
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            transport.use {
+                it.updateNetwork(localPolicy)
+                udpServer().use { peer ->
+                    val socket = it.connectUdp(loopback, peer.localPort)
+                    val ready = CountDownLatch(1)
+                    val read = executor.submit {
+                        ready.countDown()
+                        assertThrows(SocketException::class.java) { socket.receive(ByteArray(512)) }
+                    }
+                    assertTrue(ready.await(2, TimeUnit.SECONDS))
+                    it.close()
+                    read.get(2, TimeUnit.SECONDS)
+                    assertEquals(1L, it.statistics().failedOperations)
+                    assertEquals(TransportCategory.CANCELLED, recorded.single().category)
+                    assertEquals(TransportOperation.RECEIVE, recorded.single().site.operation)
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun tcpCarriesBytesInBothDirectionsAfterPolicyAndPreservesHalfClose() {
         val request = byteArrayOf(0, 12, -1, 42)
         val response = byteArrayOf(42, -1, 12, 0)

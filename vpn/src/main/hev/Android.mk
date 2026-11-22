@@ -16,10 +16,10 @@ include $(HEV_ROOT)/build.mk
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := adaptive-hev
-LOCAL_SRC_FILES := bridge.c ../../../../.native/hev-socks5-tunnel-atomic.c \
+LOCAL_SRC_FILES := bridge.c ../../../../.native/hev-socks5-tunnel-atomic.c ../../../../.native/hev-tunnel-linux-diagnostic.c \
     $(patsubst $(HEV_ROOT)/%,../../../../.native/hev/%, \
-        $(filter-out $(SRCDIR)/hev-jni.c $(SRCDIR)/hev-socks5-tunnel.c,$(SRCFILES)))
-LOCAL_C_INCLUDES := $(SRCDIR) $(SRCDIR)/misc $(SRCDIR)/core/include \
+        $(filter-out $(SRCDIR)/hev-jni.c $(SRCDIR)/hev-socks5-tunnel.c $(SRCDIR)/hev-tunnel-linux.c,$(SRCFILES)))
+LOCAL_C_INCLUDES := $(ADAPTIVE_PATH) $(SRCDIR) $(SRCDIR)/misc $(SRCDIR)/core/include \
     $(HEV_ROOT)/third-part/yaml/include $(HEV_ROOT)/third-part/lwip/src/include \
     $(HEV_ROOT)/third-part/lwip/src/ports/include $(HEV_ROOT)/third-part/hev-task-system/include
 LOCAL_CFLAGS := -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -fno-stack-clash-protection $(VERSION_CFLAGS)

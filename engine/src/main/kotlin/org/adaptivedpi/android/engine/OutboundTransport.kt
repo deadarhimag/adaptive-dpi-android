@@ -37,11 +37,12 @@ class OutboundTransport(
     private val maxSockets: Int = 64,
     private val connectTimeoutMillis: Int = 5_000,
     private val readTimeoutMillis: Int = 15_000,
+    private val failures: TransportFailureReporter = TransportFailureReporter(),
 ) : Closeable {
     private val lock = Any()
     private val sockets = LinkedHashMap<Closeable, Boolean>()
     private var network: OutboundSocketPolicy? = null
-    private var closed = false
+    @Volatile private var closed = false
     private val sentBytes = AtomicLong()
     private val receivedBytes = AtomicLong()
     private val sentDatagrams = AtomicLong()
@@ -67,22 +68,22 @@ class OutboundTransport(
 
     fun connectTcp(address: InetAddress, port: Int): TcpConnection {
         val endpoint = endpoint(address, port)
-        val socket = open({ Socket(Proxy.NO_PROXY) }) { policy, candidate ->
-            policy.prepare(candidate)
-            candidate.soTimeout = readTimeoutMillis
+        val site = TransportSite(if (port == 53) TransportSubsystem.DNS else TransportSubsystem.TCP, TransportOperation.CONNECT,
+            TransportProtocol.TCP, TransportDirection.OUTBOUND)
+        val socket = open(site, { Socket(Proxy.NO_PROXY) }, OutboundSocketPolicy::prepare) { candidate ->
             candidate.connect(endpoint, connectTimeoutMillis)
         }
-        return TcpConnection(socket)
+        return TcpConnection(socket, site)
     }
 
     fun connectUdp(address: InetAddress, port: Int): UdpConnection {
         val endpoint = endpoint(address, port)
-        val socket = open({ DatagramSocket(null) }) { policy, candidate ->
-            policy.prepare(candidate)
-            candidate.soTimeout = readTimeoutMillis
+        val site = TransportSite(if (port == 53) TransportSubsystem.DNS else TransportSubsystem.UDP, TransportOperation.CONNECT,
+            TransportProtocol.UDP, TransportDirection.OUTBOUND)
+        val socket = open(site, { DatagramSocket(null) }, OutboundSocketPolicy::prepare) { candidate ->
             candidate.connect(endpoint)
         }
-        return UdpConnection(socket)
+        return UdpConnection(socket, site)
     }
 
     fun statistics(): OutboundStatistics = synchronized(lock) {
@@ -107,29 +108,40 @@ class OutboundTransport(
         closeAll()
     }
 
-    inner class TcpConnection internal constructor(private val socket: Socket) : Closeable {
-        fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int = countFailures {
+    inner class TcpConnection internal constructor(private val socket: Socket, site: TransportSite) : Closeable {
+        private val readSite = site.copy(operation = TransportOperation.READ, direction = TransportDirection.INBOUND)
+        private val writeSite = site.copy(operation = TransportOperation.WRITE)
+        private val closeSite = site.copy(operation = TransportOperation.CLOSE)
+
+        fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int = countFailures(
+            readSite, { socket.isClosed },
+        ) {
             val size = socket.getInputStream().read(buffer, offset, length)
             if (size > 0) receivedBytes.addAndGet(size.toLong())
             size
         }
 
-        fun write(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset) = countFailures {
+        fun write(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset) = countFailures(
+            writeSite, { socket.isClosed },
+        ) {
             socket.getOutputStream().write(buffer, offset, length)
             sentBytes.addAndGet(length.toLong())
             Unit
         }
 
-        fun shutdownOutput() = countFailures { socket.shutdownOutput() }
+        fun shutdownOutput() = countFailures(closeSite, { socket.isClosed }) { socket.shutdownOutput() }
 
         override fun close() = release(socket)
     }
 
-    inner class UdpConnection internal constructor(private val socket: DatagramSocket) : Closeable {
+    inner class UdpConnection internal constructor(private val socket: DatagramSocket, site: TransportSite) : Closeable {
+        private val sendSite = site.copy(operation = TransportOperation.SEND)
+        private val receiveSite = site.copy(operation = TransportOperation.RECEIVE, direction = TransportDirection.INBOUND)
+
         fun send(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset) {
             require(length in 0..MAX_UDP_PAYLOAD)
             val datagram = DatagramPacket(buffer, offset, length)
-            countFailures {
+            countFailures(sendSite, { socket.isClosed }) {
                 socket.send(datagram)
                 sentBytes.addAndGet(length.toLong())
                 sentDatagrams.incrementAndGet()
@@ -140,9 +152,9 @@ class OutboundTransport(
         fun receive(buffer: ByteArray): Int {
             require(buffer.size in 1..MAX_UDP_PAYLOAD + 1)
             val datagram = DatagramPacket(buffer, buffer.size)
-            return countFailures {
+            return countFailures(receiveSite, { socket.isClosed }) {
                 socket.receive(datagram)
-                if (datagram.length == buffer.size) throw SocketException("Датаграмма не поместилась в буфер.")
+                if (datagram.length == buffer.size) throw TransportSocketException(TransportCode.DATAGRAM_LIMIT, TransportCategory.LIMIT)
                 receivedBytes.addAndGet(datagram.length.toLong())
                 receivedDatagrams.incrementAndGet()
                 datagram.length
@@ -158,25 +170,39 @@ class OutboundTransport(
     }
 
     private inline fun <S : Closeable> open(
+        site: TransportSite,
         create: () -> S,
-        connect: (OutboundSocketPolicy, S) -> Unit,
-    ): S = countFailures {
-        val (policy, socket) = synchronized(lock) {
-            if (closed) throw SocketException("Исходящий транспорт остановлен.")
-            val currentNetwork = network ?: throw SocketException("Физическая сеть недоступна.")
-            if (sockets.size >= maxSockets) throw SocketException("Достигнут лимит исходящих сокетов.")
-            currentNetwork to create().also { sockets[it] = false }
+        prepare: (OutboundSocketPolicy, S) -> Unit,
+        connect: (S) -> Unit,
+    ): S {
+        val setup = site.copy(subsystem = TransportSubsystem.SOCKET, operation = TransportOperation.INIT, direction = TransportDirection.CONTROL)
+        val (policy, socket) = countFailures(setup, fallback = TransportCategory.SOCKET_SETUP) {
+            synchronized(lock) {
+                if (closed) throw TransportSocketException(TransportCode.CANCELLED, TransportCategory.CANCELLED)
+                val currentNetwork = network ?: throw TransportSocketException(TransportCode.NO_PHYSICAL_NETWORK, TransportCategory.UNREACHABLE)
+                if (sockets.size >= maxSockets) throw TransportSocketException(TransportCode.SOCKET_LIMIT, TransportCategory.LIMIT)
+                currentNetwork to create().also { sockets[it] = false }
+            }
         }
         var connected = false
         try {
-            connect(policy, socket)
-            synchronized(lock) {
-                if (!sockets.containsKey(socket)) throw SocketException("Исходящий сокет закрыт при смене сети.")
-                sockets[socket] = true
-                if (socket is Socket) openedTcp++ else openedUdp++
-                connected = true
+            countFailures(setup, { isClosed(socket) }, TransportCategory.SOCKET_SETUP) {
+                prepare(policy, socket)
+                when (socket) {
+                    is Socket -> socket.soTimeout = readTimeoutMillis
+                    is DatagramSocket -> socket.soTimeout = readTimeoutMillis
+                }
             }
-            socket
+            return countFailures(site, { isClosed(socket) }) {
+                connect(socket)
+                synchronized(lock) {
+                    if (!sockets.containsKey(socket)) throw TransportSocketException(TransportCode.CANCELLED, TransportCategory.CANCELLED)
+                    sockets[socket] = true
+                    if (socket is Socket) openedTcp++ else openedUdp++
+                    connected = true
+                }
+                socket
+            }
         } finally {
             if (!connected) release(socket)
         }
@@ -193,13 +219,26 @@ class OutboundTransport(
     }
 
     private fun closeSocket(socket: Closeable) {
-        runCatching { countFailures(socket::close) }
+        val protocol = if (socket is Socket) TransportProtocol.TCP else TransportProtocol.UDP
+        runCatching { countFailures(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE, protocol), fallback = TransportCategory.CLEANUP) { socket.close() } }
     }
 
-    private inline fun <T> countFailures(operation: () -> T): T = try {
+    private fun isClosed(socket: Closeable) = closed || when (socket) {
+        is Socket -> socket.isClosed
+        is DatagramSocket -> socket.isClosed
+        else -> false
+    }
+
+    private inline fun <T> countFailures(
+        site: TransportSite,
+        cancelled: () -> Boolean = { false },
+        fallback: TransportCategory = TransportCategory.UNKNOWN,
+        operation: () -> T,
+    ): T = try {
         operation()
     } catch (error: Exception) {
         failedOperations.incrementAndGet()
+        failures.recordError(site, error, cancelled(), fallback)
         throw error
     }
 

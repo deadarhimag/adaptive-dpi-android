@@ -25,8 +25,17 @@ import kotlinx.coroutines.launch
 import org.adaptivedpi.android.engine.EngineEmergencyStop
 import org.adaptivedpi.android.engine.EngineHealthSource
 import org.adaptivedpi.android.engine.EngineNetwork
+import org.adaptivedpi.android.engine.TransportCategory
+import org.adaptivedpi.android.engine.TransportCode
+import org.adaptivedpi.android.engine.TransportFailure
+import org.adaptivedpi.android.engine.TransportOperation
+import org.adaptivedpi.android.engine.TransportSite
+import org.adaptivedpi.android.engine.TransportSocketException
+import org.adaptivedpi.android.engine.TransportSubsystem
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.KnownFlag
+import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
+import org.adaptivedpi.android.vpn.diagnostics.TransportSessionDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
@@ -59,6 +68,7 @@ class AdaptiveVpnService : VpnService() {
     private var engineEmergencyStop: EngineEmergencyStop? = null
     private var activeMarker: UUID? = null
     private var transport: ExperimentalTransport? = null
+    private var transportDiagnostics: TransportSessionDiagnostics? = null
     private var closingTransport: ExperimentalTransport? = null
     private val networkCallbacks = mutableListOf<ConnectivityManager.NetworkCallback>()
     private val connectivity by lazy { checkNotNull(getSystemService(ConnectivityManager::class.java)) }
@@ -97,6 +107,7 @@ class AdaptiveVpnService : VpnService() {
     }
 
     private fun recordCleanupFailure(error: Throwable) {
+        transportDiagnostics?.reporter()?.recordError(LIFECYCLE_STOP, error, fallback = TransportCategory.CLEANUP)
         if (!cleanupErrorRecorded) {
             cleanupErrorRecorded = true
             VpnEventHistory.record(
@@ -114,7 +125,9 @@ class AdaptiveVpnService : VpnService() {
         try {
             // Даже устаревший ACTION_START мог прийти через startForegroundService.
             val attachedId = sessionId
-            showForegroundNotification(attachedId, experimentalTarget != null || applicationPackage != null)
+            val experiment = experimentalTarget != null || applicationPackage != null
+            if (experiment) transportDiagnostics = attachedId?.toSessionUuid()?.let(TransportDiagnostics::newSession)
+            showForegroundNotification(attachedId, experiment)
             if (attachedId == null || VpnController.state.value == VpnState.Stopping) {
                 finishSession()
                 return
@@ -137,7 +150,7 @@ class AdaptiveVpnService : VpnService() {
             } else {
                 val target = experimentalTarget?.let { ExperimentalTarget.parse(it) ?: throw IOException("Недопустимый тестовый адрес.") }
                 val physical = connectivity.activeNetwork?.takeIf(::isPhysical)
-                    ?: throw IOException("Нет активного физического подключения для эксперимента.")
+                    ?: throw TransportSocketException(TransportCode.NO_PHYSICAL_NETWORK, TransportCategory.UNREACHABLE)
                 builder.setMtu(1280).setUnderlyingNetworks(arrayOf(physical))
                 if (target != null) {
                     builder.addRoute(target, 32)
@@ -146,7 +159,9 @@ class AdaptiveVpnService : VpnService() {
                     val link = connectivity.getLinkProperties(physical)
                     val dns = link?.dnsServers.orEmpty().filterIsInstance<Inet4Address>()
                         .filterNot { it.isLoopbackAddress || it.isAnyLocalAddress || it.isMulticastAddress }
-                    check(link?.linkAddresses?.any { it.address is Inet4Address } == true && dns.isNotEmpty())
+                    if (link?.linkAddresses?.any { it.address is Inet4Address } != true || dns.isEmpty()) {
+                        throw TransportSocketException(TransportCode.IPV4_DNS_UNAVAILABLE, TransportCategory.UNREACHABLE)
+                    }
                     builder.addRoute("0.0.0.0", 0).setMetered(false)
                     dns.forEach { builder.addDnsServer(it) }
                     failureCode = DiagnosticCode.TunnelFailed
@@ -154,6 +169,9 @@ class AdaptiveVpnService : VpnService() {
                 tunnel = builder.establish()
                 val descriptor = tunnel
                 if (descriptor == null) {
+                    transportDiagnostics?.reporter()?.record(TransportFailure(
+                        TUN_INIT, TransportCategory.CANCELLED, TransportCode.VPN_PERMISSION_REVOKED,
+                    ))
                     finishSession(VpnEvent.ConsentRevoked)
                     return
                 }
@@ -162,7 +180,7 @@ class AdaptiveVpnService : VpnService() {
                 activeMarker = VpnDiagnostics.markActive(diagnosticSnapshot(), attachedId.toSessionUuid())
                 failureCode = DiagnosticCode.EngineFailed
                 recordTransportEvent(VpnEventType.TransportInitializing)
-                val started = ExperimentalTransport(this, physical, target, descriptor) {
+                val started = ExperimentalTransport(this, physical, target, descriptor, checkNotNull(transportDiagnostics)) {
                     mainExecutor.execute { failTransport(attachedId) }
                 }
                 transport = started
@@ -185,9 +203,21 @@ class AdaptiveVpnService : VpnService() {
                 VpnController.serviceStarted(attachedId)
             }
         } catch (exception: Exception) {
+            recordTransportStartFailure(failureCode, exception)
             finishSession(VpnEvent.ServiceFailed, failureCode.takeIf { sessionId != null }, exception)
         } catch (error: LinkageError) {
+            recordTransportStartFailure(DiagnosticCode.EngineFailed, error)
             finishSession(VpnEvent.ServiceFailed, DiagnosticCode.EngineFailed, error)
+        }
+    }
+
+    private fun recordTransportStartFailure(code: DiagnosticCode, error: Throwable) {
+        val reporter = transportDiagnostics?.reporter() ?: return
+        when (code) {
+            DiagnosticCode.EngineFailed -> reporter.recordError(HEV_INIT, error, fallback = TransportCategory.HEV_INIT)
+            DiagnosticCode.TransportIpv4Unavailable -> reporter.recordError(DNS_INIT, error, fallback = TransportCategory.UNREACHABLE)
+            DiagnosticCode.TunnelFailed -> reporter.recordError(TUN_INIT, error, fallback = TransportCategory.TUN_IO)
+            else -> reporter.recordError(LIFECYCLE_START, error, fallback = TransportCategory.INTERNAL)
         }
     }
 
@@ -219,6 +249,10 @@ class AdaptiveVpnService : VpnService() {
 
     private fun stopForNetwork(id: String, event: VpnEventType) {
         if (id != sessionId || shutdown.started) return
+        val lost = event == VpnEventType.TransportNetworkLost
+        transportDiagnostics?.reporter()?.record(TransportFailure(LIFECYCLE_STOP,
+            if (lost) TransportCategory.UNREACHABLE else TransportCategory.CANCELLED,
+            if (lost) TransportCode.NETWORK_LOST else TransportCode.NETWORK_CHANGED))
         recordTransportEvent(event)
         VpnController.serviceStopping(id)
         finishSession()
@@ -244,6 +278,8 @@ class AdaptiveVpnService : VpnService() {
             recordTransportEvent(VpnEventType.TransportOperationFailed)
         }
         if (!stats.running && SystemClock.elapsedRealtime() >= transportReadyAt) {
+            transportDiagnostics?.reporter()?.record(TransportFailure(HEV_INIT,
+                TransportCategory.HEV_INIT, TransportCode.HEV_READY_TIMEOUT))
             failTransport(id)
             return
         }
@@ -290,7 +326,11 @@ class AdaptiveVpnService : VpnService() {
     override fun onRevoke() {
         // Android может вызвать отзыв разрешения вне главного потока.
         mainExecutor.execute {
-            if (sessionId != null && !shutdown.started) finishSession(VpnEvent.SystemConsentRevoked)
+            if (sessionId != null && !shutdown.started) {
+                transportDiagnostics?.reporter()?.record(TransportFailure(LIFECYCLE_STOP,
+                    TransportCategory.CANCELLED, TransportCode.VPN_PERMISSION_REVOKED))
+                finishSession(VpnEvent.SystemConsentRevoked)
+            }
         }
     }
 
@@ -305,6 +345,13 @@ class AdaptiveVpnService : VpnService() {
         } finally {
             val id = sessionId
             sessionId = null
+            transportDiagnostics?.let { diagnostics ->
+                val closing = closingTransport
+                if (closing?.finished?.isCompleted == true) {
+                    VpnController.transport.value?.let { VpnController.updateTransport(it.copy(errors = diagnostics.total)) }
+                }
+                if (closing != null) closing.finished.invokeOnCompletion { diagnostics.finish() } else diagnostics.finish()
+            }
             if (id != null) {
                 VpnController.serviceEnded(
                     id,
@@ -463,5 +510,10 @@ class AdaptiveVpnService : VpnService() {
         private const val CHANNEL_ID = "vpn_session"
         private const val NOTIFICATION_ID = 1
         private const val JOURNAL_GRACE_MILLIS = 250L
+        private val HEV_INIT = TransportSite(TransportSubsystem.HEV, TransportOperation.INIT)
+        private val TUN_INIT = TransportSite(TransportSubsystem.TUN, TransportOperation.INIT)
+        private val DNS_INIT = TransportSite(TransportSubsystem.DNS, TransportOperation.INIT)
+        private val LIFECYCLE_START = TransportSite(TransportSubsystem.LIFECYCLE, TransportOperation.INIT)
+        private val LIFECYCLE_STOP = TransportSite(TransportSubsystem.LIFECYCLE, TransportOperation.STOP)
     }
 }

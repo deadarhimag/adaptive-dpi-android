@@ -13,6 +13,7 @@ fun combinedDiagnosticReport(
     vpnHistory: VpnEventHistoryState,
     errors: List<DiagnosticEvent>,
     transport: TransportSnapshot? = null,
+    transportJournal: TransportJournalView? = null,
 ): String = buildString {
     appendLine("Диагностика adaptive-dpi-android")
     appendLine("Версия приложения: ${DiagnosticEvent.safeVersion(appVersion)}")
@@ -39,6 +40,13 @@ fun combinedDiagnosticReport(
         appendLine("Пакеты TUN: отправлено ${transport.tunSentPackets}, получено ${transport.tunReceivedPackets}")
         appendLine("Байты прямого тракта: отправлено ${transport.sentBytes}, получено ${transport.receivedBytes}")
         appendLine("Соединения: ${transport.connections}. Операции с ошибками: ${transport.errors}.")
+    }
+
+    transportJournal?.session?.let {
+        appendLine()
+        appendLine("Сводка транспорта")
+        appendLine(it.text())
+        appendLine("Журнал транспорта на диске: ${transportJournal.bytes} байт, ${transportJournal.storedRecords} записей.")
     }
 
     appendLine()

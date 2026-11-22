@@ -45,6 +45,7 @@ import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.ExperimentalApplication
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.TransportJournalView
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
 
@@ -69,6 +70,8 @@ internal fun AdaptiveDpiApp(
     onStartTransport: (String) -> Unit,
     onStartApplicationTransport: (String) -> Unit,
     transport: TransportSnapshot?,
+    transportJournal: TransportJournalView,
+    onSaveTransportJournal: () -> Unit,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
     onThemeChange: (ThemeMode) -> Unit,
@@ -115,6 +118,7 @@ internal fun AdaptiveDpiApp(
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
                     DiagnosticsScreen(vpnState, transport)
+                    TransportJournalPanel(transportJournal, onSaveTransportJournal)
                     VpnStopHelp(onVpnSettings)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
                 }

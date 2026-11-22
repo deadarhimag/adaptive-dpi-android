@@ -6,9 +6,17 @@ import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.CompletableDeferred
 import org.adaptivedpi.android.engine.HevLoopbackRelay
 import org.adaptivedpi.android.engine.OutboundTransport
-import java.io.IOException
+import org.adaptivedpi.android.engine.TransportCategory
+import org.adaptivedpi.android.engine.TransportCode
+import org.adaptivedpi.android.engine.TransportFailure
+import org.adaptivedpi.android.engine.TransportOperation
+import org.adaptivedpi.android.engine.TransportSite
+import org.adaptivedpi.android.engine.TransportSocketException
+import org.adaptivedpi.android.engine.TransportSubsystem
+import org.adaptivedpi.android.vpn.diagnostics.TransportSessionDiagnostics
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -40,6 +48,7 @@ data class TransportSnapshot(
     val closedTcp: Long = 0,
     val openedUdp: Long = 0,
     val closedUdp: Long = 0,
+    val sessionId: UUID? = null,
 ) {
     val transferred get() = tunSentPackets > 0 && tunReceivedPackets > 0 && sentBytes > 0 && receivedBytes > 0
 }
@@ -47,7 +56,7 @@ data class TransportSnapshot(
 internal object HevBridge {
     init { System.loadLibrary("adaptive-hev") }
     external fun reserve(token: Long): Boolean
-    external fun run(token: Long, config: ByteArray, fd: Int): Int
+    external fun run(token: Long, config: ByteArray, fd: Int, observer: NativeTransportObserver): Int
     external fun stop(token: Long)
     external fun release(token: Long)
     external fun isReady(token: Long): Boolean
@@ -59,22 +68,25 @@ internal class ExperimentalTransport(
     network: Network,
     private val target: Inet4Address?,
     private val tunnel: ParcelFileDescriptor,
+    private val diagnostics: TransportSessionDiagnostics,
     onFailure: () -> Unit,
 ) {
     private val token = nextToken.incrementAndGet()
     private val stopping = AtomicBoolean()
     private val sessionLimit = if (target == null) 32 else 16
-    private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000)
+    private val failures = diagnostics.reporter()
+    private val observer = NativeTransportObserver(failures)
+    private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000, failures = failures)
     private val relay: HevLoopbackRelay
     val finished = CompletableDeferred<Unit>()
     @Volatile var tunClosed = false
         private set
 
     init {
-        if (!HevBridge.reserve(token)) throw IOException("Предыдущий сетевой сеанс ещё завершается.")
+        if (!HevBridge.reserve(token)) throw TransportSocketException(TransportCode.HEV_RESERVE, TransportCategory.HEV_INIT)
         try {
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
-            relay = HevLoopbackRelay(outbound, target, sessionLimit, onFailure)
+            relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, onFailure)
         } catch (error: Exception) {
             outbound.close()
             HevBridge.release(token)
@@ -89,14 +101,18 @@ internal class ExperimentalTransport(
                 try {
                     val config = config().toByteArray(Charsets.UTF_8)
                     try {
-                        failure = HevBridge.run(token, config, tunnel.fd) < 0 || !stopping.get()
+                        val result = HevBridge.run(token, config, tunnel.fd, observer)
+                        failure = result < 0 || !stopping.get()
+                        if (result >= 0 && failure) failures.record(TransportFailure(
+                            NATIVE_RUN, TransportCategory.INTERNAL, TransportCode.UNEXPECTED_EXIT, result = result,
+                        ))
                     } finally {
                         config.fill(0)
                     }
-                } catch (_: Exception) {
-                    failure = true
-                } catch (_: LinkageError) {
-                    failure = true
+                } catch (error: Exception) {
+                    failures.recordError(NATIVE_RUN, error, stopping.get(), TransportCategory.INTERNAL)
+                } catch (error: LinkageError) {
+                    failures.recordError(NATIVE_RUN, error, fallback = TransportCategory.INTERNAL)
                 } finally {
                     val released = finish()
                     onExit(failure || !released)
@@ -120,16 +136,19 @@ internal class ExperimentalTransport(
         val stats = outbound.statistics()
         return TransportSnapshot(
             HevBridge.isReady(token), counters[0], counters[1], stats.sentBytes, stats.receivedBytes,
-            stats.activeTcp + stats.activeUdp, stats.failedOperations + relay.failedSessions,
-            target == null, stats.openedTcp, stats.closedTcp, stats.openedUdp, stats.closedUdp,
+            stats.activeTcp + stats.activeUdp, diagnostics.total,
+            target == null, stats.openedTcp, stats.closedTcp, stats.openedUdp, stats.closedUdp, diagnostics.id,
         )
     }
 
     private fun finish(): Boolean {
         try {
-            tunClosed = runCatching(tunnel::close).isSuccess
+            tunClosed = runCatching(tunnel::close).onFailure {
+                failures.recordError(TUN_CLOSE, it, fallback = TransportCategory.CLEANUP)
+            }.isSuccess
             relay.close()
-            val relayStopped = runCatching(relay::awaitShutdown).getOrDefault(false)
+            val relayStopped = runCatching(relay::awaitShutdown).getOrElse { false }
+            if (!relayStopped) failures.record(TransportFailure(RELAY_STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP))
             return tunClosed && relayStopped
         } finally {
             HevBridge.release(token)
@@ -161,5 +180,8 @@ internal class ExperimentalTransport(
 
     private companion object {
         val nextToken = AtomicLong()
+        val NATIVE_RUN = TransportSite(TransportSubsystem.HEV, TransportOperation.RUN)
+        val TUN_CLOSE = TransportSite(TransportSubsystem.TUN, TransportOperation.CLOSE)
+        val RELAY_STOP = TransportSite(TransportSubsystem.HEV, TransportOperation.STOP)
     }
 }
