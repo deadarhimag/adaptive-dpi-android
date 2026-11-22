@@ -19,8 +19,8 @@ internal class DiagnosticCenter(
     val recovered = recover()
 
     @Synchronized
-    fun record(code: DiagnosticCode, vpn: VpnSnapshot, error: Throwable? = null): DiagnosticEvent {
-        val entry = newEvent(code, vpn, error)
+    fun record(code: DiagnosticCode, vpn: VpnSnapshot, error: Throwable? = null, cleanup: VpnCleanupDetails? = null): DiagnosticEvent {
+        val entry = newEvent(code, vpn, error, cleanup = cleanup)
         store(listOf(entry) + current.value)
         notifyOnce(entry.id)
         return entry
@@ -116,7 +116,8 @@ internal class DiagnosticCenter(
         vpn: VpnSnapshot,
         error: Throwable? = null,
         id: UUID = UUID.randomUUID(),
-    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, journal.now(), androidVersion)
+        cleanup: VpnCleanupDetails? = null,
+    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, journal.now(), androidVersion, cleanup)
 
     private companion object {
         const val ALERT_INTERVAL_MILLIS = 60_000L

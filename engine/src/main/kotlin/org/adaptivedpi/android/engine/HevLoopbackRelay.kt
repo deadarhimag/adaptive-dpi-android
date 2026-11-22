@@ -12,6 +12,7 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
@@ -20,6 +21,16 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+
+data class RelayShutdownStatus(
+    val pendingMask: Int,
+    val requestsActive: Int,
+    val requestsQueued: Int,
+    val responsesActive: Int,
+    val responsesQueued: Int,
+) {
+    val terminated get() = pendingMask == 0
+}
 
 /** Одноразовый локальный интерфейс HEV. UDP проходит здесь в кадрах поверх TCP. */
 class HevLoopbackRelay(
@@ -42,12 +53,13 @@ class HevLoopbackRelay(
     private val responses = pool(maxSessions, "HEV response")
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val shutdownErrorReported = AtomicBoolean()
+    private val closeCompleted = CountDownLatch(1)
     @Volatile private var closing = false
     private val acceptThread = Thread(::accept, "HEV accept").apply { start() }
 
     val port: Int = listener.localPort
     val configSecret: String get() = secret
-    val isTerminated: Boolean get() = !acceptThread.isAlive && requests.isTerminated && responses.isTerminated
+    val isTerminated: Boolean get() = pendingShutdownSteps() == 0
 
     private fun accept() {
         try {
@@ -309,28 +321,49 @@ class HevLoopbackRelay(
             closing = true
             clients.toList()
         }
-        closeRelay(listener)
-        acceptThread.interrupt()
-        transport.close()
-        peers.forEach(::closePeer)
-        requests.shutdown()
-        responses.shutdown()
+        try {
+            closeRelay(listener)
+            acceptThread.interrupt()
+            transport.close()
+        } finally {
+            peers.forEach(::closePeer)
+            requests.shutdown()
+            responses.shutdown()
+            closeCompleted.countDown()
+        }
     }
 
     /** Вызывается рабочим потоком после закрытия и до освобождения сеанса. */
-    fun awaitShutdown(timeoutMillis: Long = 4_000): Boolean {
+    fun awaitShutdown(timeoutMillis: Long = 4_000): Boolean = awaitShutdownResult(timeoutMillis).terminated
+
+    fun awaitShutdownResult(timeoutMillis: Long = 4_000): RelayShutdownStatus {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
-        if (acceptThread.isAlive) acceptThread.join(timeoutMillis.coerceAtLeast(1))
-        requests.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
-        responses.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+        fun remaining() = (deadline - System.nanoTime()).coerceAtLeast(0)
+        // Повторный close() возвращается, пока первый вызов ещё закрывает ресурсы.
+        closeCompleted.await(remaining(), TimeUnit.NANOSECONDS)
+        if (acceptThread.isAlive) remaining().takeIf { it > 0 }?.let {
+            TimeUnit.NANOSECONDS.timedJoin(acceptThread, it)
+        }
+        requests.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
+        responses.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
+        val state = shutdownStatus()
+        if (!state.terminated && shutdownErrorReported.compareAndSet(false, true)) {
+            failures.record(TransportFailure(STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP, result = state.pendingMask))
+        }
+        return state
+    }
+
+    fun shutdownStatus() = RelayShutdownStatus(
+        pendingShutdownSteps(), requests.activeCount, requests.queue.size, responses.activeCount, responses.queue.size,
+    )
+
+    private fun pendingShutdownSteps(): Int {
         var pending = 0
         if (acceptThread.isAlive) pending = pending or 1
         if (!requests.isTerminated) pending = pending or 2
         if (!responses.isTerminated) pending = pending or 4
-        if (pending != 0 && shutdownErrorReported.compareAndSet(false, true)) {
-            failures.record(TransportFailure(STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP, result = pending))
-        }
-        return pending == 0
+        if (closeCompleted.count != 0L) pending = pending or 8
+        return pending
     }
 
     private class Peer(val socket: Socket) {

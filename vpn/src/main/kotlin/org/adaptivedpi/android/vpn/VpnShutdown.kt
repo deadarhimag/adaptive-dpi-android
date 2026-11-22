@@ -1,5 +1,7 @@
 package org.adaptivedpi.android.vpn
 
+import org.adaptivedpi.android.vpn.diagnostics.CleanupStep
+
 internal class VpnShutdown(
     private val release: () -> Unit,
     private val stopService: () -> Unit,
@@ -29,10 +31,9 @@ internal class VpnShutdown(
     }
 }
 
-internal fun releaseVpnResources(onError: (Throwable) -> Unit, vararg steps: () -> Unit) {
-    var failure: Throwable? = null
-    for (step in steps) {
-        runCatching(step).onFailure { error -> if (failure == null) failure = error }
+internal fun releaseVpnResources(onError: (CleanupStep, Throwable) -> Unit, vararg steps: Pair<CleanupStep, () -> Unit>) {
+    val failures = steps.mapNotNull { (step, operation) ->
+        runCatching(operation).exceptionOrNull()?.let { step to it }
     }
-    failure?.let { runCatching { onError(it) } }
+    failures.forEach { (step, error) -> onError(step, error) }
 }

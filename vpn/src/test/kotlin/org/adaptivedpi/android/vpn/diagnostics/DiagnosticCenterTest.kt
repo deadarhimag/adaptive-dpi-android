@@ -1,6 +1,7 @@
 package org.adaptivedpi.android.vpn.diagnostics
 
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.engine.RelayShutdownStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -10,6 +11,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.IOException
+import java.util.UUID
 
 class DiagnosticCenterTest {
     @get:Rule val temporary = TemporaryFolder()
@@ -31,6 +33,23 @@ class DiagnosticCenterTest {
         assertEquals("16", read.androidVersion)
         assertEquals(running, read.vpn)
         assertTrue(read.acknowledged)
+    }
+
+    @Test
+    fun theDeadlineAndFinalRelayStateAreIndependentAndSurviveJournalReload() {
+        val journal = DiagnosticJournal(temporary.root)
+        val details = VpnCleanupDetails(UUID.randomUUID(), 4_031, true, true, 2,
+            RelayShutdownStatus(0, 0, 0, 0, 0), 0, 0, emptyList())
+        assertFalse(details.incomplete)
+        assertTrue(details.copy(relay = RelayShutdownStatus(4, 0, 0, 1, 0)).incomplete)
+        assertTrue(details.copy(issues = listOf(CleanupIssue(CleanupStep.TunClose, ExceptionKind.IOException))).incomplete)
+        center(journal).record(DiagnosticCode.VpnCleanupDelayed, idle, cleanup = details)
+
+        val read = center(DiagnosticJournal(temporary.root)).events.value.single()
+        assertEquals(details, read.cleanup)
+        assertTrue(read.report().contains("RELAY_STOP, пул запросов"))
+        assertTrue(read.report().contains("Релей при завершении службы: завершён"))
+        assertTrue(read.report().contains(details.session.toString()))
     }
 
     @Test

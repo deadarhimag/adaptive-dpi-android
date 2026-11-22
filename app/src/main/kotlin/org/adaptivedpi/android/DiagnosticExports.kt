@@ -6,47 +6,72 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import java.io.File
+import java.io.Writer
 
 class DiagnosticFileProvider : FileProvider()
 
 internal object DiagnosticExports {
     private const val CACHE_DIR = "diagnostic-reports"
-    private const val MAX_CACHED_FILES = 16
     private const val MAX_CACHE_AGE_MILLIS = 24 * 60 * 60 * 1000L
     const val COMBINED_FILE_NAME = "adaptive-dpi-diagnostics.txt"
+    const val TRANSPORT_FILE_NAME = "adaptive-dpi-transport.txt"
 
     fun fileName(event: DiagnosticEvent) = "adaptive-dpi-${event.id}.txt"
 
-    fun save(context: Context, uri: Uri, report: String) {
+    fun save(context: Context, uri: Uri, report: String) = save(context, uri) { it.write(report) }
+
+    suspend fun saveTransportJournal(context: Context, uri: Uri) = save(context, uri) {
+        TransportDiagnostics.export(it)
+    }
+
+    private inline fun save(context: Context, uri: Uri, write: (Writer) -> Unit) {
         require(uri.scheme == "content")
-        checkNotNull(context.contentResolver.openOutputStream(uri, "wt")).bufferedWriter(Charsets.UTF_8).use {
-            it.write(report)
-        }
+        checkNotNull(context.contentResolver.openOutputStream(uri, "wt")).bufferedWriter(Charsets.UTF_8).use(write)
     }
 
     fun shareIntent(context: Context, event: DiagnosticEvent): Intent = shareIntent(context, fileName(event), event.report())
 
-    @Synchronized
-    fun shareIntent(context: Context, fileName: String, report: String): Intent {
-        val directory = File(context.cacheDir, CACHE_DIR)
-        check(directory.isDirectory || directory.mkdirs())
+    fun shareIntent(context: Context, fileName: String, report: String): Intent =
+        shareIntent(context, fileName) { it.write(report) }
 
+    suspend fun shareTransportJournal(context: Context): Intent = shareIntent(context, TRANSPORT_FILE_NAME) {
+        TransportDiagnostics.export(it)
+    }
+
+    fun shareChooser(send: Intent, title: CharSequence): Intent = Intent.createChooser(send, title)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        .apply { clipData = send.clipData }
+
+    fun pruneExpiredShares(context: Context) {
         val cutoff = System.currentTimeMillis() - MAX_CACHE_AGE_MILLIS
-        val existing = directory.listFiles().orEmpty().filter { it.isFile }.sortedByDescending(File::lastModified)
-        existing.forEachIndexed { index, file ->
-            if (index >= MAX_CACHED_FILES - 1 || file.lastModified() < cutoff) {
-                check(file.delete() || !file.exists())
-            }
+        File(context.cacheDir, CACHE_DIR).listFiles().orEmpty().forEach { file ->
+            if (file.isFile && file.lastModified() < cutoff) file.delete()
         }
+    }
+
+    private inline fun shareIntent(context: Context, fileName: String, write: (Writer) -> Unit): Intent {
+        val directory = File(context.cacheDir, CACHE_DIR)
+        directory.mkdirs()
+        check(directory.isDirectory)
+        pruneExpiredShares(context)
 
         val file = File.createTempFile(fileName.removeSuffix(".txt") + "-", ".txt", directory)
-        file.writeText(report, Charsets.UTF_8)
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", file)
-        return Intent(Intent.ACTION_SEND)
-            .setType("text/plain")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            .apply { clipData = ClipData.newUri(context.contentResolver, fileName, uri) }
+        var prepared = false
+        try {
+            file.bufferedWriter(Charsets.UTF_8).use(write)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", file, fileName)
+            return Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .apply {
+                    clipData = ClipData.newUri(context.contentResolver, fileName, uri)
+                    prepared = true
+                }
+        } finally {
+            if (!prepared) file.delete()
+        }
     }
 }

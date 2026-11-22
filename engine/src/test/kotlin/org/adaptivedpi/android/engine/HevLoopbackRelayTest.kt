@@ -260,6 +260,39 @@ class HevLoopbackRelayTest {
     }
 
     @Test
+    fun stopClosesActiveTcpAndUdpAndDrainsBothPools() {
+        ServerSocket(0, 1, ip).use { tcp ->
+            DatagramSocket(InetSocketAddress(ip, 0)).use { udp ->
+                tcp.soTimeout = 3_000
+                udp.soTimeout = 3_000
+                relay { relay, transport ->
+                    client(relay).use { tcpClient ->
+                        client(relay).use { udpClient ->
+                            for ((socket, protocol, port) in listOf(Triple(tcpClient, 1, tcp.localPort), Triple(udpClient, 5, 0))) {
+                                val input = DataInputStream(socket.getInputStream())
+                                val output = DataOutputStream(socket.getOutputStream())
+                                assertEquals(0, authenticate(relay.configSecret, input, output))
+                                command(output, protocol, port)
+                                assertEquals(0, reply(input))
+                            }
+                            tcp.accept().use {
+                                frame(DataOutputStream(udpClient.getOutputStream()), udp.localPort, byteArrayOf(5))
+                                udp.receive(DatagramPacket(ByteArray(1), 1))
+                                assertEquals(1, transport.statistics().activeTcp)
+                                assertEquals(1, transport.statistics().activeUdp)
+                                relay.close()
+                                relay.close()
+                                assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.awaitShutdownResult())
+                                assertEquals(0, transport.statistics().pending)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun cleanupTimeoutRemainsAnErrorAndReportsTheUnfinishedPoolOnce() {
         val entered = CountDownLatch(1)
         val leave = CountDownLatch(1)
@@ -280,7 +313,9 @@ class HevLoopbackRelayTest {
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
                 relay.close()
                 relay.close()
-                assertFalse(relay.awaitShutdown(100))
+                val atDeadline = relay.awaitShutdownResult(100)
+                assertFalse(atDeadline.terminated)
+                assertEquals(1, atDeadline.requestsActive)
                 assertFalse(relay.isTerminated)
                 assertFalse(relay.awaitShutdown(100))
                 val failure = failures.single { it.code == TransportCode.RELAY_STOP }
@@ -292,6 +327,7 @@ class HevLoopbackRelayTest {
             relay.close()
             assertTrue(relay.awaitShutdown())
             assertTrue(relay.isTerminated)
+            assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.shutdownStatus())
         }
     }
 

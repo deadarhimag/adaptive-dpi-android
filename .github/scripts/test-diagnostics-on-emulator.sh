@@ -115,8 +115,9 @@ if ! grep -qx ready "$fixture_log"; then
   cat "$fixture_log" >&2
   fail "Локальный стенд TCP/UDP/DNS не запустился."
 fi
+export_test='org.adaptivedpi.android.DiagnosticsInstrumentedTest#savesAndSharesIdenticalTransportTextAndKeepsRecentAttachmentsReadable'
 ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest,org.adaptivedpi.android.TunTransportInstrumentedTest,org.adaptivedpi.android.ApplicationTransportInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.class="org.adaptivedpi.android.BuildAndDiagnosticsUiTest,${export_test},org.adaptivedpi.android.TunTransportInstrumentedTest,org.adaptivedpi.android.ApplicationTransportInstrumentedTest" \
   -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
   -Pandroid.testInstrumentationRunnerArguments.transportCertificate="$fixture_certificate" \
   -Pandroid.testInstrumentationRunnerArguments.requireTransportFixture=true \

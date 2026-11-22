@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import org.adaptivedpi.android.vpn.diagnostics.CleanupStep
 
 class VpnShutdownTest {
     @Test
@@ -39,17 +40,17 @@ class VpnShutdownTest {
         val shutdown = VpnShutdown(
             release = {
                 releaseVpnResources(
-                    { steps += "cleanup error" },
-                    { throw IOException("Тестовый отказ") },
-                    { steps += "foreground" },
-                    { steps += "marker" },
+                    { step, _ -> steps += "cleanup error ${step.name}" },
+                    CleanupStep.TunClose to { throw IOException("Тестовый отказ") },
+                    CleanupStep.ForegroundNotification to { steps += "foreground" },
+                    CleanupStep.ActiveMarker to { steps += "marker" },
                 )
             },
             stopService = { steps += "service" },
         )
 
         shutdown.stop { steps += "report" }
-        assertEquals(listOf("foreground", "marker", "cleanup error", "service", "report"), steps)
+        assertEquals(listOf("foreground", "marker", "cleanup error TunClose", "service", "report"), steps)
     }
 
     @Test

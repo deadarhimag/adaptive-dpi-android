@@ -55,6 +55,16 @@ internal fun DiagnosticErrorDialog(
     onVpnSettings: () -> Unit,
 ) {
     var details by rememberSaveable(event.id.toString()) { mutableStateOf(false) }
+    var showExport by rememberSaveable(event.id.toString()) { mutableStateOf(false) }
+    if (showExport) {
+        DiagnosticExportDialog(
+            R.string.diagnostic_export_error,
+            onSave = { onSave(event) },
+            onShare = { onShare(event) },
+            onCancel = { showExport = false },
+        )
+        return
+    }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text(stringResource(R.string.diagnostic_error)) },
@@ -74,11 +84,8 @@ internal fun DiagnosticErrorDialog(
                     SelectionContainer {
                         Text(event.report(), style = MaterialTheme.typography.bodySmall)
                     }
-                    OutlinedButton(onClick = { onSave(event) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.diagnostic_save))
-                    }
-                    OutlinedButton(onClick = { onShare(event) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.diagnostic_share))
+                    OutlinedButton(onClick = { showExport = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.diagnostic_export_error))
                     }
                 } else {
                     OutlinedButton(onClick = { details = true }) {

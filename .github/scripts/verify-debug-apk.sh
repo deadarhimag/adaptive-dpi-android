@@ -54,6 +54,9 @@ verify_string() {
 }
 
 verify_string diagnostic_export_all "Экспортировать диагностику"
+verify_string diagnostic_export_error "Экспорт отчёта об ошибке"
+verify_string transport_export "Экспорт журнала транспорта"
+verify_string vpn_switch_title "Обнаружен другой VPN"
 verify_string vpn_journal_title "Журнал событий VPN"
 verify_string build_git_revision "$revision"
 verify_string build_number "$build_number"
@@ -131,7 +134,7 @@ def apk_info(name, badging):
 
 app = apk_info("app-debug.apk", app_info)
 test = apk_info("app-debug-androidTest.apk", test_info)
-if build != "local" and app["versionCode"] != max(17, 1 + int(build.split(".")[0])):
+if build != "local" and app["versionCode"] != max(19, 1 + int(build.split(".")[0])):
     sys.exit("В APK указан неверный versionCode для этого запуска CI.")
 test.update(targetPackage=app["package"], runner="androidx.test.runner.AndroidJUnitRunner")
 print(json.dumps({"commit": commit, "build": build, "certificateSha256": certificate,

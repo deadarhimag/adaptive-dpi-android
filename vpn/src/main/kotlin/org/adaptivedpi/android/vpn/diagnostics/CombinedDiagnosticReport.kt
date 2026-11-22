@@ -40,6 +40,10 @@ fun combinedDiagnosticReport(
         appendLine("Пакеты TUN: отправлено ${transport.tunSentPackets}, получено ${transport.tunReceivedPackets}")
         appendLine("Байты прямого тракта: отправлено ${transport.sentBytes}, получено ${transport.receivedBytes}")
         appendLine("Соединения: ${transport.connections}. Операции с ошибками: ${transport.errors}.")
+        val journalSession = transportJournal?.session
+        if (journalSession?.sessionId == transport.sessionId && journalSession != null && journalSession.total != transport.errors) {
+            appendLine("Счётчик транспорта и сводка отказов сняты в разные моменты одного сеанса.")
+        }
     }
 
     transportJournal?.session?.let {

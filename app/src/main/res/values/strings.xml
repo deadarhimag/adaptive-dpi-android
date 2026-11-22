@@ -18,7 +18,7 @@
     <string name="vpn_app_transport_connections">Соединения открыто/закрыто. TCP %1$d/%2$d, UDP %3$d/%4$d.</string>
     <string name="transport_summary">Сводка транспорта</string>
     <string name="transport_journal">Журнал транспорта</string>
-    <string name="transport_export">Сохранить журнал транспорта</string>
+    <string name="transport_export">Экспорт журнала транспорта</string>
     <string name="transport_storage">На диске %1$d байт, сохранено записей %2$d.</string>
     <string name="transport_storage_error">Некоторые записи журнала недоступны.</string>
     <string name="transport_privacy">TXT содержит время, коды, состояние VPN и счётчики. Адреса, порты и содержимое трафика не записываются.</string>
@@ -71,7 +71,8 @@
     <string name="diagnostic_error">Ошибка приложения</string>
     <string name="diagnostic_technical">Технические подробности</string>
     <string name="diagnostic_preview">Состав отчёта</string>
-    <string name="diagnostic_save">Сохранить в файл</string>
+    <string name="diagnostic_save">Сохранить</string>
+    <string name="diagnostic_export_error">Экспорт отчёта об ошибке</string>
     <string name="diagnostic_share">Поделиться</string>
     <string name="diagnostic_close">Закрыть</string>
     <string name="diagnostic_restart_vpn">Повторно запустить VPN</string>
@@ -87,7 +88,7 @@
     <string name="vpn_journal_clear">Очистить журнал</string>
     <string name="vpn_journal_clear_title">Очистить журнал событий VPN?</string>
     <string name="vpn_journal_clear_message">Записи событий VPN будут удалены с устройства.</string>
-    <string name="vpn_journal_cancel">Отмена</string>
+    <string name="cancel">Отмена</string>
     <string name="vpn_journal_clear_failed">Не удалось очистить журнал событий VPN</string>
     <string name="about_title">О приложении</string>
     <string name="about_version">Версия %1$s</string>

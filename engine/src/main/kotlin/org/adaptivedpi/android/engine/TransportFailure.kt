@@ -53,6 +53,7 @@ enum class TransportCode(val label: String) {
     FLOW_CANCELLED("FLOW_CANCELLED"), SESSION_CANCELLED("SESSION_CANCELLED"), NETWORK_CANCELLED("NETWORK_CANCELLED"),
     PEER_EOF("PEER_EOF"), SOCKET_EXCEPTION("SocketException"), IO_EXCEPTION("IOException"),
     RELAY_DRAINING("RELAY_DRAINING"),
+    TUN_DRAINING("TUN_DRAINING"),
 }
 
 enum class TransportCancellation(val code: TransportCode) {

@@ -1,8 +1,10 @@
 package org.adaptivedpi.android
 
-import android.view.KeyEvent
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -13,8 +15,13 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.ui.VpnSwitchDialog
+import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
+import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.io.File
 
 class BuildAndDiagnosticsUiTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
@@ -32,8 +39,65 @@ class BuildAndDiagnosticsUiTest {
         compose.onNodeWithText(string(R.string.diagnostic_preview)).assertIsDisplayed()
         compose.onNodeWithText(string(R.string.diagnostic_save)).assertIsDisplayed()
         compose.onNodeWithText(string(R.string.diagnostic_share)).assertIsDisplayed()
-        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        compose.onNodeWithText(string(R.string.cancel)).performClick()
+        compose.onNodeWithText(string(R.string.diagnostic_preview)).assertDoesNotExist()
         compose.onNodeWithText(string(R.string.diagnostic_history)).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun individualErrorUsesTheSameExportActionsAndReturnsToItsReportOnCancel() {
+        val previous = VpnDiagnostics.events.value.map { it.id }.toSet()
+        VpnDiagnostics.record(DiagnosticCode.SaveFailed)
+        val event = VpnDiagnostics.events.value.first { it.id !in previous && it.code == DiagnosticCode.SaveFailed }
+        try {
+            compose.onNodeWithText(string(R.string.diagnostic_technical)).performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_export_error)).performScrollTo().performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_save)).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.diagnostic_share)).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.cancel)).performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_preview)).assertExists()
+        } finally {
+            VpnDiagnostics.acknowledge(event.id)
+        }
+    }
+
+    @Test
+    fun transportExportOffersSaveShareAndCancelFromOneButton() {
+        compose.onNodeWithText(string(R.string.diagnostics)).performScrollTo().performClick()
+        val label = hasText(string(R.string.transport_export)) and hasClickAction()
+        val export = compose.onNode(label)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodes(label and isEnabled()).fetchSemanticsNodes().size == 1
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val saveMonitor = instrumentation.addMonitor(IntentFilter(Intent.ACTION_CREATE_DOCUMENT), null, true)
+        val shareMonitor = instrumentation.addMonitor(IntentFilter(Intent.ACTION_CHOOSER), null, true)
+        val cache = File(compose.activity.cacheDir, "diagnostic-reports")
+        val existingFiles = cache.list().orEmpty().toSet()
+        try {
+            export.performScrollTo().performClick()
+            compose.onNode(hasText(string(R.string.transport_export)) and !hasClickAction()).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.diagnostic_save)).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.diagnostic_share)).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.cancel)).performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_save)).assertDoesNotExist()
+            assertEquals(0, saveMonitor.hits)
+            assertEquals(0, shareMonitor.hits)
+            assertTrue(cache.list().orEmpty().all { it in existingFiles })
+
+            export.performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_save)).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) { saveMonitor.hits == 1 }
+            compose.onNodeWithText(string(R.string.diagnostic_save)).assertDoesNotExist()
+
+            export.performClick()
+            compose.onNodeWithText(string(R.string.diagnostic_share)).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) { shareMonitor.hits == 1 }
+            compose.onNodeWithText(string(R.string.diagnostic_share)).assertDoesNotExist()
+        } finally {
+            instrumentation.removeMonitor(saveMonitor)
+            instrumentation.removeMonitor(shareMonitor)
+        }
     }
 
     @Test

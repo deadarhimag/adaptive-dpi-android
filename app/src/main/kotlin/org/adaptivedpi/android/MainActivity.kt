@@ -21,6 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -62,43 +63,36 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
-    private val createTransportDocument = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if (uri == null) return@registerForActivityResult
-        lifecycleScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    checkNotNull(contentResolver.openOutputStream(uri, "wt")).bufferedWriter(Charsets.UTF_8).use {
-                        TransportDiagnostics.export(it)
-                    }
-                }
-                Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show()
-            } catch (error: kotlinx.coroutines.CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                VpnDiagnostics.record(DiagnosticCode.SaveFailed, error)
-            }
-        }
-    }
-
     private val createDiagnosticDocument =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
             val id = pendingReportId
             pendingReportId = null
             val snapshot = if (id == COMBINED_REPORT_ID) pendingExport.report.also { pendingExport.report = null } else null
             if (uri == null || id == null) return@registerForActivityResult
-            val report = if (id == COMBINED_REPORT_ID) snapshot else {
-                VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
+            val report = when (id) {
+                COMBINED_REPORT_ID -> snapshot
+                TRANSPORT_REPORT_ID -> null
+                else -> VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
             }
-            if (report == null) {
+            if (report == null && id != TRANSPORT_REPORT_ID) {
                 Toast.makeText(this, R.string.diagnostic_missing, Toast.LENGTH_SHORT).show()
                 return@registerForActivityResult
             }
             lifecycleScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    runCatching { DiagnosticExports.save(applicationContext, uri, report) }
+                try {
+                    withContext(Dispatchers.IO) {
+                        if (id == TRANSPORT_REPORT_ID) {
+                            DiagnosticExports.saveTransportJournal(applicationContext, uri)
+                        } else {
+                            DiagnosticExports.save(applicationContext, uri, checkNotNull(report))
+                        }
+                    }
+                    Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    reportExportError(DiagnosticCode.SaveFailed, error)
                 }
-                result.onSuccess { Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show() }
-                    .onFailure { VpnDiagnostics.record(DiagnosticCode.SaveFailed, it) }
             }
         }
 
@@ -150,7 +144,10 @@ class MainActivity : ComponentActivity() {
                     onStartApplicationTransport = { requestVpnStart(application = it) },
                     transport = VpnController.transport.collectAsStateWithLifecycle().value,
                     transportJournal = TransportDiagnostics.state.collectAsStateWithLifecycle().value,
-                    onSaveTransportJournal = { createTransportDocument.launch("adaptive-dpi-transport.txt") },
+                    onSaveTransportJournal = ::requestSaveTransportJournal,
+                    onShareTransportJournal = {
+                        shareReport { DiagnosticExports.shareTransportJournal(applicationContext) }
+                    },
                     onStopVpn = VpnController::stop,
                     onVpnSettings = ::openVpnSettings,
                     onThemeChange = ::saveTheme,
@@ -190,6 +187,9 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         VpnDiagnostics.prune()
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { DiagnosticExports.pruneExpiredShares(applicationContext) }
+        }
     }
 
     override fun onResume() {
@@ -256,6 +256,8 @@ class MainActivity : ComponentActivity() {
 
     private fun saveCombinedReport(report: String) = requestSave(COMBINED_REPORT_ID, DiagnosticExports.COMBINED_FILE_NAME, report)
 
+    private fun requestSaveTransportJournal() = requestSave(TRANSPORT_REPORT_ID, DiagnosticExports.TRANSPORT_FILE_NAME)
+
     private fun requestSave(id: String, fileName: String, report: String? = null) {
         if (pendingReportId != null) return
         pendingReportId = id
@@ -265,27 +267,31 @@ class MainActivity : ComponentActivity() {
         } catch (exception: RuntimeException) {
             pendingReportId = null
             if (id == COMBINED_REPORT_ID) pendingExport.report = null
-            VpnDiagnostics.record(DiagnosticCode.SaveFailed, exception)
+            reportExportError(DiagnosticCode.SaveFailed, exception)
         }
     }
 
     private fun shareDiagnostic(event: DiagnosticEvent) = shareReport(DiagnosticExports.fileName(event), event.report())
 
-    private fun shareReport(fileName: String, report: String) {
+    private fun shareReport(fileName: String, report: String) =
+        shareReport { DiagnosticExports.shareIntent(applicationContext, fileName, report) }
+
+    private fun shareReport(buildSendIntent: suspend () -> Intent) {
         lifecycleScope.launch {
             try {
-                val send = withContext(Dispatchers.IO) { DiagnosticExports.shareIntent(applicationContext, fileName, report) }
-                val chooser = Intent.createChooser(send, getString(R.string.diagnostic_share))
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                chooser.clipData = send.clipData
-                startActivity(chooser)
-            } catch (exception: java.io.IOException) {
-                VpnDiagnostics.record(DiagnosticCode.ShareFailed, exception)
-            } catch (exception: RuntimeException) {
-                if (exception is kotlinx.coroutines.CancellationException) throw exception
-                VpnDiagnostics.record(DiagnosticCode.ShareFailed, exception)
+                val send = withContext(Dispatchers.IO) { buildSendIntent() }
+                startActivity(DiagnosticExports.shareChooser(send, getString(R.string.diagnostic_share)))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                reportExportError(DiagnosticCode.ShareFailed, error)
             }
         }
+    }
+
+    private fun reportExportError(code: DiagnosticCode, error: Exception) {
+        Toast.makeText(this, code.description, Toast.LENGTH_LONG).show()
+        VpnDiagnostics.record(code, error)
     }
 
     private fun clearVpnEventHistory() {
@@ -348,6 +354,7 @@ class MainActivity : ComponentActivity() {
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
         private const val COMBINED_REPORT_ID = "combined"
+        private const val TRANSPORT_REPORT_ID = "transport"
         private const val PREVIOUS_PROCESS = "previous_process"
         private const val PENDING_DIAGNOSTIC_REQUEST = "pending_diagnostic_request"
     }

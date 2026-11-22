@@ -52,7 +52,7 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     private val counts = AtomicLongArray(TransportCategory.entries.size)
     private val operations = AtomicLong()
     private val merged = AtomicLong()
-    private val dropped = AtomicLong()
+    private val dropped = AtomicLongArray(TransportDropSource.entries.size)
     private val last = AtomicLong(Long.MIN_VALUE)
     private val finished = AtomicBoolean()
     private val vpnState = AtomicReference(VpnState.Starting)
@@ -75,7 +75,7 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
 
     fun recordDropped(category: TransportCategory, end: Long, count: Long) {
         incrementCounts(category, end, count)
-        drop(count)
+        drop(TransportDropSource.NATIVE, count)
         journal?.requestFlush()
     }
 
@@ -86,22 +86,31 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     }
 
     fun merge(count: Long) { if (count > 0) merged.addAndGet(count) }
-    fun drop(count: Long = 1) { dropped.addAndGet(count) }
+    fun drop(source: TransportDropSource, count: Long) { dropped.addAndGet(source.ordinal, count) }
 
     fun finish() {
         if (finished.compareAndSet(false, true)) journal?.completed(this)
     }
 
-    fun summary() = TransportSessionSummary(
-        id,
-        buildMap {
-            for (category in TransportCategory.entries) {
-                val count = counts.get(category.ordinal)
-                if (count > 0) put(category, count)
+    fun summary(): TransportSessionSummary {
+        val dropsBySource = buildMap {
+            for (source in TransportDropSource.entries) {
+                val count = dropped.get(source.ordinal)
+                if (count > 0) put(source, count)
             }
-        },
-        merged.get(), dropped.get(), last.get().takeUnless { it == Long.MIN_VALUE }?.let(Instant::ofEpochMilli), finished.get(),
-    )
+        }
+        return TransportSessionSummary(
+            id,
+            buildMap {
+                for (category in TransportCategory.entries) {
+                    val count = counts.get(category.ordinal)
+                    if (count > 0) put(category, count)
+                }
+            },
+            merged.get(), dropsBySource.values.sum(), last.get().takeUnless { it == Long.MIN_VALUE }?.let(Instant::ofEpochMilli),
+            finished.get(), dropsBySource,
+        )
+    }
 }
 
 /** Один писатель. Производители только агрегируют в ограниченных слотах и будят писателя. */
@@ -148,7 +157,7 @@ internal class TransportJournal(
 
     fun offer(session: TransportSessionDiagnostics, state: VpnState, failure: TransportFailure, first: Long, last: Long, count: Long) {
         if (!pendingLock.tryLock()) {
-            session.drop(count)
+            session.drop(TransportDropSource.BUSY, count)
         } else {
             try {
                 val key = Key(session.id, state, failure)
@@ -161,7 +170,7 @@ internal class TransportJournal(
                         session.merge(1)
                     }
                     pending.size < PENDING_LIMIT -> pending[key] = Bucket(session, first, last, count)
-                    else -> session.drop(count)
+                    else -> session.drop(TransportDropSource.LIMIT, count)
                 }
             } finally {
                 pendingLock.unlock()
@@ -192,12 +201,15 @@ internal class TransportJournal(
         while (batch.isNotEmpty()) {
             val (key, bucket) = batch.removeFirst()
             if (disk == null) {
-                bucket.session.drop(bucket.repeats)
+                bucket.session.drop(TransportDropSource.STORAGE, bucket.repeats)
                 continue
             }
             val entry = TransportLogEntry(key.session, Instant.ofEpochMilli(bucket.first), Instant.ofEpochMilli(bucket.last),
                 key.state, key.failure, bucket.repeats)
-            runCatching { disk.append(entry) }.onFailure { storageError = true; bucket.session.drop(bucket.repeats) }
+            runCatching { disk.append(entry) }.onFailure {
+                storageError = true
+                bucket.session.drop(TransportDropSource.STORAGE, bucket.repeats)
+            }
         }
         finished?.let { session ->
             lastSummary = session.summary()

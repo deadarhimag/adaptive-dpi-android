@@ -7,6 +7,10 @@ import org.adaptivedpi.android.vpn.VpnState
 import java.time.Instant
 import java.util.UUID
 
+internal enum class TransportDropSource(val label: String) {
+    NATIVE("буфер HEV"), BUSY("занята очередь Kotlin"), LIMIT("лимит ключей Kotlin"), STORAGE("хранилище"),
+}
+
 @ConsistentCopyVisibility
 data class TransportLogEntry internal constructor(
     val sessionId: UUID,
@@ -32,6 +36,7 @@ data class TransportSessionSummary internal constructor(
     val dropped: Long,
     val lastFailure: Instant?,
     val finished: Boolean,
+    internal val dropsBySource: Map<TransportDropSource, Long> = emptyMap(),
 ) {
     val total get() = byCategory.values.sum()
     val expected get() = count(TransportDisposition.EXPECTED)
@@ -46,6 +51,9 @@ data class TransportSessionSummary internal constructor(
         appendLine("Сеанс $sessionId (${if (finished) "завершён" else "текущий"})")
         appendLine("Всего отказов операций $total. Ожидаемые $expected, неожиданные $unexpected, неизвестные $unknown.")
         appendLine("Объединено повторов $merged. Пропущено событий $dropped.")
+        if (dropsBySource.isNotEmpty()) {
+            appendLine("Пропуски по источникам: ${dropsBySource.entries.joinToString { "${it.key.label} ${it.value}" }}.")
+        }
         appendLine("Последний отказ ${lastFailure ?: "—"}")
         for ((category, count) in byCategory) appendLine("${category.title} (${category.name}) $count")
     }.trimEnd()

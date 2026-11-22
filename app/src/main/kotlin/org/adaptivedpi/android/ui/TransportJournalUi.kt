@@ -6,6 +6,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
@@ -14,8 +15,9 @@ import org.adaptivedpi.android.designsystem.AdaptivePanel
 import org.adaptivedpi.android.vpn.diagnostics.TransportJournalView
 
 @Composable
-internal fun TransportJournalPanel(journal: TransportJournalView, onSave: () -> Unit) {
+internal fun TransportJournalPanel(journal: TransportJournalView, onSave: () -> Unit, onShare: () -> Unit) {
     var visible by rememberSaveable { mutableIntStateOf(15) }
+    var showExport by rememberSaveable { mutableStateOf(false) }
     AdaptivePanel {
         Text(stringResource(R.string.transport_summary), style = MaterialTheme.typography.titleMedium)
         val session = journal.session
@@ -25,7 +27,9 @@ internal fun TransportJournalPanel(journal: TransportJournalView, onSave: () -> 
     }
     AdaptivePanel {
         Text(stringResource(R.string.transport_journal), style = MaterialTheme.typography.titleMedium)
-        OutlinedButton(onClick = onSave, enabled = journal.ready) { Text(stringResource(R.string.transport_export)) }
+        OutlinedButton(onClick = { showExport = true }, enabled = journal.ready) {
+            Text(stringResource(R.string.transport_export))
+        }
         Text(stringResource(R.string.transport_privacy), style = MaterialTheme.typography.bodySmall)
         if (journal.entries.isEmpty()) {
             Text(stringResource(if (journal.ready) R.string.transport_empty else R.string.transport_loading))
@@ -34,5 +38,8 @@ internal fun TransportJournalPanel(journal: TransportJournalView, onSave: () -> 
         if (visible < journal.entries.size) {
             OutlinedButton(onClick = { visible += 15 }) { Text(stringResource(R.string.transport_show_more)) }
         }
+    }
+    if (showExport) {
+        DiagnosticExportDialog(R.string.transport_export, onSave, onShare, onCancel = { showExport = false })
     }
 }

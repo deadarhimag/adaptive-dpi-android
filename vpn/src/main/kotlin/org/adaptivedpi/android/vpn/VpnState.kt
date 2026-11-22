@@ -35,6 +35,7 @@ internal enum class VpnEvent {
     ConsentRevoked,
     ServiceFailed,
     CriticalFailure,
+    CleanupFailed,
     ServiceDestroyed,
     SystemConsentRevoked,
 }
@@ -59,7 +60,7 @@ internal fun VpnState.reduce(event: VpnEvent): VpnState = when (event) {
         VpnState.Stopping -> VpnState.Idle
         else -> this
     }
-    VpnEvent.CriticalFailure -> when (this) {
+    VpnEvent.CriticalFailure, VpnEvent.CleanupFailed -> when (this) {
         VpnState.Starting, VpnState.TestSessionRunning, VpnState.TransportStarting, VpnState.EngineRunning,
         VpnState.Stopping -> VpnState.Failed
         else -> this

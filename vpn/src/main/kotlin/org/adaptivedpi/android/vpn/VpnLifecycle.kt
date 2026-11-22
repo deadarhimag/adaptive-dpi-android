@@ -44,6 +44,7 @@ internal class VpnLifecycle(private val record: (VpnJournalEvent) -> Unit = {}) 
             VpnEvent.ConsentRevoked -> VpnEventType.PermissionUnavailable
             VpnEvent.SystemConsentRevoked -> VpnEventType.SystemRevoked
             VpnEvent.CriticalFailure -> VpnEventType.UnexpectedStop
+            VpnEvent.CleanupFailed -> VpnEventType.StopError
             VpnEvent.ServiceFailed -> when {
                 previous == VpnState.AwaitingConsent -> VpnEventType.PermissionError
                 else -> VpnEventType.StartError

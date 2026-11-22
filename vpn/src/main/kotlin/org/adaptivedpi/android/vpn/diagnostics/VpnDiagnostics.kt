@@ -70,8 +70,8 @@ object VpnDiagnostics {
         runCatching { center?.record(code, vpn, error) }
     }
 
-    internal fun recordAsync(code: DiagnosticCode, error: Throwable?, vpn: VpnSnapshot) {
-        io.launch { record(code, error, vpn) }
+    internal fun recordCleanupAsync(code: DiagnosticCode, vpn: VpnSnapshot, details: VpnCleanupDetails, error: Throwable? = null) {
+        io.launch { runCatching { center?.record(code, vpn, error, details) } }
     }
 
     fun prune() {

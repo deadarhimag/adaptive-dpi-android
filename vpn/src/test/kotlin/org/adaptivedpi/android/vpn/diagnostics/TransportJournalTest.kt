@@ -77,6 +77,7 @@ class TransportJournalTest {
             val summary = checkNotNull(journal.state.value.session)
             assertEquals(103L, summary.total)
             assertEquals(36L, summary.dropped)
+            assertEquals(mapOf(TransportDropSource.LIMIT to 36L), summary.dropsBySource)
             assertEquals(3L, summary.merged)
             assertEquals(64, journal.state.value.storedRecords)
         } finally {

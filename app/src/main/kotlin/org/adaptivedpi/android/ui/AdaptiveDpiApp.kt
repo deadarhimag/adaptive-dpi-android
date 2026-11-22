@@ -74,6 +74,7 @@ internal fun AdaptiveDpiApp(
     transport: TransportSnapshot?,
     transportJournal: TransportJournalView,
     onSaveTransportJournal: () -> Unit,
+    onShareTransportJournal: () -> Unit,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
     onThemeChange: (ThemeMode) -> Unit,
@@ -122,7 +123,7 @@ internal fun AdaptiveDpiApp(
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
                     DiagnosticsScreen(vpnState, transport)
                     VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
-                    TransportJournalPanel(transportJournal, onSaveTransportJournal)
+                    TransportJournalPanel(transportJournal, onSaveTransportJournal, onShareTransportJournal)
                     VpnStopHelp(onVpnSettings)
                     DiagnosticHistory(diagnosticEvents) { selectedEventId = it.id.toString() }
                 }

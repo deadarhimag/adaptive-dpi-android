@@ -4,20 +4,27 @@ import android.Manifest
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
+import androidx.core.content.IntentCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.adaptivedpi.android.vpn.diagnostics.combinedDiagnosticReport
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -25,6 +32,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import java.io.StringWriter
 
 class DiagnosticsInstrumentedTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -84,6 +92,59 @@ class DiagnosticsInstrumentedTest {
             .createIntent(context, DiagnosticExports.COMBINED_FILE_NAME)
         assertEquals(Intent.ACTION_CREATE_DOCUMENT, save.action)
         assertEquals(DiagnosticExports.COMBINED_FILE_NAME, save.getStringExtra(Intent.EXTRA_TITLE))
+    }
+
+    @Test
+    fun savesAndSharesIdenticalTransportTextAndKeepsRecentAttachmentsReadable() = runBlocking(Dispatchers.IO) {
+        val report = StringWriter().also { TransportDiagnostics.export(it) }.toString()
+        val send = DiagnosticExports.shareTransportJournal(context)
+        val uri = checkNotNull(IntentCompat.getParcelableExtra(send, Intent.EXTRA_STREAM, Uri::class.java))
+        val resolver = context.contentResolver
+        val directory = File(context.cacheDir, "diagnostic-reports")
+        val destination = File.createTempFile("saf-test-", ".txt", directory)
+        val expired = File.createTempFile("expired-test-", ".txt", directory)
+        val recent = mutableListOf<File>()
+        var next: Uri? = null
+        try {
+            assertTrue(expired.setLastModified(System.currentTimeMillis() - 25 * 60 * 60 * 1000L))
+            repeat(17) { recent += File.createTempFile("recent-test-", ".txt", directory) }
+            val nextSend = DiagnosticExports.shareTransportJournal(context)
+            next = checkNotNull(nextSend.clipData).getItemAt(0).uri
+            assertFalse(expired.exists())
+            assertTrue(recent.all { it.exists() })
+
+            val document = ActivityResultContracts.CreateDocument("text/plain")
+                .createIntent(context, DiagnosticExports.TRANSPORT_FILE_NAME)
+            assertEquals(Intent.ACTION_CREATE_DOCUMENT, document.action)
+            assertEquals("text/plain", document.type)
+            assertEquals("adaptive-dpi-transport.txt", document.getStringExtra(Intent.EXTRA_TITLE))
+            val documentUri = FileProvider.getUriForFile(context, checkNotNull(uri.authority), destination)
+            DiagnosticExports.saveTransportJournal(context, documentUri)
+
+            assertEquals(Intent.ACTION_SEND, send.action)
+            assertEquals("text/plain", send.type)
+            assertEquals("content", uri.scheme)
+            assertEquals(uri, checkNotNull(send.clipData).getItemAt(0).uri)
+            assertTrue(send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+            assertFalse(send.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0)
+            val chooser = DiagnosticExports.shareChooser(send, "Поделиться")
+            assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+            assertTrue(chooser.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+            assertEquals(uri, checkNotNull(chooser.clipData).getItemAt(0).uri)
+            checkNotNull(resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)).use {
+                assertTrue(it.moveToFirst())
+                assertEquals("adaptive-dpi-transport.txt", it.getString(0))
+            }
+            val bytes = checkNotNull(resolver.openInputStream(uri)).use { it.readBytes() }
+            assertArrayEquals(report.toByteArray(Charsets.UTF_8), bytes)
+            assertArrayEquals(destination.readBytes(), bytes)
+        } finally {
+            resolver.delete(uri, null, null)
+            next?.let { resolver.delete(it, null, null) }
+            destination.delete()
+            expired.delete()
+            recent.forEach { it.delete() }
+        }
     }
 
     @Test

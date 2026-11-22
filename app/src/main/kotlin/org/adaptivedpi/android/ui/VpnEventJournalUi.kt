@@ -6,9 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -89,7 +87,7 @@ internal fun VpnEventJournal(history: VpnEventHistoryState, onClear: () -> Unit)
                 }) { Text(stringResource(R.string.vpn_journal_clear)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = false }) { Text(stringResource(R.string.vpn_journal_cancel)) }
+                TextButton(onClick = { confirmClear = false }) { Text(stringResource(R.string.cancel)) }
             },
         )
     }
@@ -107,23 +105,12 @@ internal fun DiagnosticExport(
         Text(stringResource(R.string.diagnostic_export_all))
     }
     report?.let { snapshot ->
-        AlertDialog(
-            onDismissRequest = { report = null },
-            title = { Text(stringResource(R.string.diagnostic_preview)) },
-            text = {
-                Column(
-                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SelectionContainer { Text(snapshot, style = MaterialTheme.typography.bodySmall) }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { onSave(snapshot) }) { Text(stringResource(R.string.diagnostic_save)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { onShare(snapshot) }) { Text(stringResource(R.string.diagnostic_share)) }
-            },
+        DiagnosticExportDialog(
+            R.string.diagnostic_preview,
+            onSave = { onSave(snapshot) },
+            onShare = { onShare(snapshot) },
+            onCancel = { report = null },
+            preview = snapshot,
         )
     }
 }

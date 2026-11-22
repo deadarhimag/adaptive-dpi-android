@@ -73,12 +73,12 @@ internal class DiagnosticJournal(
     private fun DiagnosticEvent.encode(): String = listOf(
         "1", id, timeMillis, code.name, appVersion, androidApi, androidVersion, vpn.state.name, vpn.alwaysOn.name, vpn.lockdown.name,
         exceptionKind?.name ?: "-", acknowledged, notified,
-        frames.joinToString(",") { "${it.site.name}:${it.line}" },
-    ).joinToString("\t")
+        frames.joinToString(",") { "${it.site.name}:${it.line}" }, cleanup?.encode(),
+    ).filterNotNull().joinToString("\t")
 
     private fun decode(line: String): DiagnosticEvent {
         val parts = line.split('\t')
-        require(parts.size == 14 && parts[0] == "1")
+        require(parts.size in 14..15 && parts[0] == "1")
         return DiagnosticEvent(
             UUID.fromString(parts[1]),
             parts[2].toLong(),
@@ -93,6 +93,7 @@ internal class DiagnosticJournal(
             }.toList(),
             parts[11].toBooleanStrict(),
             parts[12].toBooleanStrict(),
+            parts.getOrNull(14)?.let(VpnCleanupDetails::decode),
         )
     }
 }

@@ -34,7 +34,9 @@ enum class DiagnosticCode(
     TransportIpv4Unavailable(DiagnosticComponent.Vpn, DiagnosticStage.Tunnel, "Для транспорта нужна сеть с IPv4 и DNS по IPv4.",
         "На выбранном подключении не удалось получить адрес IPv4 и настройки DNS по IPv4.", true),
     VpnCleanupFailed(DiagnosticComponent.Vpn, DiagnosticStage.Stop, "Возникла ошибка при освобождении ресурсов VPN.",
-        "Служба попыталась закрыть TUN, убрать уведомление и остановиться."),
+        "Проверьте итог остановки и состояние отдельных этапов очистки."),
+    VpnCleanupDelayed(DiagnosticComponent.Vpn, DiagnosticStage.Stop, "Релей завершился после срока ожидания.",
+        "Ресурсы освобождены. В отчёте указаны задачи, которые ещё работали к окончанию ожидания."),
     VpnUnexpectedStop(DiagnosticComponent.Vpn, DiagnosticStage.Stop, "Служба VPN завершилась неожиданно.",
         "Служба уничтожена без команды штатной остановки.", true),
     VpnInterrupted(DiagnosticComponent.Vpn, DiagnosticStage.Recovery, "Предыдущий сеанс VPN прервался.",
@@ -116,6 +118,7 @@ data class DiagnosticEvent internal constructor(
     internal val frames: List<SafeFrame>,
     val acknowledged: Boolean = false,
     internal val notified: Boolean = false,
+    internal val cleanup: VpnCleanupDetails? = null,
 ) {
     val time: Instant get() = Instant.ofEpochMilli(timeMillis)
     val vpnStopped: Boolean get() = code.stopsVpn || (code == DiagnosticCode.AppCrash && vpn.mayHaveActiveVpn)
@@ -136,6 +139,7 @@ data class DiagnosticEvent internal constructor(
         appendLine("Постоянный VPN: ${vpn.alwaysOn.label()}")
         appendLine("Блокировка без VPN: ${vpn.lockdown.label()}")
         if (vpnStopped) appendLine(connectionNotice())
+        cleanup?.let { appendLine(it.text()) }
         exceptionKind?.let {
             appendLine("Исключение: ${it.name}")
             if (frames.isNotEmpty()) {
@@ -163,6 +167,7 @@ data class DiagnosticEvent internal constructor(
             id: UUID = UUID.randomUUID(),
             timeMillis: Long = System.currentTimeMillis(),
             androidVersion: String? = null,
+            cleanup: VpnCleanupDetails? = null,
         ): DiagnosticEvent {
             val frames = error?.let { cause ->
                 runCatching {
@@ -176,7 +181,7 @@ data class DiagnosticEvent internal constructor(
             }.orEmpty()
             return DiagnosticEvent(
                 id, timeMillis, code, safeVersion(version), androidApi, safeVersion(androidVersion), vpn,
-                error?.let(ExceptionKind::from), frames,
+                error?.let(ExceptionKind::from), frames, cleanup = cleanup,
             )
         }
     }

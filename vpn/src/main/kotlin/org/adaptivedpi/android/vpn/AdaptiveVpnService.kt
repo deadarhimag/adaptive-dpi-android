@@ -36,6 +36,9 @@ import org.adaptivedpi.android.engine.TransportSite
 import org.adaptivedpi.android.engine.TransportSocketException
 import org.adaptivedpi.android.engine.TransportSubsystem
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
+import org.adaptivedpi.android.vpn.diagnostics.CleanupIssue
+import org.adaptivedpi.android.vpn.diagnostics.CleanupStep
+import org.adaptivedpi.android.vpn.diagnostics.ExceptionKind
 import org.adaptivedpi.android.vpn.diagnostics.KnownFlag
 import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.TransportSessionDiagnostics
@@ -43,6 +46,7 @@ import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.adaptivedpi.android.vpn.diagnostics.VpnSnapshot
+import org.adaptivedpi.android.vpn.diagnostics.VpnCleanupDetails
 import java.io.IOException
 import java.net.Inet4Address
 import java.util.UUID
@@ -53,7 +57,9 @@ class AdaptiveVpnService : VpnService() {
     private var foregroundRequested = false
     private var termination = VpnEvent.ServiceDestroyed
     private var terminationCode: DiagnosticCode? = null
-    private var cleanupErrorRecorded = false
+    private var stopStartedAt: Long? = null
+    private var ownTunClosed: Boolean? = null
+    private val cleanupIssues = linkedMapOf<CleanupStep, ExceptionKind>()
     private val shutdown = VpnShutdown(::releaseResources) {
         val closing = closingTransport
         if (closing == null) {
@@ -105,22 +111,41 @@ class AdaptiveVpnService : VpnService() {
 
     private fun stopDeliveredStart(startId: Int) {
         if (closingTransport?.finished?.isCompleted == false) return
-        runCatching { stopSelfResult(startId) }.onFailure(::recordCleanupFailure)
+        runCatching { stopSelfResult(startId) }.onFailure(::recordServiceStopFailure)
     }
 
     private fun stopService() {
-        runCatching { stopSelf() }.onFailure(::recordCleanupFailure)
+        runCatching { stopSelf() }.onFailure(::recordServiceStopFailure)
     }
 
-    private fun recordCleanupFailure(error: Throwable) {
+    private fun recordCleanupFailure(step: CleanupStep, error: Throwable) {
+        cleanupIssues[step] = ExceptionKind.from(error)
         transportDiagnostics?.reporter()?.recordError(LIFECYCLE_STOP, error, fallback = TransportCategory.CLEANUP)
-        if (!cleanupErrorRecorded) {
-            cleanupErrorRecorded = true
-            VpnEventHistory.record(
-                VpnEventType.StopError, sessionId?.toSessionUuid(), DiagnosticCode.VpnCleanupFailed, VpnController.state.value,
-            )
+    }
+
+    private fun recordServiceStopFailure(error: Throwable) {
+        if (CleanupStep.ServiceStop in cleanupIssues) return
+        recordCleanupFailure(CleanupStep.ServiceStop, error)
+        reportCleanupFailure(sessionId, diagnosticSnapshot(), cleanupDetails(sessionId), error)
+    }
+
+    private fun reportCleanupFailure(
+        id: String?, snapshot: VpnSnapshot, details: VpnCleanupDetails, error: Throwable? = null, recordHistory: Boolean = true,
+    ) {
+        val code = if (!details.incomplete && details.issues.isEmpty()) {
+            DiagnosticCode.VpnCleanupDelayed
+        } else {
+            DiagnosticCode.VpnCleanupFailed
         }
-        VpnDiagnostics.recordAsync(DiagnosticCode.VpnCleanupFailed, error, diagnosticSnapshot())
+        if (recordHistory) VpnEventHistory.record(VpnEventType.StopError, id?.toSessionUuid(), code, snapshot.state)
+        VpnDiagnostics.recordCleanupAsync(code, snapshot, details, error)
+    }
+
+    private fun cleanupDetails(id: String?): VpnCleanupDetails {
+        val elapsed = stopStartedAt?.let { SystemClock.elapsedRealtime() - it } ?: 0
+        val issues = cleanupIssues.map { (step, exception) -> CleanupIssue(step, exception) }
+        return closingTransport?.cleanupDetails(elapsed, issues)
+            ?: VpnCleanupDetails(id?.toSessionUuid(), elapsed, ownTunClosed, null, null, null, null, null, issues)
     }
 
     private suspend fun startSession(id: String?, experimentalTarget: String?, applicationPackage: String?) {
@@ -140,7 +165,7 @@ class AdaptiveVpnService : VpnService() {
             }
 
             failureCode = DiagnosticCode.VpnCleanupFailed
-            ExperimentalTransport.requirePreviousRelayStopped()
+            ExperimentalTransport.requirePreviousTransportReleased()
             failureCode = DiagnosticCode.TunnelFailed
             val builder = Builder()
                 .setSession(getString(R.string.vpn_service_name))
@@ -365,7 +390,7 @@ class AdaptiveVpnService : VpnService() {
         val snapshot = diagnosticSnapshot()
         val marker = if (unexpected) retainActiveMarker() else null
         try {
-            releaseResources()
+            shutdown.releaseNow()
         } finally {
             val id = sessionId
             sessionId = null
@@ -385,23 +410,41 @@ class AdaptiveVpnService : VpnService() {
     }
 
     private fun publishEnd(id: String, unexpected: Boolean, snapshot: VpnSnapshot, marker: UUID?) {
-        val cleanupFailed = closingTransport?.cleanedUp == false
+        val cleanup = cleanupDetails(id)
+        val cleanupFailed = cleanup.incomplete
         val failedDuringStop = termination == VpnEvent.ServiceFailed && VpnController.state.value == VpnState.Stopping
-        val event = if (unexpected || cleanupFailed || failedDuringStop) VpnEvent.CriticalFailure else termination
+        val event = when {
+            unexpected || failedDuringStop -> VpnEvent.CriticalFailure
+            cleanupFailed -> VpnEvent.CleanupFailed
+            else -> termination
+        }
         val code = when {
             unexpected -> DiagnosticCode.VpnUnexpectedStop
             cleanupFailed -> DiagnosticCode.VpnCleanupFailed
             else -> terminationCode
         }
         transportDiagnostics?.let { diagnostics ->
-            VpnController.transport.value?.takeIf { it.sessionId == diagnostics.id }?.let {
-                VpnController.updateTransport(it.copy(errors = diagnostics.total))
+            val last = VpnController.transport.value?.takeIf { it.sessionId == diagnostics.id }
+            val final = closingTransport?.stoppedSnapshot(last) ?: last?.copy(errors = diagnostics.total, running = false)
+            final?.let {
+                logConnectionChanges(it)
+                VpnController.updateTransport(it)
             }
             diagnostics.finish()
         }
+        if (closingTransport != null) {
+            val session = id.toSessionUuid()
+            if (cleanup.relay?.terminated == true && cleanup.nativeReleased == true) {
+                VpnEventHistory.record(VpnEventType.TransportStopped, session, state = snapshot.state)
+            }
+            if (cleanup.tunClosed == true) VpnEventHistory.record(VpnEventType.TransportTunClosed, session, state = snapshot.state)
+        }
         VpnController.serviceEnded(id, event, code)
         if (unexpected) VpnDiagnostics.persistCritical(DiagnosticCode.VpnUnexpectedStop, null, snapshot, marker)
-        if (cleanupFailed) VpnDiagnostics.recordAsync(DiagnosticCode.VpnCleanupFailed, null, snapshot)
+        if (cleanupFailed || (cleanup.relayAtDeadline ?: 0) != 0 || cleanup.issues.isNotEmpty()) {
+            reportCleanupFailure(id, snapshot.copy(state = VpnController.state.value), cleanup,
+                recordHistory = event != VpnEvent.CleanupFailed)
+        }
     }
 
     private fun finishSession(
@@ -442,17 +485,19 @@ class AdaptiveVpnService : VpnService() {
     }
 
     private fun releaseResources() {
+        stopStartedAt = SystemClock.elapsedRealtime()
         sessionStart?.cancel()
         sessionStart = null
         stopHandler.removeCallbacks(refreshTransport)
         val runningTransport = transport
         transport = null
         if (runningTransport != null) {
-            val transportId = sessionId?.toSessionUuid()
             closingTransport = runningTransport
             val stats = VpnController.transport.value
             runningTransport.stop()
-            val stopped = runCatching(runningTransport::snapshot).getOrNull() ?: stats
+            val stopped = runCatching(runningTransport::snapshot).onFailure {
+                recordCleanupFailure(CleanupStep.TransportSnapshot, it)
+            }.getOrNull() ?: stats
             if (stopped != null) {
                 val snapshot = stopped.copy(
                     running = false,
@@ -462,16 +507,11 @@ class AdaptiveVpnService : VpnService() {
                 logConnectionChanges(snapshot)
                 VpnController.updateTransport(snapshot)
             }
-            runningTransport.finished.invokeOnCompletion {
-                // Запись относится к прежнему сеансу даже при уничтожении Activity.
-                VpnEventHistory.record(VpnEventType.TransportStopped, transportId)
-                VpnEventHistory.record(
-                    if (runningTransport.tunClosed) VpnEventType.TransportTunClosed else VpnEventType.StopError,
-                    transportId,
-                )
-            }
         }
-        networkCallbacks.forEach { callback -> runCatching { connectivity.unregisterNetworkCallback(callback) } }
+        networkCallbacks.forEach { callback ->
+            runCatching { connectivity.unregisterNetworkCallback(callback) }
+                .onFailure { recordCleanupFailure(CleanupStep.NetworkCallback, it) }
+        }
         networkCallbacks.clear()
         val watcher = engineMonitor
         engineMonitor = null
@@ -485,12 +525,12 @@ class AdaptiveVpnService : VpnService() {
         activeMarker = null
         releaseVpnResources(
             ::recordCleanupFailure,
-            { watcher?.cancel() },
-            { descriptor?.close() },
-            { emergency?.closeTunnel() },
-            { emergency?.requestStop() },
-            { if (removeNotification) stopForeground(STOP_FOREGROUND_REMOVE) },
-            { clearMarker?.let { VpnDiagnostics.endActive(it) } },
+            CleanupStep.EngineMonitor to { watcher?.cancel() },
+            CleanupStep.TunClose to { descriptor?.let { it.close(); ownTunClosed = true } },
+            CleanupStep.EngineTunnel to { emergency?.closeTunnel() },
+            CleanupStep.EngineStop to { emergency?.requestStop() },
+            CleanupStep.ForegroundNotification to { if (removeNotification) stopForeground(STOP_FOREGROUND_REMOVE) },
+            CleanupStep.ActiveMarker to { clearMarker?.let { VpnDiagnostics.endActive(it) } },
         )
     }
 
