@@ -65,7 +65,7 @@ class ApplicationTransportInstrumentedTest {
                     assertTrue("Требуется полный маршрут IPv4", result.getBoolean("ipv4Default"))
                     assertFalse("IPv6 не должен маршрутизироваться через VPN", result.getBoolean("ipv6Default"))
                     assertTrue("Android должен видеть DNS по IPv4", result.getBoolean("ipv4Dns"))
-                    for (protocol in listOf("tcp", "udp", "dns", "https")) {
+                    for (protocol in listOf("tcp", "udp", "udpLarge", "dns", "https")) {
                         assertTrue("Отдельное приложение не получило ответ $protocol", result.getBoolean(protocol))
                     }
                     withTimeout(8_000) {
@@ -74,9 +74,12 @@ class ApplicationTransportInstrumentedTest {
                                 stats.openedTcp >= 2 && stats.openedUdp >= 2
                         }
                     }
-                    Log.i(TAG, "Сеанс ${index + 1}: отдельный UID подтвердил TCP, UDP, DNS/UDP и содержимое HTTPS")
+                    Log.i(TAG, "Сеанс ${index + 1}: отдельный UID подтвердил TCP, UDP с ответом 1400 байт, DNS/UDP и содержимое HTTPS")
                 } finally {
-                    instrumentation.runOnMainSync { VpnController.stop() }
+                    instrumentation.runOnMainSync {
+                        VpnController.stop()
+                        VpnController.stop()
+                    }
                     withTimeout(20_000) { VpnController.state.first { it.canStart } }
                 }
                 assertEquals(VpnState.Idle, VpnController.state.value)
@@ -97,6 +100,11 @@ class ApplicationTransportInstrumentedTest {
                 val summary = checkNotNull(journal.session)
                 assertEquals(stopped.errors, summary.total)
                 assertTrue("Ожидаемые отмены операций при остановке должны быть учтены", summary.expected > 0)
+                val entries = journal.entries.filter { it.sessionId == sessionId }
+                assertFalse("У старого сеанса не должно быть событий с состоянием Idle", entries.any { it.vpnState == VpnState.Idle })
+                assertFalse("При штатной остановке релей должен завершить все задачи", entries.any {
+                    it.text().contains("/ RELAY_STOP") || it.text().contains("/ WORKER_REJECTED")
+                })
                 Log.i(TAG, "Сеанс ${index + 1}: журнал сохранил итог, отказов ${summary.total}, ожидаемых ${summary.expected}")
                 Log.i(TAG, "Сеанс ${index + 1}: маршрут пакета снят, TCP и UDP закрыты")
             }

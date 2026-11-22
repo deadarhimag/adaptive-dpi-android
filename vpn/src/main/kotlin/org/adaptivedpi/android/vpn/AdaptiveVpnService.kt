@@ -133,6 +133,8 @@ class AdaptiveVpnService : VpnService() {
                 return
             }
 
+            failureCode = DiagnosticCode.VpnCleanupFailed
+            ExperimentalTransport.requirePreviousRelayStopped()
             failureCode = DiagnosticCode.TunnelFailed
             val builder = Builder()
                 .setSession(getString(R.string.vpn_service_name))
@@ -176,6 +178,7 @@ class AdaptiveVpnService : VpnService() {
                     return
                 }
                 VpnController.transportTunCreated(attachedId)
+                transportDiagnostics?.stateChanged(VpnState.TransportStarting)
                 if (applicationPackage != null) recordTransportEvent(VpnEventType.ApplicationRoutesConfigured)
                 activeMarker = VpnDiagnostics.markActive(diagnosticSnapshot(), attachedId.toSessionUuid())
                 failureCode = DiagnosticCode.EngineFailed
@@ -346,23 +349,39 @@ class AdaptiveVpnService : VpnService() {
         } finally {
             val id = sessionId
             sessionId = null
-            transportDiagnostics?.let { diagnostics ->
-                val closing = closingTransport
-                if (closing?.finished?.isCompleted == true) {
-                    VpnController.transport.value?.let { VpnController.updateTransport(it.copy(errors = diagnostics.total)) }
-                }
-                if (closing != null) closing.finished.invokeOnCompletion { diagnostics.finish() } else diagnostics.finish()
-            }
             if (id != null) {
-                VpnController.serviceEnded(
-                    id,
-                    if (unexpected) VpnEvent.CriticalFailure else termination,
-                    if (unexpected) DiagnosticCode.VpnUnexpectedStop else terminationCode,
-                )
-                if (unexpected) VpnDiagnostics.persistCritical(DiagnosticCode.VpnUnexpectedStop, null, snapshot, marker)
+                val closing = closingTransport
+                if (closing != null && !closing.finished.isCompleted) {
+                    VpnController.serviceStopping(id)
+                    closing.finished.invokeOnCompletion {
+                        mainExecutor.execute { publishEnd(id, unexpected, snapshot, marker) }
+                    }
+                } else {
+                    publishEnd(id, unexpected, snapshot, marker)
+                }
             }
             super.onDestroy()
         }
+    }
+
+    private fun publishEnd(id: String, unexpected: Boolean, snapshot: VpnSnapshot, marker: UUID?) {
+        val cleanupFailed = closingTransport?.cleanedUp == false
+        val failedDuringStop = termination == VpnEvent.ServiceFailed && VpnController.state.value == VpnState.Stopping
+        val event = if (unexpected || cleanupFailed || failedDuringStop) VpnEvent.CriticalFailure else termination
+        val code = when {
+            unexpected -> DiagnosticCode.VpnUnexpectedStop
+            cleanupFailed -> DiagnosticCode.VpnCleanupFailed
+            else -> terminationCode
+        }
+        transportDiagnostics?.let { diagnostics ->
+            VpnController.transport.value?.takeIf { it.sessionId == diagnostics.id }?.let {
+                VpnController.updateTransport(it.copy(errors = diagnostics.total))
+            }
+            diagnostics.finish()
+        }
+        VpnController.serviceEnded(id, event, code)
+        if (unexpected) VpnDiagnostics.persistCritical(DiagnosticCode.VpnUnexpectedStop, null, snapshot, marker)
+        if (cleanupFailed) VpnDiagnostics.recordAsync(DiagnosticCode.VpnCleanupFailed, null, snapshot)
     }
 
     private fun finishSession(

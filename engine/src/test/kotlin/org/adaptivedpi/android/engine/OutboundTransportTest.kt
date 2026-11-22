@@ -53,6 +53,7 @@ class OutboundTransportTest {
                     read.get(2, TimeUnit.SECONDS)
                     assertEquals(1L, it.statistics().failedOperations)
                     assertEquals(TransportCategory.CANCELLED, recorded.single().category)
+                    assertEquals(TransportCode.SESSION_CANCELLED, recorded.single().code)
                     assertEquals(TransportOperation.RECEIVE, recorded.single().site.operation)
                 }
             }

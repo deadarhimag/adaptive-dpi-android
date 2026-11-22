@@ -100,7 +100,7 @@ class TransportJournalTest {
             override fun flush() = Unit
             override fun close() = Unit
         }
-        val producer = Executors.newSingleThreadExecutor()
+        val producer = Executors.newFixedThreadPool(4)
         try {
             val journal = TransportJournal(scope, batchMillis = 60_000) { TransportLogStore(directory) }
             val session = TransportSessionDiagnostics(UUID.randomUUID(), journal).also(journal::useSession)
@@ -110,10 +110,11 @@ class TransportJournalTest {
             val export = async(Dispatchers.IO) { journal.export(writer) }
             try {
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
-                producer.submit {
-                    repeat(10_000) { session.record(VpnState.Stopping, timeout, 2) }
-                    session.finish()
-                }.get(3, TimeUnit.SECONDS)
+                val jobs = List(4) {
+                    producer.submit { repeat(2_500) { session.record(VpnState.Stopping, timeout, 2) } }
+                }
+                jobs.forEach { it.get(3, TimeUnit.SECONDS) }
+                session.finish()
             } finally {
                 release.countDown()
             }

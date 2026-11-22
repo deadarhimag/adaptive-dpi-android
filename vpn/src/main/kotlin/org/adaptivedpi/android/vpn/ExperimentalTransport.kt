@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.CompletableDeferred
 import org.adaptivedpi.android.engine.HevLoopbackRelay
 import org.adaptivedpi.android.engine.OutboundTransport
+import org.adaptivedpi.android.engine.TransportCancellation
 import org.adaptivedpi.android.engine.TransportCategory
 import org.adaptivedpi.android.engine.TransportCode
 import org.adaptivedpi.android.engine.TransportFailure
@@ -19,6 +20,7 @@ import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 object ExperimentalTarget {
@@ -85,12 +87,15 @@ internal class ExperimentalTransport(
     val finished = CompletableDeferred<Unit>()
     @Volatile var tunClosed = false
         private set
+    @Volatile private var relayStopped = false
+    val cleanedUp get() = tunClosed && relayStopped
 
     init {
         if (!HevBridge.reserve(token, VpnController.state.value.ordinal)) {
             throw TransportSocketException(TransportCode.HEV_RESERVE, TransportCategory.HEV_INIT)
         }
         try {
+            requirePreviousRelayStopped()
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
             relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, onFailure)
         } catch (error: Exception) {
@@ -116,7 +121,7 @@ internal class ExperimentalTransport(
                         config.fill(0)
                     }
                 } catch (error: Exception) {
-                    failures.recordError(NATIVE_RUN, error, stopping.get(), TransportCategory.INTERNAL)
+                    failures.recordError(NATIVE_RUN, error, if (stopping.get()) TransportCancellation.SESSION else null, TransportCategory.INTERNAL)
                 } catch (error: LinkageError) {
                     failures.recordError(NATIVE_RUN, error, fallback = TransportCategory.INTERNAL)
                 } finally {
@@ -132,7 +137,8 @@ internal class ExperimentalTransport(
 
     fun stop() {
         if (stopping.compareAndSet(false, true)) {
-            HevBridge.stop(token, VpnController.state.value.ordinal)
+            diagnostics.stateChanged(VpnState.Stopping)
+            HevBridge.stop(token, VpnState.Stopping.ordinal)
             relay.close()
         }
     }
@@ -148,7 +154,10 @@ internal class ExperimentalTransport(
         )
     }
 
-    fun stateChanged(state: VpnState) = HevBridge.setFaultState(token, state.ordinal)
+    fun stateChanged(state: VpnState) {
+        diagnostics.stateChanged(state)
+        HevBridge.setFaultState(token, state.ordinal)
+    }
 
     private fun drainFaults(final: Boolean = false) {
         if (final) drainLock.lock() else if (!drainLock.tryLock()) return
@@ -162,16 +171,23 @@ internal class ExperimentalTransport(
     private fun finish(): Boolean {
         try {
             runCatching { drainFaults(final = true) }
+            diagnostics.stateChanged(VpnState.Stopping)
+            relay.close()
             tunClosed = runCatching(tunnel::close).onFailure {
                 failures.recordError(TUN_CLOSE, it, fallback = TransportCategory.CLEANUP)
             }.isSuccess
-            relay.close()
-            val relayStopped = runCatching(relay::awaitShutdown).getOrElse { false }
-            if (!relayStopped) failures.record(TransportFailure(RELAY_STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP))
-            return tunClosed && relayStopped
+            relayStopped = runCatching { relay.awaitShutdown() }.getOrElse {
+                failures.recordError(RELAY_STOP, it, fallback = TransportCategory.CLEANUP)
+                false
+            }
+            return cleanedUp
         } finally {
-            HevBridge.release(token)
-            finished.complete(Unit)
+            if (!relay.isTerminated) drainingRelay.set(relay)
+            try {
+                HevBridge.release(token)
+            } finally {
+                finished.complete(Unit)
+            }
         }
     }
 
@@ -197,10 +213,17 @@ internal class ExperimentalTransport(
           udp-read-write-timeout: 60000
     """.trimIndent()
 
-    private companion object {
-        val nextToken = AtomicLong()
-        val NATIVE_RUN = TransportSite(TransportSubsystem.HEV, TransportOperation.RUN)
-        val TUN_CLOSE = TransportSite(TransportSubsystem.TUN, TransportOperation.CLOSE)
-        val RELAY_STOP = TransportSite(TransportSubsystem.HEV, TransportOperation.STOP)
+    companion object {
+        private val nextToken = AtomicLong()
+        private val drainingRelay = AtomicReference<HevLoopbackRelay?>()
+        private val NATIVE_RUN = TransportSite(TransportSubsystem.HEV, TransportOperation.RUN)
+        private val TUN_CLOSE = TransportSite(TransportSubsystem.TUN, TransportOperation.CLOSE)
+        private val RELAY_STOP = TransportSite(TransportSubsystem.HEV, TransportOperation.STOP)
+
+        fun requirePreviousRelayStopped() {
+            val previous = drainingRelay.get() ?: return
+            if (!previous.isTerminated) throw TransportSocketException(TransportCode.RELAY_DRAINING, TransportCategory.CLEANUP)
+            drainingRelay.compareAndSet(previous, null)
+        }
     }
 }

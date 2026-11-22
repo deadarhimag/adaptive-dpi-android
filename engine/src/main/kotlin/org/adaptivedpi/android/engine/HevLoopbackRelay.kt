@@ -11,11 +11,15 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /** Одноразовый локальный интерфейс HEV. UDP проходит здесь в кадрах поверх TCP. */
 class HevLoopbackRelay(
@@ -25,55 +29,71 @@ class HevLoopbackRelay(
     private val failures: TransportFailureReporter = TransportFailureReporter(),
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
+    init { require(maxSessions > 0) }
+
     private val lock = Any()
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     private val listener = ServerSocket(0, maxSessions, loopback)
     private val permits = Semaphore(maxSessions)
-    private val clients = mutableSetOf<Socket>()
-    private val workers = ThreadPoolExecutor(0, maxSessions * 2, 15, TimeUnit.SECONDS, SynchronousQueue())
+    private val clients = mutableSetOf<Peer>()
+    // Слот соединения резервирует место в обоих пулах. Очереди покрывают возврат потока
+    // из предыдущей задачи в пул, а подключений в работе остаётся не больше maxSessions.
+    private val requests = pool(maxSessions, "HEV request")
+    private val responses = pool(maxSessions, "HEV response")
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+    private val shutdownErrorReported = AtomicBoolean()
     @Volatile private var closing = false
     private val acceptThread = Thread(::accept, "HEV accept").apply { start() }
 
     val port: Int = listener.localPort
     val configSecret: String get() = secret
+    val isTerminated: Boolean get() = !acceptThread.isAlive && requests.isTerminated && responses.isTerminated
+
     private fun accept() {
         try {
-            while (!listener.isClosed) {
-                val socket = listener.accept()
-                synchronized(lock) {
-                    if (closing || !permits.tryAcquire()) {
-                        if (!closing) failures.record(TransportFailure(ACCEPT, TransportCategory.LIMIT, TransportCode.SESSION_LIMIT))
-                        closeRelay(socket)
-                    } else {
-                        clients.add(socket)
-                        try {
-                            workers.execute { handle(socket) }
-                        } catch (_: RejectedExecutionException) {
-                            failures.record(TransportFailure(ACCEPT, TransportCategory.LIMIT, TransportCode.WORKER_REJECTED))
-                            clients.remove(socket)
-                            permits.release()
-                            closeRelay(socket)
+            while (!closing) {
+                permits.acquire()
+                var scheduled = false
+                try {
+                    // При занятых слотах accept приостанавливается. Ожидание остаётся
+                    // в ограниченном backlog сокета и ограничено тайм-аутом HEV.
+                    if (closing) return
+                    val peer = Peer(listener.accept())
+                    synchronized(lock) {
+                        if (!closing) {
+                            clients.add(peer)
+                            try {
+                                requests.execute { handle(peer) }
+                                scheduled = true
+                            } catch (_: RejectedExecutionException) {
+                                reportRejected(ACCEPT)
+                                clients.remove(peer)
+                            }
                         }
                     }
+                    if (!scheduled) closePeer(peer)
+                } finally {
+                    if (!scheduled) permits.release()
                 }
             }
-        } catch (error: IOException) {
-            failures.recordError(ACCEPT, error, closing)
-            if (synchronized(lock) { !closing }) onListenerFailure()
+        } catch (error: Exception) {
+            failures.recordError(ACCEPT, error, if (closing) TransportCancellation.SESSION else null)
+            if (!closing) onListenerFailure()
         }
     }
 
-    private fun handle(socket: Socket) {
+    private fun handle(peer: Peer) {
+        val socket = peer.socket
         try {
-            val (input, output) = observe(AUTH, socket) {
+            if (peer.cancellation.get() != null) return
+            val (input, output) = observe(AUTH, peer) {
                 socket.soTimeout = 5_000
                 DataInputStream(socket.getInputStream()) to DataOutputStream(socket.getOutputStream())
             }
-            observe(AUTH, socket) {
+            observe(AUTH, peer) {
                 authenticate(input, output)
             }
-            val (command, endpoint) = observe(CONTROL_READ, socket) {
+            val (command, endpoint) = observe(CONTROL_READ, peer) {
                 requireProtocol(input.readUnsignedByte() == 5)
                 val command = input.readUnsignedByte()
                 requireProtocol(input.readUnsignedByte() == 0)
@@ -83,14 +103,14 @@ class HevLoopbackRelay(
                 command to endpoint
             }
             when (command) {
-                1 -> tcp(socket, input, output, endpoint)
-                5 -> udp(socket, input, output)
+                1 -> tcp(peer, input, output, endpoint)
+                5 -> udp(peer, input, output)
             }
         } catch (_: Exception) {
             // Отказ регистрирует владелец операции. Ошибки внешних сокетов уже учтены в OutboundTransport.
         } finally {
-            closeRelay(socket)
-            synchronized(lock) { clients.remove(socket) }
+            closePeer(peer)
+            synchronized(lock) { clients.remove(peer) }
             permits.release()
         }
     }
@@ -112,58 +132,67 @@ class HevLoopbackRelay(
         requireProtocol(accepted)
     }
 
-    private fun tcp(socket: Socket, input: DataInputStream, output: DataOutputStream, endpoint: Endpoint) {
-        observe(TCP_READ, socket) { checkDestination(endpoint) }
+    private fun tcp(peer: Peer, input: DataInputStream, output: DataOutputStream, endpoint: Endpoint) {
+        observe(TCP_READ, peer) { checkDestination(endpoint) }
         val connection = try {
             transport.connectTcp(endpoint.address, endpoint.port)
         } catch (error: IOException) {
-            observe(CONTROL_WRITE, socket) { reply(output, 5) }
+            observe(CONTROL_WRITE, peer) { reply(output, 5) }
             throw error
         }
         connection.use {
-            observe(CONTROL_WRITE, socket) { reply(output, 0) }
-            val response = submit(socket) {
+            observe(CONTROL_WRITE, peer) { reply(output, 0) }
+            val response = submit(TCP_SCHEDULE) {
                 try {
                     val buffer = ByteArray(TCP_BUFFER)
                     while (true) {
                         val size = connection.read(buffer)
                         if (size < 0) break
-                        observe(TCP_WRITE, socket) { output.write(buffer, 0, size) }
+                        observe(TCP_WRITE, peer) { output.write(buffer, 0, size) }
                     }
-                    observe(TCP_CLOSE, socket) { socket.shutdownOutput() }
-                } catch (error: IOException) {
-                    closeRelay(socket)
+                    observe(TCP_HALF_CLOSE, peer, fallback = TransportCategory.CLEANUP) { peer.socket.shutdownOutput() }
+                } catch (error: Exception) {
+                    closePeer(peer)
                     throw error
                 }
             }
             try {
                 val buffer = ByteArray(TCP_BUFFER)
                 while (true) {
-                    val size = observe(TCP_READ, socket) { input.read(buffer) }
-                    if (size < 0) break
+                    val size = observe(TCP_READ, peer) { input.read(buffer) }
+                    if (size < 0) {
+                        peer.eof = true
+                        break
+                    }
                     connection.write(buffer, 0, size)
                 }
                 connection.shutdownOutput()
                 response.get()
             } finally {
-                response.cancel(true)
+                finishDirections(peer, connection, response)
             }
         }
     }
 
-    private fun udp(socket: Socket, input: DataInputStream, output: DataOutputStream) {
-        observe(CONTROL_WRITE, socket) { reply(output, 0) }
+    private fun udp(peer: Peer, input: DataInputStream, output: DataOutputStream) {
+        observe(CONTROL_WRITE, peer) { reply(output, 0) }
         val payload = ByteArray(MAX_DATAGRAM)
-        val first = observe(UDP_READ, socket) {
+        val first = observe(UDP_READ, peer) {
             readDatagram(input, payload)?.also { checkDestination(it.endpoint) }
         } ?: return
         transport.connectUdp(first.endpoint.address, first.endpoint.port).use { connection ->
-            val response = submit(socket) {
+            val response = submit(UDP_SCHEDULE) {
                 try {
                     val buffer = ByteArray(MAX_DATAGRAM + 1)
-                    while (!socket.isClosed) {
-                        val size = connection.receive(buffer)
-                        observe(UDP_WRITE, socket) {
+                    while (peer.cancellation.get() == null) {
+                        val size = try {
+                            connection.receive(buffer)
+                        } catch (error: TransportSocketException) {
+                            // Отбрасываем одну слишком большую датаграмму. Ассоциация сохраняется.
+                            if (error.code == TransportCode.DATAGRAM_LIMIT) continue
+                            throw error
+                        }
+                        observe(UDP_WRITE, peer) {
                             output.writeShort(size)
                             output.writeByte(10)
                             output.writeByte(1)
@@ -172,21 +201,21 @@ class HevLoopbackRelay(
                             output.write(buffer, 0, size)
                         }
                     }
-                } catch (error: IOException) {
-                    closeRelay(socket)
+                } catch (error: Exception) {
+                    closePeer(peer)
                     throw error
                 }
             }
             try {
                 connection.send(payload, length = first.length)
-                while (!socket.isClosed) {
-                    val next = observe(UDP_READ, socket) {
+                while (peer.cancellation.get() == null) {
+                    val next = observe(UDP_READ, peer) {
                         readDatagram(input, payload)?.also { requireProtocol(it.endpoint == first.endpoint) }
                     } ?: break
                     connection.send(payload, length = next.length)
                 }
             } finally {
-                response.cancel(true)
+                finishDirections(peer, connection, response)
             }
         }
     }
@@ -225,19 +254,47 @@ class HevLoopbackRelay(
         output.write(byteArrayOf(5, status, 0, 1, 0, 0, 0, 0, 0, 0))
     }
 
-    private inline fun <T> observe(site: TransportSite, socket: Socket, operation: () -> T): T = try {
+    private inline fun <T> observe(
+        site: TransportSite,
+        peer: Peer,
+        fallback: TransportCategory = TransportCategory.UNKNOWN,
+        operation: () -> T,
+    ): T = try {
         operation()
     } catch (error: Exception) {
-        failures.recordError(site, error, closing || socket.isClosed)
+        failures.recordError(site, error, peer.cancellation.get(), fallback, peer.eof)
         throw error
     }
 
-    private fun submit(socket: Socket, operation: () -> Unit) = try {
-        workers.submit(operation)
+    private fun submit(site: TransportSite, operation: () -> Unit) = try {
+        responses.submit(operation)
     } catch (error: RejectedExecutionException) {
-        val category = if (closing || socket.isClosed) TransportCategory.CANCELLED else TransportCategory.LIMIT
-        failures.record(TransportFailure(CONTROL_READ, category, TransportCode.WORKER_REJECTED))
+        reportRejected(site)
         throw error
+    }
+
+    private fun reportRejected(site: TransportSite) {
+        if (closing) {
+            failures.record(TransportFailure(site, TransportCategory.CANCELLED, TransportCode.SESSION_CANCELLED))
+        } else {
+            failures.record(TransportFailure(site, TransportCategory.INTERNAL, TransportCode.WORKER_REJECTED))
+        }
+    }
+
+    private fun finishDirections(peer: Peer, connection: Closeable, response: Future<*>) {
+        connection.close()
+        closePeer(peer)
+        // Future не отменяется. Слот освобождается после фактического выхода обоих направлений.
+        try {
+            response.get()
+        } catch (_: ExecutionException) {
+            // Ошибку уже записал поток, выполнивший ввод-вывод.
+        }
+    }
+
+    private fun closePeer(peer: Peer) {
+        val reason = if (closing) TransportCancellation.SESSION else TransportCancellation.FLOW
+        if (peer.cancellation.compareAndSet(null, reason)) closeRelay(peer.socket)
     }
 
     private fun closeRelay(socket: Closeable) {
@@ -247,20 +304,38 @@ class HevLoopbackRelay(
     }
 
     override fun close() {
-        synchronized(lock) {
+        val peers = synchronized(lock) {
             if (closing) return
             closing = true
-            closeRelay(listener)
-            clients.forEach(::closeRelay)
+            clients.toList()
         }
+        closeRelay(listener)
+        acceptThread.interrupt()
         transport.close()
-        workers.shutdownNow()
+        peers.forEach(::closePeer)
+        requests.shutdown()
+        responses.shutdown()
     }
 
     /** Вызывается рабочим потоком после закрытия и до освобождения сеанса. */
-    fun awaitShutdown(): Boolean {
-        acceptThread.join(2_000)
-        return !acceptThread.isAlive && workers.awaitTermination(2, TimeUnit.SECONDS)
+    fun awaitShutdown(timeoutMillis: Long = 4_000): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        if (acceptThread.isAlive) acceptThread.join(timeoutMillis.coerceAtLeast(1))
+        requests.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+        responses.awaitTermination((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)
+        var pending = 0
+        if (acceptThread.isAlive) pending = pending or 1
+        if (!requests.isTerminated) pending = pending or 2
+        if (!responses.isTerminated) pending = pending or 4
+        if (pending != 0 && shutdownErrorReported.compareAndSet(false, true)) {
+            failures.record(TransportFailure(STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP, result = pending))
+        }
+        return pending == 0
+    }
+
+    private class Peer(val socket: Socket) {
+        val cancellation = AtomicReference<TransportCancellation?>()
+        @Volatile var eof = false
     }
 
     private data class Endpoint(val address: InetAddress, val port: Int)
@@ -269,17 +344,25 @@ class HevLoopbackRelay(
     private companion object {
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
         const val TCP_BUFFER = 8 * 1_024
-        const val MAX_DATAGRAM = 1_252
+        // UDP_BUF_SIZE закреплённой версии HEV. lwIP может фрагментировать IPv4 при MTU 1280.
+        const val MAX_DATAGRAM = 1_500
         val ACCEPT = TransportSite(TransportSubsystem.HEV, TransportOperation.ACCEPT)
         val AUTH = TransportSite(TransportSubsystem.HEV, TransportOperation.AUTHENTICATE)
         val CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.CLOSE)
+        val STOP = TransportSite(TransportSubsystem.HEV, TransportOperation.STOP)
         val CONTROL_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ)
         val CONTROL_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE)
         val TCP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP, TransportDirection.OUTBOUND)
         val TCP_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE, TransportProtocol.TCP, TransportDirection.INBOUND)
-        val TCP_CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.CLOSE, TransportProtocol.TCP, TransportDirection.INBOUND)
+        val TCP_HALF_CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.SHUTDOWN_OUTPUT, TransportProtocol.TCP, TransportDirection.INBOUND)
+        val TCP_SCHEDULE = TransportSite(TransportSubsystem.HEV, TransportOperation.SCHEDULE, TransportProtocol.TCP)
+        val UDP_SCHEDULE = TransportSite(TransportSubsystem.HEV, TransportOperation.SCHEDULE, TransportProtocol.UDP)
         val UDP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.UDP, TransportDirection.OUTBOUND)
         val UDP_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE, TransportProtocol.UDP, TransportDirection.INBOUND)
+
+        fun pool(size: Int, name: String) = ThreadPoolExecutor(
+            size, size, 15, TimeUnit.SECONDS, ArrayBlockingQueue(size), { task -> Thread(task, name) },
+        ).apply { allowCoreThreadTimeOut(true) }
 
         fun requireProtocol(condition: Boolean) {
             if (!condition) throw ProtocolException("Недопустимые данные локального релея.")

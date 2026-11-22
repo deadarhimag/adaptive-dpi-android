@@ -26,6 +26,8 @@ class TcpEcho(socketserver.BaseRequestHandler):
 class UdpEcho(socketserver.BaseRequestHandler):
     def handle(self):
         data, sock = self.request
+        if data == b"adaptive-udp-large":
+            data = bytes(index % 256 for index in range(1400))
         sock.sendto(data, self.client_address)
         print(f"UDP echo: {len(data)} bytes", flush=True)
 

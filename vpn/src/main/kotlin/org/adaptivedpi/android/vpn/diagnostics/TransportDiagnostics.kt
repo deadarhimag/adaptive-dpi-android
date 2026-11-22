@@ -55,7 +55,11 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     private val dropped = AtomicLong()
     private val last = AtomicLong(Long.MIN_VALUE)
     private val finished = AtomicBoolean()
+    private val vpnState = AtomicReference(VpnState.Starting)
     val total get() = operations.get()
+    val state get() = vpnState.get()
+
+    fun stateChanged(state: VpnState) { vpnState.set(state) }
 
     fun record(state: VpnState, failure: TransportFailure, millis: Long = System.currentTimeMillis()) {
         recordBatch(state, failure, millis, millis, 1)

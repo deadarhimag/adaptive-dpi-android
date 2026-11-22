@@ -2,6 +2,8 @@ package org.adaptivedpi.android.engine
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.DataInputStream
@@ -12,6 +14,11 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class HevLoopbackRelayTest {
     private val ip = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -140,12 +147,180 @@ class HevLoopbackRelayTest {
         }
     }
 
-    private fun relay(destination: InetAddress? = ip, test: (HevLoopbackRelay, OutboundTransport) -> Unit) {
-        val transport = OutboundTransport().apply { updateNetwork(policy) }
-        val relay = HevLoopbackRelay(transport, destination) { error("Неожиданная остановка релея") }
+    @Test
+    fun saturatedRelayWaitsForSlotWithoutRejectingQueuedConnection() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        relay(maxSessions = 1, failures = TransportFailureReporter(sink = failures::add)) { relay, _ ->
+            client(relay).use { first ->
+                first.getOutputStream().write(byteArrayOf(5, 1, 2))
+                assertArrayEquals(byteArrayOf(5, 2), DataInputStream(first.getInputStream()).readExact(2))
+                client(relay).use { second ->
+                    second.getOutputStream().write(byteArrayOf(5, 1, 2))
+                    second.soTimeout = 150
+                    assertThrows(SocketTimeoutException::class.java) { second.getInputStream().read() }
+                    first.close()
+                    second.soTimeout = 3_000
+                    assertArrayEquals(byteArrayOf(5, 2), DataInputStream(second.getInputStream()).readExact(2))
+                }
+            }
+            assertFalse(failures.any { it.code == TransportCode.WORKER_REJECTED || it.code == TransportCode.SESSION_LIMIT })
+        }
+    }
+
+    @Test
+    fun mixedTcpAndUdpChurnKeepsBothDirectionsAndReleasesWorkersOnEveryStop() {
+        val peers = Executors.newFixedThreadPool(2)
+        val clients = Executors.newFixedThreadPool(6)
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        try {
+            repeat(3) {
+                ServerSocket(0, 6, ip).use { tcp ->
+                    DatagramSocket(InetSocketAddress(ip, 0)).use { udp ->
+                        tcp.soTimeout = 8_000
+                        udp.soTimeout = 8_000
+                        val tcpServer = peers.submit {
+                            repeat(24) {
+                                tcp.accept().use { peer ->
+                                    peer.soTimeout = 4_000
+                                    val byte = peer.getInputStream().read()
+                                    check(byte >= 0)
+                                    peer.getOutputStream().write(byte)
+                                }
+                            }
+                        }
+                        val udpServer = peers.submit {
+                            repeat(24) {
+                                val datagram = DatagramPacket(ByteArray(16), 16)
+                                udp.receive(datagram)
+                                udp.send(datagram)
+                            }
+                        }
+                        relay(maxSessions = 6, failures = TransportFailureReporter(sink = failures::add)) { relay, _ ->
+                            val flows = (0 until 48).map { index ->
+                                clients.submit {
+                                    client(relay).use { socket ->
+                                        val input = DataInputStream(socket.getInputStream())
+                                        val output = DataOutputStream(socket.getOutputStream())
+                                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                                        if (index % 2 == 0) {
+                                            command(output, 1, tcp.localPort)
+                                            assertEquals(0, reply(input))
+                                            output.writeByte(index)
+                                            socket.shutdownOutput()
+                                            assertEquals(index, input.readUnsignedByte())
+                                        } else {
+                                            command(output, 5, 0)
+                                            assertEquals(0, reply(input))
+                                            frame(output, udp.localPort, byteArrayOf(index.toByte()))
+                                            assertArrayEquals(byteArrayOf(index.toByte()), response(input))
+                                        }
+                                    }
+                                }
+                            }
+                            flows.forEach { it.get(10, TimeUnit.SECONDS) }
+                            tcpServer.get(3, TimeUnit.SECONDS)
+                            udpServer.get(3, TimeUnit.SECONDS)
+                            relay.close()
+                            relay.close()
+                        }
+                    }
+                }
+            }
+            assertFalse(failures.any { it.code == TransportCode.WORKER_REJECTED || it.category == TransportCategory.CLEANUP })
+        } finally {
+            clients.shutdownNow()
+            peers.shutdownNow()
+        }
+    }
+
+    @Test
+    fun oversizedUdpReplyIsDroppedAndFollowingLargeValidReplyKeepsAssociation() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
+            server.soTimeout = 3_000
+            relay(failures = TransportFailureReporter(sink = failures::add)) { relay, _ ->
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    command(output, 5, 0)
+                    assertEquals(0, reply(input))
+                    frame(output, server.localPort, byteArrayOf(1))
+                    val packet = DatagramPacket(ByteArray(16), 16)
+                    server.receive(packet)
+                    val oversized = ByteArray(1_600)
+                    server.send(DatagramPacket(oversized, oversized.size, packet.socketAddress))
+                    val valid = ByteArray(1_400) { it.toByte() }
+                    server.send(DatagramPacket(valid, valid.size, packet.socketAddress))
+                    assertArrayEquals(valid, response(input))
+                    assertEquals(1, failures.count { it.code == TransportCode.DATAGRAM_LIMIT })
+                }
+            }
+        }
+    }
+
+    @Test
+    fun cleanupTimeoutRemainsAnErrorAndReportsTheUnfinishedPoolOnce() {
+        val entered = CountDownLatch(1)
+        val leave = CountDownLatch(1)
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        val reporter = TransportFailureReporter(sink = failures::add)
+        val transport = OutboundTransport(failures = reporter)
+        transport.updateNetwork(object : OutboundSocketPolicy {
+            override fun prepare(socket: Socket) { entered.countDown(); check(leave.await(5, TimeUnit.SECONDS)) }
+            override fun prepare(socket: DatagramSocket) = Unit
+        })
+        val relay = HevLoopbackRelay(transport, ip, maxSessions = 1, failures = reporter) { error("Unexpected listener failure") }
+        try {
+            client(relay).use { socket ->
+                val input = DataInputStream(socket.getInputStream())
+                val output = DataOutputStream(socket.getOutputStream())
+                assertEquals(0, authenticate(relay.configSecret, input, output))
+                command(output, 1, 12345)
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                relay.close()
+                relay.close()
+                assertFalse(relay.awaitShutdown(100))
+                assertFalse(relay.isTerminated)
+                assertFalse(relay.awaitShutdown(100))
+                val failure = failures.single { it.code == TransportCode.RELAY_STOP }
+                assertEquals(TransportCategory.CLEANUP, failure.category)
+                assertEquals(2, failure.result)
+            }
+        } finally {
+            leave.countDown()
+            relay.close()
+            assertTrue(relay.awaitShutdown())
+            assertTrue(relay.isTerminated)
+        }
+    }
+
+    private fun relay(
+        destination: InetAddress? = ip,
+        maxSessions: Int = 16,
+        failures: TransportFailureReporter = TransportFailureReporter(),
+        test: (HevLoopbackRelay, OutboundTransport) -> Unit,
+    ) {
+        val transport = OutboundTransport(failures = failures).apply { updateNetwork(policy) }
+        val relay = HevLoopbackRelay(transport, destination, maxSessions, failures) { error("Неожиданная остановка релея") }
         relay.use { test(it, transport) }
         assertTrue(relay.awaitShutdown())
+        assertTrue(relay.isTerminated)
         assertEquals(0, transport.statistics().activeTcp + transport.statistics().activeUdp)
+    }
+
+    private fun frame(output: DataOutputStream, port: Int, payload: ByteArray) {
+        output.writeShort(payload.size)
+        output.writeByte(10)
+        endpoint(output, port)
+        output.write(payload)
+    }
+
+    private fun response(input: DataInputStream): ByteArray {
+        val length = input.readUnsignedShort()
+        assertEquals(10, input.readUnsignedByte())
+        input.readExact(7)
+        return input.readExact(length)
     }
 
     private fun client(relay: HevLoopbackRelay) = Socket(ip, relay.port).apply { soTimeout = 3_000 }

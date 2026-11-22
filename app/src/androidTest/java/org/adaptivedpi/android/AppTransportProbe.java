@@ -96,6 +96,12 @@ public final class AppTransportProbe extends BroadcastReceiver {
         require(Arrays.equals(udp, datagram(ip, 39052, udp)), "Неверный UDP-ответ");
         result.putBoolean("udp", true);
 
+        byte[] large = new byte[1400];
+        for (int i = 0; i < large.length; i++) large[i] = (byte) i;
+        require(Arrays.equals(large, datagram(ip, 39052, "adaptive-udp-large".getBytes(StandardCharsets.US_ASCII))),
+                "Неверный фрагментированный UDP-ответ");
+        result.putBoolean("udpLarge", true);
+
         byte[] query = {0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
                 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 4, 't', 'e', 's', 't', 0, 0, 1, 0, 1};
         byte[] dns = Arrays.copyOf(query, query.length + 16);
@@ -116,7 +122,7 @@ public final class AppTransportProbe extends BroadcastReceiver {
             socket.setSoTimeout(TIMEOUT);
             socket.connect(ip, port);
             socket.send(new DatagramPacket(payload, payload.length));
-            DatagramPacket reply = new DatagramPacket(new byte[512], 512);
+            DatagramPacket reply = new DatagramPacket(new byte[1500], 1500);
             socket.receive(reply);
             return Arrays.copyOf(reply.getData(), reply.getLength());
         }

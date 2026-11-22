@@ -13,7 +13,7 @@ import org.adaptivedpi.android.vpn.diagnostics.TransportSessionDiagnostics
 
 internal fun TransportSessionDiagnostics.reporter() = TransportFailureReporter(
     errnoOf = { error -> generateSequence(error, Throwable::cause).take(8).filterIsInstance<ErrnoException>().firstOrNull()?.errno },
-    sink = { failure -> record(VpnController.state.value, failure) },
+    sink = { failure -> record(state, failure) },
 )
 
 internal class NativeTransportObserver(private val diagnostics: TransportSessionDiagnostics) {
