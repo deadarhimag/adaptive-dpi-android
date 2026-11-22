@@ -26,7 +26,8 @@ object VpnController {
     }
 
     // Запросы Activity и события службы обрабатываются в главном потоке.
-    fun requestStart(context: Context, target: String? = null): VpnConsentRequest? {
+    fun requestStart(context: Context, target: String? = null, applicationPackage: String? = null): VpnConsentRequest? {
+        require(target == null || applicationPackage == null)
         val id = "$processId:${UUID.randomUUID()}"
         if (!lifecycle.beginConsent(id)) return null
         transportSnapshot.value = null
@@ -35,7 +36,7 @@ object VpnController {
             val intent = VpnService.prepare(context)
             if (intent == null) {
                 lifecycle.permissionResult(id, VpnEventType.PermissionAlreadyGranted)
-                start(context, id, target)
+                start(context, id, target, applicationPackage)
                 null
             } else {
                 VpnConsentRequest(id, intent)
@@ -48,7 +49,7 @@ object VpnController {
 
     fun consentLaunched(id: String) = lifecycle.permissionResult(id, VpnEventType.PermissionRequested)
 
-    fun completeConsent(context: Context, id: String, granted: Boolean, target: String? = null) {
+    fun completeConsent(context: Context, id: String, granted: Boolean, target: String? = null, applicationPackage: String? = null) {
         // В новом процессе восстанавливается только запрос, для которого Android доставил результат.
         if (!id.startsWith("$processId:")) lifecycle.beginConsent(id, restoring = true)
         if (!lifecycle.isAwaitingConsent(id)) return
@@ -61,7 +62,7 @@ object VpnController {
         lifecycle.permissionResult(id, VpnEventType.PermissionGranted)
         try {
             if (VpnService.prepare(context) == null) {
-                start(context, id, target)
+                start(context, id, target, applicationPackage)
             } else {
                 lifecycle.update(id, VpnEvent.ConsentRevoked)
             }
@@ -93,12 +94,13 @@ object VpnController {
     internal fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode?) =
         lifecycle.serviceEnded(id, event, code)
 
-    private fun start(context: Context, id: String, target: String?) {
+    private fun start(context: Context, id: String, target: String?, applicationPackage: String?) {
         lifecycle.update(id, VpnEvent.StartRequested)
         val intent = Intent(context, AdaptiveVpnService::class.java)
             .setAction(AdaptiveVpnService.ACTION_START)
             .putExtra(AdaptiveVpnService.EXTRA_SESSION_ID, id)
             .putExtra(AdaptiveVpnService.EXTRA_TARGET, target)
+            .putExtra(AdaptiveVpnService.EXTRA_APPLICATION, applicationPackage)
         try {
             checkNotNull(context.startForegroundService(intent))
         } catch (exception: RuntimeException) {

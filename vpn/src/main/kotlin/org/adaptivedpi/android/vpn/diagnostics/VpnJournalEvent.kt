@@ -29,6 +29,7 @@ enum class VpnEventType(val level: VpnEventLevel, val description: String) {
     ActivityRestored(VpnEventLevel.INFO, "Состояние экрана восстановлено при пересоздании Activity."),
     ProcessStateRestored(VpnEventLevel.INFO, "Сохранённое состояние экрана восстановлено в новом процессе."),
     TransportTunCreated(VpnEventLevel.INFO, "Создан экспериментальный IPv4 TUN."),
+    ApplicationRoutesConfigured(VpnEventLevel.INFO, "Для выбранного приложения настроен маршрут 0.0.0.0/0 и DNS физической сети по IPv4. IPv6 заблокирован."),
     TransportInitializing(VpnEventLevel.INFO, "Инициализируется локальный транспорт HEV."),
     TransportStarted(VpnEventLevel.INFO, "Локальный транспорт запущен."),
     TransportTraffic(VpnEventLevel.INFO, "Зафиксирована передача данных в обе стороны через TUN."),

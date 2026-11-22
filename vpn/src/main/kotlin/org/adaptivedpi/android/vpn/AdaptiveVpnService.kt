@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +32,7 @@ import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.adaptivedpi.android.vpn.diagnostics.VpnSnapshot
 import java.io.IOException
+import java.net.Inet4Address
 import java.util.UUID
 
 class AdaptiveVpnService : VpnService() {
@@ -73,7 +75,9 @@ class AdaptiveVpnService : VpnService() {
         }
         val id = intent?.getStringExtra(EXTRA_SESSION_ID)
         when (intent?.action) {
-            ACTION_START -> if (sessionId == null) startSession(id, intent.getStringExtra(EXTRA_TARGET))
+            ACTION_START -> if (sessionId == null) {
+                startSession(id, intent.getStringExtra(EXTRA_TARGET), intent.getStringExtra(EXTRA_APPLICATION))
+            }
             ACTION_STOP -> {
                 if (id != null) VpnController.stopFromNotification(id)
                 if (sessionId == null) stopDeliveredStart(startId)
@@ -102,7 +106,7 @@ class AdaptiveVpnService : VpnService() {
         VpnDiagnostics.recordAsync(DiagnosticCode.VpnCleanupFailed, error, diagnosticSnapshot())
     }
 
-    private fun startSession(id: String?, experimentalTarget: String?) {
+    private fun startSession(id: String?, experimentalTarget: String?, applicationPackage: String?) {
         if (id != null && VpnController.attachService(id) { finishSession() }) {
             sessionId = id
         }
@@ -110,7 +114,7 @@ class AdaptiveVpnService : VpnService() {
         try {
             // Даже устаревший ACTION_START мог прийти через startForegroundService.
             val attachedId = sessionId
-            showForegroundNotification(attachedId, experimentalTarget != null)
+            showForegroundNotification(attachedId, experimentalTarget != null || applicationPackage != null)
             if (attachedId == null || VpnController.state.value == VpnState.Stopping) {
                 finishSession()
                 return
@@ -119,15 +123,34 @@ class AdaptiveVpnService : VpnService() {
             failureCode = DiagnosticCode.TunnelFailed
             val builder = Builder()
                 .setSession(getString(R.string.vpn_service_name))
-                .addAllowedApplication(packageName)
                 .addAddress("192.0.2.1", 32)
-            if (experimentalTarget == null) {
+            if (applicationPackage != null) {
+                failureCode = DiagnosticCode.TransportApplicationUnavailable
+                require(experimentalTarget == null && applicationPackage != packageName && ExperimentalApplication.isPackageName(applicationPackage))
+                builder.addAllowedApplication(applicationPackage)
+                failureCode = DiagnosticCode.TunnelFailed
+            } else {
+                builder.addAllowedApplication(packageName)
+            }
+            if (experimentalTarget == null && applicationPackage == null) {
                 builder.addAddress("2001:db8::1", 128)
             } else {
-                val target = ExperimentalTarget.parse(experimentalTarget) ?: throw IOException("Недопустимый тестовый адрес.")
+                val target = experimentalTarget?.let { ExperimentalTarget.parse(it) ?: throw IOException("Недопустимый тестовый адрес.") }
                 val physical = connectivity.activeNetwork?.takeIf(::isPhysical)
                     ?: throw IOException("Нет активного физического подключения для эксперимента.")
-                builder.addRoute(target, 32).setMtu(1280).setUnderlyingNetworks(arrayOf(physical))
+                builder.setMtu(1280).setUnderlyingNetworks(arrayOf(physical))
+                if (target != null) {
+                    builder.addRoute(target, 32)
+                } else {
+                    failureCode = DiagnosticCode.TransportIpv4Unavailable
+                    val link = connectivity.getLinkProperties(physical)
+                    val dns = link?.dnsServers.orEmpty().filterIsInstance<Inet4Address>()
+                        .filterNot { it.isLoopbackAddress || it.isAnyLocalAddress || it.isMulticastAddress }
+                    check(link?.linkAddresses?.any { it.address is Inet4Address } == true && dns.isNotEmpty())
+                    builder.addRoute("0.0.0.0", 0).setMetered(false)
+                    dns.forEach { builder.addDnsServer(it) }
+                    failureCode = DiagnosticCode.TunnelFailed
+                }
                 tunnel = builder.establish()
                 val descriptor = tunnel
                 if (descriptor == null) {
@@ -135,6 +158,7 @@ class AdaptiveVpnService : VpnService() {
                     return
                 }
                 VpnController.transportTunCreated(attachedId)
+                if (applicationPackage != null) recordTransportEvent(VpnEventType.ApplicationRoutesConfigured)
                 activeMarker = VpnDiagnostics.markActive(diagnosticSnapshot(), attachedId.toSessionUuid())
                 failureCode = DiagnosticCode.EngineFailed
                 recordTransportEvent(VpnEventType.TransportInitializing)
@@ -204,6 +228,7 @@ class AdaptiveVpnService : VpnService() {
         val engine = transport ?: return
         val id = sessionId ?: return
         val stats = engine.snapshot()
+        logConnectionChanges(stats)
         VpnController.updateTransport(stats)
         if (stats.running && !transportConfirmed) {
             transportConfirmed = true
@@ -223,6 +248,14 @@ class AdaptiveVpnService : VpnService() {
             return
         }
         stopHandler.postDelayed(refreshTransport, 500)
+    }
+
+    private fun logConnectionChanges(stats: TransportSnapshot) {
+        if (!stats.applicationMode) return
+        val previous = VpnController.transport.value
+        if (previous != null && previous.openedTcp == stats.openedTcp && previous.closedTcp == stats.closedTcp &&
+            previous.openedUdp == stats.openedUdp && previous.closedUdp == stats.closedUdp) return
+        Log.i("AdaptiveTun", "Соединения за сеанс, открыто/закрыто: TCP ${stats.openedTcp}/${stats.closedTcp}, UDP ${stats.openedUdp}/${stats.closedUdp}")
     }
 
     private fun failTransport(id: String) {
@@ -328,8 +361,18 @@ class AdaptiveVpnService : VpnService() {
         if (runningTransport != null) {
             val transportId = sessionId?.toSessionUuid()
             closingTransport = runningTransport
-            VpnController.transport.value?.let { VpnController.updateTransport(it.copy(running = false, connections = 0)) }
+            val stats = VpnController.transport.value
             runningTransport.stop()
+            val stopped = runCatching(runningTransport::snapshot).getOrNull() ?: stats
+            if (stopped != null) {
+                val snapshot = stopped.copy(
+                    running = false,
+                    tunSentPackets = maxOf(stopped.tunSentPackets, stats?.tunSentPackets ?: 0),
+                    tunReceivedPackets = maxOf(stopped.tunReceivedPackets, stats?.tunReceivedPackets ?: 0),
+                )
+                logConnectionChanges(snapshot)
+                VpnController.updateTransport(snapshot)
+            }
             runningTransport.finished.invokeOnCompletion {
                 // Запись относится к прежнему сеансу даже при уничтожении Activity.
                 VpnEventHistory.record(VpnEventType.TransportStopped, transportId)
@@ -415,6 +458,7 @@ class AdaptiveVpnService : VpnService() {
         internal const val ACTION_START = "org.adaptivedpi.android.vpn.START"
         internal const val EXTRA_SESSION_ID = "org.adaptivedpi.android.vpn.SESSION_ID"
         internal const val EXTRA_TARGET = "org.adaptivedpi.android.vpn.TARGET"
+        internal const val EXTRA_APPLICATION = "org.adaptivedpi.android.vpn.APPLICATION"
         private const val ACTION_STOP = "org.adaptivedpi.android.vpn.STOP"
         private const val CHANNEL_ID = "vpn_session"
         private const val NOTIFICATION_ID = 1

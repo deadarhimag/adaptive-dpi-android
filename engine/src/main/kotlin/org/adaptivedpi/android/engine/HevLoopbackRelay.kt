@@ -4,6 +4,7 @@ import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.ProtocolException
 import java.net.ServerSocket
@@ -20,15 +21,16 @@ import java.util.concurrent.atomic.AtomicLong
 /** Одноразовый локальный интерфейс HEV. UDP проходит здесь в кадрах поверх TCP. */
 class HevLoopbackRelay(
     private val transport: OutboundTransport,
-    private val destination: InetAddress,
+    private val destination: InetAddress?,
+    maxSessions: Int = 16,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     private val lock = Any()
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
-    private val listener = ServerSocket(0, MAX_SESSIONS, loopback)
-    private val permits = Semaphore(MAX_SESSIONS)
+    private val listener = ServerSocket(0, maxSessions, loopback)
+    private val permits = Semaphore(maxSessions)
     private val clients = mutableSetOf<Socket>()
-    private val workers = ThreadPoolExecutor(0, MAX_SESSIONS * 2, 15, TimeUnit.SECONDS, SynchronousQueue())
+    private val workers = ThreadPoolExecutor(0, maxSessions * 2, 15, TimeUnit.SECONDS, SynchronousQueue())
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val errors = AtomicLong()
     private var closing = false
@@ -203,7 +205,11 @@ class HevLoopbackRelay(
     }
 
     private fun checkDestination(endpoint: Endpoint) {
-        requireProtocol(endpoint.address == destination && endpoint.port != 0)
+        val address = endpoint.address
+        requireProtocol(endpoint.port != 0 && if (destination != null) address == destination else {
+            address is Inet4Address && !address.isAnyLocalAddress && !address.isLoopbackAddress &&
+                !address.isMulticastAddress && (address.address[0].toInt() and 255) < 240
+        })
     }
 
     private fun reply(output: DataOutputStream, status: Byte) {
@@ -232,7 +238,6 @@ class HevLoopbackRelay(
 
     private companion object {
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
-        const val MAX_SESSIONS = 16
         const val TCP_BUFFER = 8 * 1_024
         const val MAX_DATAGRAM = 1_252
 

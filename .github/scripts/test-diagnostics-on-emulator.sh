@@ -13,6 +13,7 @@ mkdir -p "$log_dir"
 emulator_log="$log_dir/emulator.log"
 emulator_pid=
 fixture_pid=
+tls_dir=
 
 fail() {
   echo "::error::$*" >&2
@@ -26,7 +27,7 @@ cleanup() {
     if [[ -n "$emulator_pid" ]]; then
       timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
-        TunTransportTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
+        TunTransportTest:I AppTransportTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
         > "$log_dir/android.log" 2>&1 || true
       timeout 10s "$adb" -s "$serial" shell run-as org.adaptivedpi.android cat no_backup/vpn-events/journal \
         > "$log_dir/vpn-journal.txt" 2>&1 || true
@@ -42,6 +43,10 @@ cleanup() {
   fi
   if [[ -n "$fixture_pid" ]]; then
     kill "$fixture_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$tls_dir" ]]; then
+    rm -f -- "$tls_dir/key.pem" "$tls_dir/cert.pem"
+    rmdir -- "$tls_dir"
   fi
 }
 trap cleanup EXIT
@@ -93,7 +98,13 @@ done
 "$adb" -s "$serial" shell appops set org.adaptivedpi.android ACTIVATE_VPN allow
 fixture_log="$log_dir/fixture.log"
 # 10.0.2.2 в госте — адрес loopback хоста. VPN направляет только этот /32.
-python3 scripts/transport-fixture.py --bind 127.0.0.1 > "$fixture_log" 2>&1 &
+tls_dir=$(mktemp -d "$RUNNER_TEMP/transport-tls.XXXXXX")
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=10.0.2.2' \
+  -addext 'subjectAltName=IP:10.0.2.2' -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \
+  2> "$log_dir/openssl.log"
+fixture_certificate=$(openssl x509 -in "$tls_dir/cert.pem" -outform DER | base64 -w0)
+python3 scripts/transport-fixture.py --bind 127.0.0.1 \
+  --https-certificate "$tls_dir/cert.pem" --https-key "$tls_dir/key.pem" > "$fixture_log" 2>&1 &
 fixture_pid=$!
 for ((attempt=0; attempt<20; attempt++)); do
   if grep -qx ready "$fixture_log"; then break; fi
@@ -105,8 +116,9 @@ if ! grep -qx ready "$fixture_log"; then
   fail "Локальный стенд TCP/UDP/DNS не запустился."
 fi
 ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest,org.adaptivedpi.android.TunTransportInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=org.adaptivedpi.android.BuildAndDiagnosticsUiTest,org.adaptivedpi.android.TunTransportInstrumentedTest,org.adaptivedpi.android.ApplicationTransportInstrumentedTest \
   -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
+  -Pandroid.testInstrumentationRunnerArguments.transportCertificate="$fixture_certificate" \
   -Pandroid.testInstrumentationRunnerArguments.requireTransportFixture=true \
   2>&1 | tee "$log_dir/gradle-tests.log"
-timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I '*:S' || true
+timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I '*:S' || true

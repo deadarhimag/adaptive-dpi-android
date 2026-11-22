@@ -25,7 +25,12 @@ data class OutboundStatistics(
     val sentDatagrams: Long,
     val receivedDatagrams: Long,
     val failedOperations: Long,
-)
+    val openedTcp: Long,
+    val openedUdp: Long,
+) {
+    val closedTcp get() = openedTcp - activeTcp
+    val closedUdp get() = openedUdp - activeUdp
+}
 
 /** Исходящие сокеты одного сеанса. Вызовы ввода-вывода блокирующие, их выполняют рабочие потоки. */
 class OutboundTransport(
@@ -42,6 +47,8 @@ class OutboundTransport(
     private val sentDatagrams = AtomicLong()
     private val receivedDatagrams = AtomicLong()
     private val failedOperations = AtomicLong()
+    private var openedTcp = 0L
+    private var openedUdp = 0L
 
     init {
         require(maxSockets in 1..1_024)
@@ -88,6 +95,8 @@ class OutboundTransport(
             sentDatagrams = sentDatagrams.get(),
             receivedDatagrams = receivedDatagrams.get(),
             failedOperations = failedOperations.get(),
+            openedTcp = openedTcp,
+            openedUdp = openedUdp,
         )
     }
 
@@ -164,6 +173,7 @@ class OutboundTransport(
             synchronized(lock) {
                 if (!sockets.containsKey(socket)) throw SocketException("Исходящий сокет закрыт при смене сети.")
                 sockets[socket] = true
+                if (socket is Socket) openedTcp++ else openedUdp++
                 connected = true
             }
             socket

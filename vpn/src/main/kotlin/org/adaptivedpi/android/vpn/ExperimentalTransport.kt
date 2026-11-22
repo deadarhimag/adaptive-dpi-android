@@ -22,6 +22,11 @@ object ExperimentalTarget {
     }
 }
 
+object ExperimentalApplication {
+    fun isPackageName(value: String): Boolean = value.length <= 223 &&
+        value.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+"))
+}
+
 data class TransportSnapshot(
     val running: Boolean,
     val tunSentPackets: Long,
@@ -30,6 +35,11 @@ data class TransportSnapshot(
     val receivedBytes: Long,
     val connections: Int,
     val errors: Long,
+    val applicationMode: Boolean = false,
+    val openedTcp: Long = 0,
+    val closedTcp: Long = 0,
+    val openedUdp: Long = 0,
+    val closedUdp: Long = 0,
 ) {
     val transferred get() = tunSentPackets > 0 && tunReceivedPackets > 0 && sentBytes > 0 && receivedBytes > 0
 }
@@ -47,13 +57,14 @@ internal object HevBridge {
 internal class ExperimentalTransport(
     service: VpnService,
     network: Network,
-    target: Inet4Address,
+    private val target: Inet4Address?,
     private val tunnel: ParcelFileDescriptor,
     onFailure: () -> Unit,
 ) {
     private val token = nextToken.incrementAndGet()
     private val stopping = AtomicBoolean()
-    private val outbound = OutboundTransport(maxSockets = 16, readTimeoutMillis = 60_000)
+    private val sessionLimit = if (target == null) 32 else 16
+    private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000)
     private val relay: HevLoopbackRelay
     val finished = CompletableDeferred<Unit>()
     @Volatile var tunClosed = false
@@ -63,7 +74,7 @@ internal class ExperimentalTransport(
         if (!HevBridge.reserve(token)) throw IOException("Предыдущий сетевой сеанс ещё завершается.")
         try {
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
-            relay = HevLoopbackRelay(outbound, target, onFailure)
+            relay = HevLoopbackRelay(outbound, target, sessionLimit, onFailure)
         } catch (error: Exception) {
             outbound.close()
             HevBridge.release(token)
@@ -110,6 +121,7 @@ internal class ExperimentalTransport(
         return TransportSnapshot(
             HevBridge.isReady(token), counters[0], counters[1], stats.sentBytes, stats.receivedBytes,
             stats.activeTcp + stats.activeUdp, stats.failedOperations + relay.failedSessions,
+            target == null, stats.openedTcp, stats.closedTcp, stats.openedUdp, stats.closedUdp,
         )
     }
 
@@ -138,7 +150,7 @@ internal class ExperimentalTransport(
         misc:
           log-file: '/dev/null'
           log-level: 'error'
-          max-session-count: 16
+          max-session-count: $sessionLimit
           tcp-buffer-size: 32768
           udp-recv-buffer-size: 32768
           udp-copy-buffer-nums: 4

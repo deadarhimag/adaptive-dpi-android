@@ -43,6 +43,7 @@ import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.ExperimentalTarget
+import org.adaptivedpi.android.vpn.ExperimentalApplication
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
@@ -66,6 +67,7 @@ internal fun AdaptiveDpiApp(
     onShareCombinedReport: (String) -> Unit,
     onStartVpn: () -> Unit,
     onStartTransport: (String) -> Unit,
+    onStartApplicationTransport: (String) -> Unit,
     transport: TransportSnapshot?,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
@@ -96,6 +98,7 @@ internal fun AdaptiveDpiApp(
                         vpnState = vpnState,
                         onStartVpn = onStartVpn,
                         onStartTransport = onStartTransport,
+                        onStartApplicationTransport = onStartApplicationTransport,
                         transport = transport,
                         onStopVpn = onStopVpn,
                         onVpnSettings = onVpnSettings,
@@ -178,6 +181,7 @@ private fun HomeScreen(
     vpnState: VpnState,
     onStartVpn: () -> Unit,
     onStartTransport: (String) -> Unit,
+    onStartApplicationTransport: (String) -> Unit,
     transport: TransportSnapshot?,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
@@ -188,8 +192,12 @@ private fun HomeScreen(
         VpnStatus(vpnState)
         Text(
             text = stringResource(
-                if (vpnState == VpnState.TransportStarting || vpnState == VpnState.EngineRunning)
-                    R.string.vpn_transport_scope else R.string.vpn_test_scope,
+                when {
+                    vpnState == VpnState.TransportStarting -> R.string.vpn_transport_initializing
+                    vpnState == VpnState.EngineRunning && transport?.applicationMode == true -> R.string.vpn_app_transport_scope
+                    vpnState == VpnState.EngineRunning -> R.string.vpn_transport_scope
+                    else -> R.string.vpn_test_scope
+                },
             ),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -231,6 +239,21 @@ private fun HomeScreen(
         }
     }
     if (vpnState.canStart) {
+        var application by rememberSaveable { mutableStateOf("com.android.chrome") }
+        AdaptivePanel {
+            Text(stringResource(R.string.vpn_app_transport_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.vpn_app_transport_scope))
+            OutlinedTextField(
+                value = application,
+                onValueChange = { if (it.length <= 223) application = it },
+                label = { Text(stringResource(R.string.vpn_app_transport_package)) },
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = { onStartApplicationTransport(application.trim()) },
+                enabled = ExperimentalApplication.isPackageName(application.trim()),
+            ) { Text(stringResource(R.string.vpn_app_transport_start)) }
+        }
         var target by rememberSaveable { mutableStateOf("") }
         AdaptivePanel {
             Text(stringResource(R.string.vpn_transport_title), style = MaterialTheme.typography.titleMedium)
@@ -314,6 +337,10 @@ private fun DiagnosticsScreen(vpnState: VpnState, transport: TransportSnapshot?)
         Text(stringResource(R.string.engine_status), style = MaterialTheme.typography.titleMedium)
         EngineStatus(vpnState, transport)
         if (transport != null) {
+            if (transport.applicationMode) {
+                Text(stringResource(R.string.vpn_app_transport_scope))
+                Text(stringResource(R.string.vpn_app_transport_connections, transport.openedTcp, transport.closedTcp, transport.openedUdp, transport.closedUdp))
+            }
             Text(
                 stringResource(
                     R.string.vpn_transport_counters, transport.tunSentPackets, transport.tunReceivedPackets,

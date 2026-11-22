@@ -104,7 +104,7 @@ cp "$apk" "$destination/app-debug.apk"
 cp "$test_apk" "$destination/app-debug-androidTest.apk"
 cd "$destination"
 if [[ "${CI_TESTS_VERIFIED:-}" == true ]]; then
-  checks='JVM, Android lint, Compose, TCP/UDP/DNS через TUN на Android-эмуляторе: успешно'
+  checks='JVM, Android lint, Compose, TCP/UDP/DNS и HTTPS отдельного пакета через TUN на Android-эмуляторе: успешно'
 else
   checks='Тесты CI: сведения отсутствуют'
 fi

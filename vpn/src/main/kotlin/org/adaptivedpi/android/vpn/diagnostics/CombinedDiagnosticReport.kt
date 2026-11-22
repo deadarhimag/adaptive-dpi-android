@@ -29,7 +29,12 @@ fun combinedDiagnosticReport(
     }
     appendLine("Сетевой движок: $engine")
     if (transport != null) {
-        appendLine("Ограничение маршрутизации: один частный IPv4-адрес, IPv6 заблокирован для пакета VPN.")
+        if (transport.applicationMode) {
+            appendLine("Маршрутизация: 0.0.0.0/0 для выбранного приложения, DNS физической сети по IPv4. IPv6 заблокирован для выбранного приложения.")
+            appendLine("Соединения открыто/закрыто: TCP ${transport.openedTcp}/${transport.closedTcp}, UDP ${transport.openedUdp}/${transport.closedUdp}.")
+        } else {
+            appendLine("Ограничение маршрутизации: один частный IPv4-адрес, IPv6 заблокирован для пакета VPN.")
+        }
         appendLine("Передача данных в обе стороны: ${if (transport.transferred) "зафиксирована" else "ожидается"}")
         appendLine("Пакеты TUN: отправлено ${transport.tunSentPackets}, получено ${transport.tunReceivedPackets}")
         appendLine("Байты прямого тракта: отправлено ${transport.sentBytes}, получено ${transport.receivedBytes}")

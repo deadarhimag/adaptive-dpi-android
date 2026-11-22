@@ -64,6 +64,8 @@ class OutboundTransportTest {
                         assertArrayEquals(response, actual.copyOf(length))
                     }
                     assertEquals(0, transport.statistics().activeTcp)
+                    assertEquals(1L, transport.statistics().openedTcp)
+                    assertEquals(1L, transport.statistics().closedTcp)
                     assertEquals(request.size.toLong(), transport.statistics().sentBytes)
                     assertEquals(response.size.toLong(), transport.statistics().receivedBytes)
                     assertEquals(0L, transport.statistics().failedOperations)
@@ -102,6 +104,8 @@ class OutboundTransportTest {
                 }
                 val stats = transport.statistics()
                 assertEquals(0, stats.activeUdp)
+                assertEquals(1L, stats.openedUdp)
+                assertEquals(1L, stats.closedUdp)
                 assertEquals(1L, stats.sentDatagrams)
                 assertEquals(1L, stats.receivedDatagrams)
                 assertEquals(query.size.toLong(), stats.sentBytes)

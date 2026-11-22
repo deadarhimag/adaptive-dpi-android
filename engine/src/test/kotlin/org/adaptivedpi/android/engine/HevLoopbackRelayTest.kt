@@ -119,9 +119,30 @@ class HevLoopbackRelayTest {
         }
     }
 
-    private fun relay(test: (HevLoopbackRelay, OutboundTransport) -> Unit) {
+    @Test
+    fun applicationRelayRejectsLoopbackMulticastAndIpv6BeforeOpeningSockets() {
+        relay(destination = null) { relay, transport ->
+            for (address in listOf("127.0.0.1", "224.0.0.1", "255.255.255.255", "2001:db8::2")) {
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    val bytes = InetAddress.getByName(address).address
+                    output.write(byteArrayOf(5, 1, 0))
+                    output.writeByte(if (bytes.size == 4) 1 else 4)
+                    output.write(bytes)
+                    output.writeShort(80)
+                    assertEquals(-1, input.read())
+                }
+            }
+            assertEquals(0L, transport.statistics().openedTcp)
+            assertEquals(0L, transport.statistics().failedOperations)
+        }
+    }
+
+    private fun relay(destination: InetAddress? = ip, test: (HevLoopbackRelay, OutboundTransport) -> Unit) {
         val transport = OutboundTransport().apply { updateNetwork(policy) }
-        val relay = HevLoopbackRelay(transport, ip) { error("Неожиданная остановка релея") }
+        val relay = HevLoopbackRelay(transport, destination) { error("Неожиданная остановка релея") }
         relay.use { test(it, transport) }
         assertTrue(relay.awaitShutdown())
         assertEquals(0, transport.statistics().activeTcp + transport.statistics().activeUdp)

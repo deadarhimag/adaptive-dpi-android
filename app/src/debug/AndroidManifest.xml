@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission android:name="${applicationId}.permission.TRANSPORT_PROBE" android:protectionLevel="signature" />
+    <uses-permission android:name="${applicationId}.permission.TRANSPORT_PROBE" />
+    <queries>
+        <package android:name="org.adaptivedpi.android.test" />
+    </queries>
     <application>
         <activity android:name=".TransportTestActivity" android:exported="false" />
     </application>

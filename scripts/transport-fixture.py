@@ -1,7 +1,9 @@
 """Локальный TCP/UDP echo и фиксированный DNS A-ответ для Android-стенда."""
 
 import argparse
+import http.server
 import socketserver
+import ssl
 import threading
 
 
@@ -36,17 +38,48 @@ class DnsFixture(socketserver.BaseRequestHandler):
             print(f"DNS/UDP: {len(data)}/{len(ANSWER)} bytes", flush=True)
 
 
+class HttpsFixture(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/probe":
+            self.send_error(404)
+            return
+        body = b"adaptive-tun-https\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        print("HTTPS fixture: expected response sent", flush=True)
+
+    def log_message(self, *_args):
+        pass
+
+
+def start_https(address, cert, key):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server = http.server.ThreadingHTTPServer((address, 39054), HttpsFixture)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return server
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--https-certificate")
+    parser.add_argument("--https-key")
     args = parser.parse_args()
+    if bool(args.https_certificate) != bool(args.https_key):
+        parser.error("Для HTTPS укажите сертификат и ключ.")
     address = args.bind
     with (
         socketserver.ThreadingTCPServer((address, 39052), TcpEcho) as tcp,
         socketserver.UDPServer((address, 39052), UdpEcho) as udp,
         socketserver.UDPServer((address, 39053), DnsFixture) as dns,
     ):
-        for server in (tcp, udp):
+        servers = [tcp, udp]
+        if args.https_certificate:
+            servers.append(start_https(address, args.https_certificate, args.https_key))
+        for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         print("ready", flush=True)
         dns.serve_forever()
