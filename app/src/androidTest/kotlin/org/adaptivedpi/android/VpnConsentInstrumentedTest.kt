@@ -19,7 +19,7 @@ import org.junit.Test
 
 class VpnConsentInstrumentedTest {
     @Test
-    fun grantsVpnThroughAndroidConfirmationDialog() = runBlocking {
+    fun grantsVpnThroughAndroidConfirmationDialog() = runBlocking<Unit> {
         assumeTrue(InstrumentationRegistry.getArguments().getString("verifyFreshVpnConsent") == "true")
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
         val settings = automation.serviceInfo
@@ -39,7 +39,7 @@ class VpnConsentInstrumentedTest {
                     var confirmed = false
                     while (!confirmed) {
                         val root = automation.rootInActiveWindow
-                        if (root?.packageName == "com.android.vpndialogs") {
+                        if (root?.packageName?.toString() == "com.android.vpndialogs") {
                             confirmed = root.findAccessibilityNodeInfosByViewId("android:id/button1")
                                 .any { it.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
                         }

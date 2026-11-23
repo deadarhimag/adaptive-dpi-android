@@ -32,7 +32,8 @@ def verify(results, consent_log):
                  "INSTRUMENTATION_CODE: -1"):
         if line not in consent.splitlines():
             raise ValueError(f"В протоколе системного согласия отсутствует {line}")
-    if not re.search(r"^OK \(1 test\)$", consent, re.MULTILINE):
+    statuses = re.findall(r"^INSTRUMENTATION_STATUS_CODE: (-?\d+)$", consent, re.MULTILINE)
+    if statuses != ["1", "0"] or not re.search(r"^OK \(1 test\)$", consent, re.MULTILINE):
         raise ValueError("Системное согласие на VPN не подтверждено успешным тестом")
 
     reports = sorted(results.rglob("TEST-*.xml"))
