@@ -19,6 +19,8 @@ object VpnController {
     val state = lifecycle.state
     val resourcesBlocked = lifecycle.resourcesBlocked
     val cleanupDelay = lifecycle.cleanupDelay
+    /** Идентификатор текущей операции VPN. Читать только в главном потоке. */
+    val currentSessionId: UUID? get() = lifecycle.currentSessionId
     private val transportSnapshot = MutableStateFlow<TransportSnapshot?>(null)
     val transport = transportSnapshot.asStateFlow()
     val processIdentity get() = processId

@@ -86,6 +86,28 @@ sys.stdout.buffer.write(ET.tostring(root, encoding="utf-8", xml_declaration=True
   fi
 }
 
+capture_vpn_journal() {
+  local user paths
+  if ! user=$(timeout 6s "$adb" -s "$serial" shell am get-current-user | tr -d '\r') ||
+      [[ ! "$user" =~ ^[0-9]+$ ]]; then
+    echo 'Не удалось определить текущего пользователя Android.'
+    return
+  fi
+  echo "Пользователь Android: $user"
+  if ! paths=$(timeout 6s "$adb" -s "$serial" shell pm path --user "$user" org.adaptivedpi.android) ||
+      [[ "$paths" != package:* ]]; then
+    echo 'Установку APK Adaptive DPI у текущего пользователя подтвердить не удалось.'
+    return
+  fi
+  echo 'APK Adaptive DPI установлен.'
+  if ! timeout 10s "$adb" -s "$serial" exec-out run-as org.adaptivedpi.android --user "$user" \
+      cat no_backup/vpn-events/journal | head -c 65537 > "$log_dir/vpn-journal.txt" \
+      || [[ $(wc -c < "$log_dir/vpn-journal.txt") -gt 65536 ]]; then
+    rm -f -- "$log_dir/vpn-journal.txt"
+    echo 'Журнал недоступен. См. снимок VpnLifecycleTest в android.log.'
+  fi
+}
+
 cleanup() {
   local status=$?
   if (( status != 0 )); then
@@ -96,10 +118,9 @@ cleanup() {
       fi
       timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
-        TunTransportTest:I AppTransportTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
+        TunTransportTest:I AppTransportTest:I VpnLifecycleTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
         > "$log_dir/android.log" 2>&1 || true
-      timeout 10s "$adb" -s "$serial" shell run-as org.adaptivedpi.android cat no_backup/vpn-events/journal \
-        > "$log_dir/vpn-journal.txt" 2>&1 || true
+      capture_vpn_journal > "$log_dir/vpn-journal-status.txt" 2>&1 || true
       echo 'Последние строки журнала эмулятора:' >&2
       sed -i '/Sending adb public key/d; /androidboot\.qemu\.adb\.pubkey=/d' "$emulator_log" || true
       tail -n 100 "$emulator_log" >&2 || true
@@ -195,6 +216,7 @@ if ! grep -qx ready "$fixture_log"; then
 fi
 test_filter=$(python3 .github/scripts/verify-android-test-results.py --filter)
 ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \
+  -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true \
   -Pandroid.testInstrumentationRunnerArguments.class="$test_filter" \
   -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
   -Pandroid.testInstrumentationRunnerArguments.transportCertificate="$fixture_certificate" \

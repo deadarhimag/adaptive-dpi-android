@@ -7,9 +7,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.adaptivedpi.android.vpn.VpnEvent
+import org.adaptivedpi.android.vpn.VpnLifecycle
 import org.adaptivedpi.android.vpn.VpnState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -38,6 +41,63 @@ class VpnEventHistoryTest {
         }
         withWriter(store) { writer ->
             assertEquals(listOf(stopped, running, start), writer.awaitEntries(3))
+        }
+    }
+
+    @Test
+    fun usesTheActiveSessionWhenAnOlderStartAppearsAfterTheNextRequest() = runBlocking {
+        val store = VpnEventStore(File(folder.root, "events"), maxEntries = 5)
+        withWriter(store) { writer ->
+            val lifecycle = VpnLifecycle { assertTrue(writer.record(it)) }
+            val previousSession = UUID(0, 1)
+            val nextSession = UUID(0, 2)
+            val previous = "process:$previousSession"
+            val next = "process:$nextSession"
+            fun request(id: String) {
+                assertTrue(lifecycle.beginConsent(id))
+                lifecycle.update(id, VpnEvent.StartRequested)
+                assertTrue(lifecycle.attachService(id) {})
+            }
+
+            withTimeout(5_000) { writer.state.first { it.loaded } }
+            // Записи публикации ждут в той же очереди корутин до первого ожидания состояния.
+            request(previous)
+            lifecycle.update(previous, VpnEvent.ServiceStarted)
+            lifecycle.stop()
+            lifecycle.serviceEnded(previous, VpnEvent.ServiceDestroyed)
+            assertNull(lifecycle.currentSessionId)
+            val before = writer.state.value.entries.map { it.id }.toSet()
+
+            request(next)
+            assertEquals(nextSession, lifecycle.currentSessionId)
+            val delayed = withTimeout(5_000) {
+                writer.state.first { state ->
+                    state.entries.any { it.type == VpnEventType.StartRequested && it.sessionId == nextSession }
+                }
+            }
+            assertEquals(previousSession, delayed.entries.first {
+                it.type == VpnEventType.Started && it.id !in before
+            }.sessionId)
+            assertFalse(delayed.entries.any {
+                it.type == VpnEventType.Started && it.sessionId == lifecycle.currentSessionId
+            })
+
+            lifecycle.update(next, VpnEvent.ServiceStarted)
+            val started = withTimeout(5_000) {
+                writer.state.first { state ->
+                    state.entries.any { it.type == VpnEventType.Started && it.sessionId == nextSession }
+                }
+            }
+            assertEquals(nextSession, started.entries.single {
+                it.type == VpnEventType.Started && it.sessionId == lifecycle.currentSessionId
+            }.sessionId)
+
+            val rotation = List(6) { VpnJournalEvent.create(VpnEventType.ActivityRestored) }
+            rotation.forEach { assertTrue(writer.record(it)) }
+            val bounded = withTimeout(5_000) { writer.state.first { it.entries.first() == rotation.last() } }
+            assertEquals(5, bounded.entries.size)
+            assertFalse(bounded.entries.any { it.type == VpnEventType.Started })
+            assertEquals(nextSession, lifecycle.currentSessionId)
         }
     }
 

@@ -19,6 +19,7 @@ internal class VpnLifecycle(private val record: (VpnJournalEvent) -> Unit = {}) 
     val state = currentState.asStateFlow()
     val resourcesBlocked = blocked.asStateFlow()
     val cleanupDelay = delayedStep.asStateFlow()
+    val currentSessionId: UUID? get() = operationId?.toSessionUuid()
 
     fun beginConsent(id: String, restoring: Boolean = false): Boolean {
         if (blocked.value || !state.value.canStart || (restoring && state.value != VpnState.Idle)) return false
