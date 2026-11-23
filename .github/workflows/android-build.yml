@@ -66,7 +66,7 @@ jobs:
           ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
         run: |
           ./gradlew --no-daemon --no-configuration-cache testDebugUnitTest :engine:test
-          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:lintRelease :app:assembleDebugAndroidTest
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:lintRelease :app:assembleDebugAndroidTest :app:assembleRelease
 
       - name: Проверить системное согласие, жизненный цикл, Compose и транспорт через Android TUN
         id: device_tests
@@ -118,13 +118,22 @@ jobs:
           build_number="$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           artifact_name="adaptive-dpi-android-debug-${GITHUB_SHA:0:12}-$build_number"
           output_dir="$RUNNER_TEMP/adaptive-dpi-artifact"
-          ANDROID_TEST_RESULTS_JSON="$RUNNER_TEMP/tun-ci/results.json" bash .github/scripts/verify-debug-apk.sh \
+          release_dir="$RUNNER_TEMP/adaptive-dpi-release-unsigned"
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          ANDROID_TEST_RESULTS_JSON="$RUNNER_TEMP/tun-ci/results.json" \
+            EXTENDED_ANDROID_TEST_RESULTS_JSON="$RUNNER_TEMP/tun-ci-extended/results.json" \
+            bash .github/scripts/verify-debug-apk.sh \
             app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
-            "$ANDROID_HOME/build-tools/35.0.0" "$GITHUB_SHA" "$build_number" "$output_dir"
+            "$tools" "$GITHUB_SHA" "$build_number" "$output_dir"
+          python3 .github/scripts/verify-release-apk.py app/build/outputs/apk/release/app-release-unsigned.apk \
+            "$tools/aapt2" "$tools/lib/apksigner.jar" "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            "$output_dir/build-info.json" "$release_dir"
           cp scripts/test-pixel7.ps1 scripts/transport-fixture.py scripts/apk-certificate.py \
             docs/PIXEL7_TESTING_RU.md "$output_dir/"
           echo "name=$artifact_name" >> "$GITHUB_OUTPUT"
           echo "directory=$output_dir" >> "$GITHUB_OUTPUT"
+          echo "release_name=adaptive-dpi-android-release-unsigned-${GITHUB_SHA:0:12}-$build_number" >> "$GITHUB_OUTPUT"
+          echo "release_directory=$release_dir" >> "$GITHUB_OUTPUT"
           cat "$output_dir/build-info.txt" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Загрузить APK приложения, Android-тесты и скрипт для Pixel 7
@@ -132,6 +141,13 @@ jobs:
         with:
           name: ${{ steps.apk.outputs.name }}
           path: ${{ steps.apk.outputs.directory }}
+          if-no-files-found: error
+
+      - name: Загрузить unsigned release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.apk.outputs.release_name }}
+          path: ${{ steps.apk.outputs.release_directory }}
           if-no-files-found: error
 
       - name: Удалить временный CI debug keystore

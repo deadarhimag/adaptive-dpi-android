@@ -11,6 +11,7 @@ expected="${ANDROID_CI_DEBUG_CERT_SHA256:-}"
 expected="${expected//:/}"
 expected="${expected,,}"
 android_results="${ANDROID_TEST_RESULTS_JSON:-}"
+extended_results="${EXTENDED_ANDROID_TEST_RESULTS_JSON:-}"
 if [[ "${GITHUB_ACTIONS:-}" == true || -n "$expected" ]]; then
   if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
     echo "Для CI APK требуется закреплённый ANDROID_CI_DEBUG_CERT_SHA256." >&2
@@ -19,6 +20,10 @@ if [[ "${GITHUB_ACTIONS:-}" == true || -n "$expected" ]]; then
 fi
 if [[ "${GITHUB_ACTIONS:-}" == true && ! -s "$android_results" ]]; then
   echo "Для публикации APK необходим подтверждённый отчёт Android-тестов." >&2
+  exit 1
+fi
+if [[ "${GITHUB_ACTIONS:-}" == true && ! -s "$extended_results" ]]; then
+  echo "Для публикации APK необходим подтверждённый отчёт расширенных Android-тестов." >&2
   exit 1
 fi
 package_info=$("$tools/aapt2" dump badging "$apk")
@@ -127,13 +132,27 @@ PY
 else
   checks='Тесты CI: сведения отсутствуют'
 fi
+if [[ -n "$extended_results" ]]; then
+  extended_count=$(python3 - "$extended_results" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if summary["executed"] != 7 or summary["failed"] or summary["errors"] or summary["skipped"]:
+    sys.exit("Нет полного успешного расширенного прогона")
+print(summary["executed"])
+PY
+  )
+  checks="$checks. Расширенный Android-набор: $extended_count тестов, ошибок 0, пропусков 0"
+fi
 {
   printf 'Git: %s\nBuild: %s\n' "$revision" "$build_number"
   printf '%s\n%s\n' "${package_info%%$'\n'*}" "${test_info%%$'\n'*}"
   printf 'Test target: org.adaptivedpi.android\nSigner #1 certificate SHA-256 digest: %s\n%s\n' "$fingerprint" "$checks"
   sha256sum app-debug.apk app-debug-androidTest.apk
 } > build-info.txt
-python3 - "$revision" "$build_number" "$fingerprint" "$checks" "$android_results" \
+python3 - "$revision" "$build_number" "$fingerprint" "$checks" "$android_results" "$extended_results" \
   "${package_info%%$'\n'*}" "${test_info%%$'\n'*}" > build-info.json <<'PY'
 from pathlib import Path
 import hashlib
@@ -141,7 +160,7 @@ import json
 import re
 import sys
 
-commit, build, certificate, checks, android_results, app_info, test_info = sys.argv[1:]
+commit, build, certificate, checks, android_results, extended_results, app_info, test_info = sys.argv[1:]
 
 def apk_info(name, badging):
     package, code, version = re.match(r"package: name='([^']+)' versionCode='(\d*)' versionName='([^']*)'", badging).groups()
@@ -155,6 +174,9 @@ if app["versionCode"] != expected_code or app["versionName"] != "0.1.1":
     sys.exit("В APK указана неверная версия для этого запуска.")
 test.update(targetPackage=app["package"], runner="androidx.test.runner.AndroidJUnitRunner")
 result = json.loads(Path(android_results).read_text(encoding="utf-8")) if android_results else None
-print(json.dumps({"commit": commit, "build": build, "certificateSha256": certificate,
-                  "checks": checks, "androidTests": result, "app": app, "test": test}, ensure_ascii=False, indent=2))
+info = {"commit": commit, "build": build, "certificateSha256": certificate,
+        "checks": checks, "androidTests": result, "app": app, "test": test}
+if extended_results:
+    info["extendedAndroidTests"] = json.loads(Path(extended_results).read_text(encoding="utf-8"))
+print(json.dumps(info, ensure_ascii=False, indent=2))
 PY

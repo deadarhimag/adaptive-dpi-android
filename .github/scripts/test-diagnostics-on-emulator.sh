@@ -236,7 +236,7 @@ if [[ "$mode" == --extended ]]; then
     org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
     | tr -d '\r' | tee "$log_dir/extended-instrumentation.log"
   python3 .github/scripts/verify-extended-transport-results.py \
-    "$log_dir/extended-instrumentation.log" "$log_dir/results.json"
+    "$log_dir/extended-instrumentation.log" "$log_dir/TEST-ExtendedTunTransportInstrumentedTest.xml" "$log_dir/results.json"
   sudo iptables -w -nvxL OUTPUT | awk '/adaptive-tun-connect-ci/ {print $1}' > "$log_dir/blocked-syn-count.txt"
   grep -Eq '^[1-9][0-9]*$' "$log_dir/blocked-syn-count.txt" || fail 'Стенд не зафиксировал SYN блокируемого connect.'
   timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief ExtendedTunTest:I AdaptiveTun:I '*:S' \
