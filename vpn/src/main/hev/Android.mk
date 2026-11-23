@@ -23,6 +23,9 @@ LOCAL_C_INCLUDES := $(ADAPTIVE_PATH) $(SRCDIR) $(SRCDIR)/misc $(SRCDIR)/core/inc
     $(HEV_ROOT)/third-part/yaml/include $(HEV_ROOT)/third-part/lwip/src/include \
     $(HEV_ROOT)/third-part/lwip/src/ports/include $(HEV_ROOT)/third-part/hev-task-system/include
 LOCAL_CFLAGS := -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -fno-stack-clash-protection $(VERSION_CFLAGS)
+ifeq ($(ADAPTIVE_TEST_HOOKS),1)
+LOCAL_CFLAGS += -DADAPTIVE_TEST_HOOKS
+endif
 LOCAL_STATIC_LIBRARIES := yaml lwip hev-task-system
 LOCAL_LDLIBS := -llog
 LOCAL_LDFLAGS := -Wl,-z,max-page-size=16384

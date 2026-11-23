@@ -191,7 +191,7 @@ class TunTransportInstrumentedTest {
         })
     }
 
-    private fun exchangeAll(ip: InetAddress, verified: (String, Int, Int) -> Unit) {
+    internal fun exchangeAll(ip: InetAddress, verified: (String, Int, Int) -> Unit) {
         val tcp = byteArrayOf(1, 2, 3, 4, 97)
         Socket(Proxy.NO_PROXY).use { client ->
             assertArrayEquals("TCP echo", tcp, exchangeTcp(client, ip, tcp))
@@ -231,7 +231,7 @@ class TunTransportInstrumentedTest {
         return packet.data.copyOf(packet.length)
     }
 
-    private fun assertOnlyFixtureRoute(connectivity: ConnectivityManager, ip: InetAddress) = runBlocking {
+    internal fun assertOnlyFixtureRoute(connectivity: ConnectivityManager, ip: InetAddress) = runBlocking {
         val link = withTimeout(TIMEOUT.toLong()) {
             while (true) {
                 val found = findVpnRoute(connectivity, ip)

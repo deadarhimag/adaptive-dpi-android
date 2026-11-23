@@ -24,6 +24,24 @@ static bool stopping;
 static bool running;
 static size_t final_sent, final_received;
 
+#ifdef ADAPTIVE_TEST_HOOKS
+/* Debug-only: тест удерживает тот же mutex, который нужен опросу и Stop. */
+JNIEXPORT void JNICALL
+Java_org_adaptivedpi_android_vpn_TransportTestHooks_withNativePollLock(JNIEnv *env, jobject instance, jobject action)
+{
+    jclass type = (*env)->GetObjectClass(env, action);
+    if (!type)
+        return;
+    jmethodID run = (*env)->GetMethodID(env, type, "run", "()V");
+    if (run) {
+        pthread_mutex_lock(&lock);
+        (*env)->CallVoidMethod(env, action, run);
+        pthread_mutex_unlock(&lock);
+    }
+    (*env)->DeleteLocalRef(env, type);
+}
+#endif
+
 /* Рабочие задачи HEV используют отдельные стеки. Отсюда нельзя вызывать JNI. */
 enum { FAULT_LIMIT = 16, FAULT_FIELDS = 8, FAULT_CATEGORIES = 6 };
 enum { FAULT_HEV_INIT, FAULT_INTERNAL, FAULT_TUN_IO, FAULT_CANCELLED, FAULT_BACKPRESSURE, FAULT_LIMITED };

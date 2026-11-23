@@ -18,6 +18,9 @@ android {
     externalNativeBuild {
         ndkBuild { path = file("src/main/hev/Android.mk") }
     }
+    buildTypes.getByName("debug") {
+        externalNativeBuild.ndkBuild.arguments += "ADAPTIVE_TEST_HOOKS=1"
+    }
     sourceSets["main"].assets.srcDir(rootProject.file(".native/assets"))
 
     compileOptions {

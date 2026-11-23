@@ -27,6 +27,7 @@ internal class VpnOutboundSocketPolicy(
         socket.reuseAddress
         if (!vpn.protect(socket)) rejectProtection("TCP")
         bind { network.bindSocket(socket) }
+        TransportTestHooks.tcpPrepared(socket)
     }
 
     override fun prepare(socket: DatagramSocket) {
