@@ -14,10 +14,76 @@ emulator_log="$log_dir/emulator.log"
 emulator_pid=
 fixture_pid=
 tls_dir=
+consent_in_progress=false
 
 fail() {
   echo "::error::$*" >&2
   exit 1
+}
+
+capture_consent_diagnostics() {
+  timeout 8s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
+    VpnConsentTest:I VpnConfirm:V VpnDialogs:V VpnService:V Vpn:V ActivityTaskManager:I TestRunner:I '*:S' 2>/dev/null \
+    | awk '!/ActivityTaskManager:/ || /org\.adaptivedpi\.android|com\.android\.vpndialogs/' \
+    | head -c 131072 > "$log_dir/consent-system.log" || true
+  {
+    timeout 6s "$adb" -s "$serial" shell dumpsys window windows \
+      | grep -E 'Window #[0-9]+ Window|mCurrentFocus=|mFocusedApp=' || true
+    timeout 6s "$adb" -s "$serial" shell dumpsys activity activities \
+      | grep -E 'mResumedActivity:|topResumedActivity=' || true
+  } | head -c 16384 > "$log_dir/consent-foreground.txt" || true
+
+  # Снимок со стороны теста сделан до закрытия Activity. При жёстком тайм-ауте
+  # пробуем получить текущее состояние с живого эмулятора.
+  local file limit
+  for file in consent-screen.jpg consent-windows.xml; do
+    limit=524288
+    if [[ "$file" == consent-windows.xml ]]; then limit=65536; fi
+    if ! timeout 6s "$adb" -s "$serial" exec-out run-as org.adaptivedpi.android \
+        cat "cache/vpn-consent-ci/$file" 2>/dev/null | head -c "$((limit + 1))" > "$log_dir/$file" \
+        || [[ ! -s "$log_dir/$file" || $(wc -c < "$log_dir/$file") -gt "$limit" ]]; then
+      rm -f -- "$log_dir/$file"
+    fi
+  done
+  if [[ ! -s "$log_dir/consent-screen.jpg" ]]; then
+    if ! timeout 6s "$adb" -s "$serial" exec-out screencap -p | head -c 8388609 > "$log_dir/consent-screen.png" \
+        || [[ ! -s "$log_dir/consent-screen.png" || $(wc -c < "$log_dir/consent-screen.png") -gt 8388608 ]]; then
+      rm -f -- "$log_dir/consent-screen.png"
+    fi
+  fi
+  if [[ ! -s "$log_dir/consent-windows.xml" ]] &&
+      timeout 8s "$adb" -s "$serial" shell uiautomator dump /data/local/tmp/consent-window.xml >/dev/null 2>&1; then
+    # В артефакт попадают только структурные атрибуты, без текста элементов.
+    if ! timeout 6s "$adb" -s "$serial" exec-out cat /data/local/tmp/consent-window.xml \
+        | head -c 262145 | python3 -c '
+import re
+import sys
+from xml.etree import ElementTree as ET
+
+raw = sys.stdin.buffer.read(262145)
+if len(raw) > 262144:
+    sys.exit(1)
+source = ET.fromstring(raw)
+root = ET.Element("hierarchy", capture="after-test")
+keys = ("package", "class", "resource-id", "clickable", "enabled", "bounds")
+remaining = 96
+
+def copy_nodes(source, destination, depth):
+    global remaining
+    for node in source.findall("node"):
+        if not remaining or depth == 12:
+            break
+        remaining -= 1
+        attrs = {k: re.sub(r"[^a-zA-Z0-9_.:/\[\],$-]", "", node.get(k, "")[:96]) for k in keys}
+        copy_nodes(node, ET.SubElement(destination, "node", attrs), depth + 1)
+
+copy_nodes(source, root, 0)
+sys.stdout.buffer.write(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+' > "$log_dir/consent-windows.xml" 2>/dev/null; then
+      rm -f -- "$log_dir/consent-windows.xml"
+    fi
+    timeout 5s "$adb" -s "$serial" shell rm -f /data/local/tmp/consent-window.xml >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup() {
@@ -25,6 +91,9 @@ cleanup() {
   if (( status != 0 )); then
     printf 'Код выхода шага: %s\n' "$status" > "$log_dir/status.txt"
     if [[ -n "$emulator_pid" ]]; then
+      if $consent_in_progress; then
+        capture_consent_diagnostics
+      fi
       timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
         TunTransportTest:I AppTransportTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
@@ -97,11 +166,14 @@ done
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 "$adb" -s "$serial" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 "$adb" -s "$serial" shell pm grant org.adaptivedpi.android android.permission.POST_NOTIFICATIONS
+consent_in_progress=true
 timeout 60s "$adb" -s "$serial" shell am instrument -w -r \
   -e class org.adaptivedpi.android.VpnConsentInstrumentedTest#grantsVpnThroughAndroidConfirmationDialog \
-  -e verifyFreshVpnConsent true org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
+  -e verifyFreshVpnConsent true -e captureVpnConsentFailure true \
+  org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
   | tr -d '\r' | tee "$log_dir/consent.log"
 grep -Fxq 'OK (1 test)' "$log_dir/consent.log" || fail 'Системный диалог согласия VPN не пройден.'
+consent_in_progress=false
 fixture_log="$log_dir/fixture.log"
 # 10.0.2.2 в госте — адрес loopback хоста для обоих сценариев TUN.
 tls_dir=$(mktemp -d "$RUNNER_TEMP/transport-tls.XXXXXX")
