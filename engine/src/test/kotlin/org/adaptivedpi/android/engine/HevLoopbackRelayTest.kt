@@ -293,14 +293,65 @@ class HevLoopbackRelayTest {
     }
 
     @Test
+    fun closingTheRelayAlsoSignalsWorkersThatAreWaitingOutsideSocketIo() {
+        val entered = CountDownLatch(1)
+        val waiting = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val transport = OutboundTransport().apply {
+            updateNetwork(object : OutboundSocketPolicy {
+                override fun prepare(socket: Socket) {
+                    entered.countDown()
+                    try {
+                        check(waiting.await(6, TimeUnit.SECONDS))
+                    } catch (error: InterruptedException) {
+                        interrupted.countDown()
+                        throw error
+                    }
+                }
+                override fun prepare(socket: DatagramSocket) = Unit
+            })
+        }
+        val relay = HevLoopbackRelay(transport, ip, maxSessions = 1) { error("Отказ приёма подключений") }
+        try {
+            client(relay).use { socket ->
+                val input = DataInputStream(socket.getInputStream())
+                val output = DataOutputStream(socket.getOutputStream())
+                assertEquals(0, authenticate(relay.configSecret, input, output))
+                command(output, 1, 12345)
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                relay.close()
+                assertTrue(relay.awaitShutdown(3_000))
+                assertEquals(0L, interrupted.count)
+            }
+        } finally {
+            waiting.countDown()
+            relay.close()
+            assertTrue(relay.awaitShutdown())
+        }
+    }
+
+    @Test
     fun cleanupTimeoutRemainsAnErrorAndReportsTheUnfinishedPoolOnce() {
         val entered = CountDownLatch(1)
         val leave = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
         val failures = ConcurrentLinkedQueue<TransportFailure>()
         val reporter = TransportFailureReporter(sink = failures::add)
         val transport = OutboundTransport(failures = reporter)
         transport.updateNetwork(object : OutboundSocketPolicy {
-            override fun prepare(socket: Socket) { entered.countDown(); check(leave.await(5, TimeUnit.SECONDS)) }
+            override fun prepare(socket: Socket) {
+                entered.countDown()
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (true) {
+                    try {
+                        check(leave.await((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS))
+                        return
+                    } catch (_: InterruptedException) {
+                        // Воспроизводим системный вызов, который не завершился после interrupt.
+                        interrupted.countDown()
+                    }
+                }
+            }
             override fun prepare(socket: DatagramSocket) = Unit
         })
         val relay = HevLoopbackRelay(transport, ip, maxSessions = 1, failures = reporter) { error("Unexpected listener failure") }
@@ -313,6 +364,7 @@ class HevLoopbackRelayTest {
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
                 relay.close()
                 relay.close()
+                assertTrue(interrupted.await(2, TimeUnit.SECONDS))
                 val atDeadline = relay.awaitShutdownResult(100)
                 assertFalse(atDeadline.terminated)
                 assertEquals(1, atDeadline.requestsActive)

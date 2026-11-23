@@ -13,6 +13,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
@@ -49,8 +50,8 @@ class HevLoopbackRelay(
     private val clients = mutableSetOf<Peer>()
     // Слот соединения резервирует место в обоих пулах. Очереди покрывают возврат потока
     // из предыдущей задачи в пул, а подключений в работе остаётся не больше maxSessions.
-    private val requests = pool(maxSessions, "HEV request")
-    private val responses = pool(maxSessions, "HEV response")
+    private val requests = RelayPool(maxSessions, "HEV request")
+    private val responses = RelayPool(maxSessions, "HEV response")
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val shutdownErrorReported = AtomicBoolean()
     private val closeCompleted = CountDownLatch(1)
@@ -296,7 +297,9 @@ class HevLoopbackRelay(
     private fun finishDirections(peer: Peer, connection: Closeable, response: Future<*>) {
         connection.close()
         closePeer(peer)
-        // Future не отменяется. Слот освобождается после фактического выхода обоих направлений.
+        // При закрытии потока ждём ответ, прежде чем вернуть его слот. При остановке
+        // новых потоков уже не будет и завершение обоих пулов проверяется отдельно.
+        if (closing) return
         try {
             response.get()
         } catch (_: ExecutionException) {
@@ -327,8 +330,8 @@ class HevLoopbackRelay(
             transport.close()
         } finally {
             peers.forEach(::closePeer)
-            requests.shutdown()
-            responses.shutdown()
+            requests.stopWorkers()
+            responses.stopWorkers()
             closeCompleted.countDown()
         }
     }
@@ -371,6 +374,31 @@ class HevLoopbackRelay(
         @Volatile var eof = false
     }
 
+    private class RelayPool(size: Int, name: String) : ThreadPoolExecutor(
+        size, size, 15, TimeUnit.SECONDS, ArrayBlockingQueue(size), { task -> Thread(task, name) },
+    ) {
+        private val active = ConcurrentHashMap.newKeySet<Thread>()
+
+        init { allowCoreThreadTimeOut(true) }
+
+        override fun beforeExecute(thread: Thread, task: Runnable) {
+            super.beforeExecute(thread, task)
+            active.add(thread)
+        }
+
+        override fun afterExecute(task: Runnable, error: Throwable?) {
+            active.remove(Thread.currentThread())
+            super.afterExecute(task, error)
+        }
+
+        fun stopWorkers() {
+            shutdown()
+            // Закрытые сокеты отменяют ввод-вывод. Interrupt также будит ожидание
+            // Future в запросе, которое могло начаться до команды остановки.
+            active.forEach(Thread::interrupt)
+        }
+    }
+
     private data class Endpoint(val address: InetAddress, val port: Int)
     private data class Frame(val endpoint: Endpoint, val length: Int)
 
@@ -392,10 +420,6 @@ class HevLoopbackRelay(
         val UDP_SCHEDULE = TransportSite(TransportSubsystem.HEV, TransportOperation.SCHEDULE, TransportProtocol.UDP)
         val UDP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.UDP, TransportDirection.OUTBOUND)
         val UDP_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE, TransportProtocol.UDP, TransportDirection.INBOUND)
-
-        fun pool(size: Int, name: String) = ThreadPoolExecutor(
-            size, size, 15, TimeUnit.SECONDS, ArrayBlockingQueue(size), { task -> Thread(task, name) },
-        ).apply { allowCoreThreadTimeOut(true) }
 
         fun requireProtocol(condition: Boolean) {
             if (!condition) throw ProtocolException("Недопустимые данные локального релея.")

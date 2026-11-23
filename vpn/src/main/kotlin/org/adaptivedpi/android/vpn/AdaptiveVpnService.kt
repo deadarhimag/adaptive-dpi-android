@@ -138,6 +138,7 @@ class AdaptiveVpnService : VpnService() {
             DiagnosticCode.VpnCleanupFailed
         }
         if (recordHistory) VpnEventHistory.record(VpnEventType.StopError, id?.toSessionUuid(), code, snapshot.state)
+        Log.w("AdaptiveTun", "${code.name}: ${details.text()}")
         VpnDiagnostics.recordCleanupAsync(code, snapshot, details, error)
     }
 
