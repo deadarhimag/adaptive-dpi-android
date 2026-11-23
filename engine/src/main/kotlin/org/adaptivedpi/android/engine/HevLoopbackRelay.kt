@@ -3,12 +3,14 @@ package org.adaptivedpi.android.engine
 import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.ProtocolException
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ArrayBlockingQueue
@@ -278,7 +280,7 @@ class HevLoopbackRelay internal constructor(
         observe(CONTROL_WRITE, peer) { reply(output, 0) }
         val payload = ByteArray(MAX_DATAGRAM)
         val first = observe(UDP_READ, peer) {
-            readDatagram(input, payload)?.also { checkDestination(it.endpoint) }
+            readDatagram(peer, input, payload)
         } ?: return
         transport.connectUdp(first.endpoint.address, first.endpoint.port).use { connection ->
             val response = submit(UDP_SCHEDULE) {
@@ -310,7 +312,7 @@ class HevLoopbackRelay internal constructor(
                 connection.send(payload, length = first.length)
                 while (peer.cancellation.get() == null) {
                     val next = observe(UDP_READ, peer) {
-                        readDatagram(input, payload)?.also { requireProtocol(it.endpoint == first.endpoint) }
+                        readDatagram(peer, input, payload, first.endpoint)
                     } ?: break
                     connection.send(payload, length = next.length)
                 }
@@ -320,15 +322,41 @@ class HevLoopbackRelay internal constructor(
         }
     }
 
-    private fun readDatagram(input: DataInputStream, payload: ByteArray): Frame? {
-        val firstByte = input.read()
-        if (firstByte == -1) return null
-        val length = firstByte * 256 + input.readUnsignedByte()
-        val headerLength = input.readUnsignedByte()
-        requireProtocol(length <= payload.size)
-        val endpoint = readEndpoint(input, headerLength)
-        input.readFully(payload, 0, length)
-        return Frame(endpoint, length)
+    private fun readDatagram(peer: Peer, input: DataInputStream, payload: ByteArray, expected: Endpoint? = null): Frame? {
+        while (peer.cancellation.get() == null) {
+            val firstByte = input.read()
+            if (firstByte == -1) return null
+            try {
+                val length = firstByte * 256 + input.readUnsignedByte()
+                requireProtocol(length <= OutboundTransport.MAX_UDP_PAYLOAD)
+                val endpoint = readEndpoint(input, input.readUnsignedByte())
+                if (expected == null) checkDestination(endpoint) else requireProtocol(endpoint == expected)
+                if (length <= payload.size) {
+                    input.readFully(payload, 0, length)
+                    return Frame(endpoint, length)
+                }
+                discardDatagram(peer.socket, input, payload, length)
+                failures.record(TransportFailure(UDP_READ, TransportCategory.LIMIT, TransportCode.DATAGRAM_LIMIT))
+            } catch (error: EOFException) {
+                throw ProtocolException("Неполный UDP-кадр.").apply { initCause(error) }
+            }
+        }
+        return null
+    }
+
+    private fun discardDatagram(socket: Socket, input: DataInputStream, buffer: ByteArray, length: Int) {
+        val originalTimeout = socket.soTimeout
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var remaining = length
+        while (remaining > 0) {
+            val timeLeft = deadline - System.nanoTime()
+            if (timeLeft <= 0) throw SocketTimeoutException("Не завершено чтение крупного UDP-кадра.")
+            socket.soTimeout = TimeUnit.NANOSECONDS.toMillis(timeLeft).coerceAtLeast(1).toInt()
+            val count = input.read(buffer, 0, minOf(remaining, buffer.size))
+            if (count < 0) throw EOFException()
+            remaining -= count
+        }
+        socket.soTimeout = originalTimeout
     }
 
     private fun readEndpoint(input: DataInputStream, headerLength: Int? = null): Endpoint {

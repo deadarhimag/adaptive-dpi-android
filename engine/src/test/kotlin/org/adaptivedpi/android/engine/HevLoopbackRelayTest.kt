@@ -6,7 +6,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.DatagramPacket
@@ -15,7 +14,6 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -555,7 +553,7 @@ class HevLoopbackRelayTest {
     }
 
     @Test(timeout = 15_000)
-    fun oversizedOutboundUdpFrameClosesAnEstablishedAssociation() {
+    fun oversizedOutboundUdpFrameIsDroppedAndSameAssociationStillExchangesData() {
         val failures = ConcurrentLinkedQueue<TransportFailure>()
         DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
             server.soTimeout = 3_000
@@ -576,38 +574,50 @@ class HevLoopbackRelayTest {
                     assertArrayEquals(valid, response(input))
                     assertEquals(1, transport.statistics().activeUdp)
 
-                    val oversized = ByteArrayOutputStream()
-                    frame(DataOutputStream(oversized), server.localPort, ByteArray(1_501))
-                    output.write(oversized.toByteArray())
-                    try {
-                        assertEquals("Уже установленная ассоциация завершилась", -1, input.read())
-                    } catch (_: SocketException) {
-                        // Стек TCP может вернуть RST при закрытии с непрочитанным телом кадра.
-                        // Причину и закрытие исходящего UDP проверяем ниже.
-                    }
-                    val rejected = failures.single { it.code == TransportCode.RELAY_PROTOCOL }
-                    assertEquals(TransportCategory.RELAY_PROTOCOL, rejected.category)
+                    val origin = packet.socketAddress
+                    frame(output, server.localPort, ByteArray(1_501))
+                    frame(output, server.localPort, byteArrayOf(17))
+                    packet.length = packet.data.size
+                    server.receive(packet)
+                    assertEquals(origin, packet.socketAddress)
+                    assertArrayEquals(byteArrayOf(17), packet.data.copyOf(packet.length))
+                    server.send(DatagramPacket(byteArrayOf(18), 1, origin))
+                    assertArrayEquals(byteArrayOf(18), response(input))
+                    val rejected = failures.single { it.code == TransportCode.DATAGRAM_LIMIT }
+                    assertEquals(TransportCategory.LIMIT, rejected.category)
                     assertEquals(
                         TransportSite(TransportSubsystem.HEV, TransportOperation.READ,
                             TransportProtocol.UDP, TransportDirection.OUTBOUND),
                         rejected.site,
                     )
-                    assertEquals(0, transport.statistics().activeUdp)
-                    assertEquals(1L, transport.statistics().sentDatagrams)
-                    assertEquals(SocketCloseSummary(closed = 1), transport.socketClosures())
+                    assertFalse(failures.any { it.code == TransportCode.RELAY_PROTOCOL })
+                    assertEquals(1, transport.statistics().activeUdp)
+                    assertEquals(1L, transport.statistics().openedUdp)
+                    assertEquals(2L, transport.statistics().sentDatagrams)
                 }
+            }
+        }
+    }
 
-                client(relay).use { fresh ->
-                    val input = DataInputStream(fresh.getInputStream())
-                    val output = DataOutputStream(fresh.getOutputStream())
-                    assertEquals(0, authenticate(relay.configSecret, input, output))
-                    command(output, 5, 0)
-                    assertEquals(0, reply(input))
-                    frame(output, server.localPort, byteArrayOf(17))
-                    val packet = DatagramPacket(ByteArray(16), 16)
-                    server.receive(packet)
-                    assertArrayEquals(byteArrayOf(17), packet.data.copyOf(packet.length))
-                }
+    @Test
+    fun truncatedOversizedUdpFrameIsAProtocolError() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        relay(failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
+            client(relay).use { socket ->
+                val input = DataInputStream(socket.getInputStream())
+                val output = DataOutputStream(socket.getOutputStream())
+                assertEquals(0, authenticate(relay.configSecret, input, output))
+                command(output, 5, 0)
+                assertEquals(0, reply(input))
+                output.writeShort(1_501)
+                output.writeByte(10)
+                endpoint(output, 9)
+                output.write(1)
+                socket.shutdownOutput()
+                assertEquals(-1, input.read())
+                assertEquals(0L, transport.statistics().openedUdp)
+                assertEquals(1, failures.count { it.code == TransportCode.RELAY_PROTOCOL })
+                assertFalse(failures.any { it.code == TransportCode.DATAGRAM_LIMIT })
             }
         }
     }
