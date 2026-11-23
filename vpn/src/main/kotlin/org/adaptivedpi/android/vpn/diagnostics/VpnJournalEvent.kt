@@ -38,6 +38,7 @@ enum class VpnEventType(val level: VpnEventLevel, val description: String) {
     TransportNetworkChanged(VpnEventLevel.WARNING, "Изменилось физическое подключение. Экспериментальный сеанс останавливается."),
     TransportStopped(VpnEventLevel.INFO, "Рабочий цикл локального транспорта завершился."),
     TransportTunClosed(VpnEventLevel.INFO, "Экспериментальный TUN освобождён."),
+    TransportPollDelayed(VpnEventLevel.WARNING, "Опрос HEV не вернулся за 5 секунд. Состояние ресурсов уточняется."),
 }
 
 @ConsistentCopyVisibility

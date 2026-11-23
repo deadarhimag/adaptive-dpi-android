@@ -2,6 +2,7 @@ package org.adaptivedpi.android.vpn
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.adaptivedpi.android.vpn.diagnostics.CleanupStep
@@ -44,6 +45,23 @@ internal class VpnShutdown<T>(
 internal suspend fun requestStopAndAwaitPoll(poll: Job?, requestStop: suspend () -> Unit) {
     requestStop()
     poll?.join()
+}
+
+/** Наблюдает опрос с диспетчера службы. Владельцем ресурсов остаётся транспорт. */
+internal suspend fun <T> observeTransportPoll(
+    warnAfterMillis: Long,
+    onDelay: () -> Unit,
+    poll: suspend () -> T,
+): T = coroutineScope {
+    val observer = launch {
+        delay(warnAfterMillis)
+        onDelay()
+    }
+    try {
+        poll()
+    } finally {
+        observer.cancel()
+    }
 }
 
 internal fun releaseVpnResources(onError: (CleanupStep, Throwable) -> Unit, vararg steps: Pair<CleanupStep, () -> Unit>) {

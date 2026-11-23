@@ -358,9 +358,16 @@ class AdaptiveVpnService : VpnService() {
         val id = sessionId ?: return
         val trackReady = !transportConfirmed
         val stats = try {
-            withContext(TRANSPORT_POLL_IO) {
-                engine.snapshot().also {
-                    if (it.running && trackReady && !shutdown.started) engine.stateChanged(VpnState.EngineRunning)
+            observeTransportPoll(warnAfterMillis = 5_000, onDelay = {
+                if (sessionId == id) {
+                    recordTransportEvent(VpnEventType.TransportPollDelayed)
+                    Log.w("AdaptiveTun", "Опрос HEV не вернулся за 5 с. Владение ресурсами сохраняется.")
+                }
+            }) {
+                withContext(TRANSPORT_POLL_IO) {
+                    engine.snapshot().also {
+                        if (it.running && trackReady && !shutdown.started) engine.stateChanged(VpnState.EngineRunning)
+                    }
                 }
             }
         } catch (error: Exception) {
