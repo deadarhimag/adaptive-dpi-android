@@ -5,16 +5,21 @@ sdk="${ANDROID_HOME:?}/cmdline-tools/latest/bin"
 emulator="$ANDROID_HOME/emulator/emulator"
 adb="$ANDROID_HOME/platform-tools/adb"
 image='system-images;android-34;default;x86_64'
-avd_name=diagnostics-ci
-port=5554
+mode="${1:-baseline}"
+case "$mode" in
+  baseline) avd_name=diagnostics-ci; port=5554; log_dir="${RUNNER_TEMP:?}/tun-ci" ;;
+  --extended) avd_name=transport-ci; port=5556; log_dir="${RUNNER_TEMP:?}/tun-ci-extended" ;;
+  *) echo "Неизвестный набор Android-тестов: $mode" >&2; exit 2 ;;
+esac
 serial="emulator-$port"
-log_dir="${RUNNER_TEMP:?}/tun-ci"
 mkdir -p "$log_dir"
 emulator_log="$log_dir/emulator.log"
 emulator_pid=
 fixture_pid=
 tls_dir=
 consent_in_progress=false
+blackhole_installed=false
+blackhole=(-o lo -d 127.0.0.1 -p tcp --dport 39056 --syn -m comment --comment adaptive-tun-connect-ci -j DROP)
 
 fail() {
   echo "::error::$*" >&2
@@ -118,7 +123,7 @@ cleanup() {
       fi
       timeout 10s "$adb" devices -l > "$log_dir/adb-devices.txt" 2>&1 || true
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
-        TunTransportTest:I AppTransportTest:I VpnLifecycleTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
+        TunTransportTest:I AppTransportTest:I ExtendedTunTest:I VpnLifecycleTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
         > "$log_dir/android.log" 2>&1 || true
       capture_vpn_journal > "$log_dir/vpn-journal-status.txt" 2>&1 || true
       echo 'Последние строки журнала эмулятора:' >&2
@@ -130,9 +135,14 @@ cleanup() {
   fi
   if [[ -n "$emulator_pid" ]]; then
     kill "$emulator_pid" 2>/dev/null || true
+    sed -i '/Sending adb public key/d; /androidboot\.qemu\.adb\.pubkey=/d' "$emulator_log" || true
   fi
   if [[ -n "$fixture_pid" ]]; then
     kill "$fixture_pid" 2>/dev/null || true
+  fi
+  if $blackhole_installed; then
+    sudo iptables -w -nvxL OUTPUT | awk '/adaptive-tun-connect-ci/ {print $1}' > "$log_dir/blocked-syn-count.txt" || true
+    sudo iptables -w -D OUTPUT "${blackhole[@]}" || true
   fi
   if [[ -n "$tls_dir" ]]; then
     rm -f -- "$tls_dir/key.pem" "$tls_dir/cert.pem"
@@ -202,7 +212,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=10.0.2.2' \
   -addext 'subjectAltName=IP:10.0.2.2' -keyout "$tls_dir/key.pem" -out "$tls_dir/cert.pem" \
   2> "$log_dir/openssl.log"
 fixture_certificate=$(openssl x509 -in "$tls_dir/cert.pem" -outform DER | base64 -w0)
-python3 scripts/transport-fixture.py --bind 127.0.0.1 \
+fixture_args=()
+if [[ "$mode" == --extended ]]; then fixture_args+=(--extended); fi
+python3 scripts/transport-fixture.py --bind 127.0.0.1 "${fixture_args[@]}" \
   --https-certificate "$tls_dir/cert.pem" --https-key "$tls_dir/key.pem" > "$fixture_log" 2>&1 &
 fixture_pid=$!
 for ((attempt=0; attempt<20; attempt++)); do
@@ -213,6 +225,23 @@ done
 if ! grep -qx ready "$fixture_log"; then
   cat "$fixture_log" >&2
   fail "Локальный стенд TCP/UDP/DNS не запустился."
+fi
+if [[ "$mode" == --extended ]]; then
+  # Только исходящие SYN к выделенному loopback-порту стенда. Android работает без root.
+  sudo iptables -w -I OUTPUT 1 "${blackhole[@]}"
+  blackhole_installed=true
+  timeout 540s "$adb" -s "$serial" shell am instrument -w -r \
+    -e class org.adaptivedpi.android.ExtendedTunTransportInstrumentedTest \
+    -e transportTarget 10.0.2.2 \
+    org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
+    | tr -d '\r' | tee "$log_dir/extended-instrumentation.log"
+  python3 .github/scripts/verify-extended-transport-results.py \
+    "$log_dir/extended-instrumentation.log" "$log_dir/results.json"
+  sudo iptables -w -nvxL OUTPUT | awk '/adaptive-tun-connect-ci/ {print $1}' > "$log_dir/blocked-syn-count.txt"
+  grep -Eq '^[1-9][0-9]*$' "$log_dir/blocked-syn-count.txt" || fail 'Стенд не зафиксировал SYN блокируемого connect.'
+  timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief ExtendedTunTest:I AdaptiveTun:I '*:S' \
+    > "$log_dir/extended-android.log" || true
+  exit 0
 fi
 test_filter=$(python3 .github/scripts/verify-android-test-results.py --filter)
 ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \

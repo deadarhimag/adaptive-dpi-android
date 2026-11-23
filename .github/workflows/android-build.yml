@@ -97,6 +97,19 @@ jobs:
             app/build/outputs/androidTest-results/connected/**/TEST-*.xml
           if-no-files-found: error
 
+      - name: Проверить длительные TCP-соединения, конкуренцию Stop и ресурсы TUN
+        id: extended_transport_tests
+        timeout-minutes: 16
+        run: bash .github/scripts/test-diagnostics-on-emulator.sh --extended
+
+      - name: Сохранить отчёт расширенного тестирования транспорта
+        if: always() && (steps.extended_transport_tests.outcome == 'success' || steps.extended_transport_tests.outcome == 'failure' || steps.extended_transport_tests.outcome == 'cancelled')
+        uses: actions/upload-artifact@v7
+        with:
+          name: extended-transport-results-${{ github.run_number }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tun-ci-extended/
+          if-no-files-found: warn
+
       - name: Проверить содержимое APK и создать сведения о сборке
         id: apk
         run: |
