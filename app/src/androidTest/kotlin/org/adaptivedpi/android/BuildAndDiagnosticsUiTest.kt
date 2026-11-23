@@ -16,6 +16,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.ui.VpnSwitchDialog
+import org.adaptivedpi.android.vpn.VpnController
+import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.junit.Assert.assertEquals
@@ -27,6 +29,20 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class BuildAndDiagnosticsUiTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    @Test
+    fun uiTracksTheRunningServiceAndReturnsToIdleAfterStop() {
+        try {
+            compose.onNodeWithText(string(R.string.vpn_start)).performScrollTo().performClick()
+            compose.waitUntil(timeoutMillis = 10_000) { VpnController.state.value == VpnState.TestSessionRunning }
+            compose.onNodeWithText(string(R.string.vpn_test_session_running)).assertIsDisplayed()
+            compose.onNodeWithText(string(R.string.vpn_stop)).performClick()
+            compose.waitUntil(timeoutMillis = 10_000) { VpnController.state.value == VpnState.Idle }
+            compose.onNodeWithText(string(R.string.vpn_idle)).assertIsDisplayed()
+        } finally {
+            compose.runOnIdle { VpnController.stop() }
+        }
+    }
 
     @Test
     fun diagnosticsShowsExportAndVpnHistoryWithoutScrollingPastTheStatus() {
@@ -63,6 +79,9 @@ class BuildAndDiagnosticsUiTest {
             compose.onNodeWithText(string(R.string.diagnostic_preview)).assertExists()
         } finally {
             VpnDiagnostics.acknowledge(event.id)
+            compose.waitUntil(timeoutMillis = 5_000) {
+                VpnDiagnostics.events.value.none { it.id == event.id && !it.acknowledged }
+            }
         }
     }
 

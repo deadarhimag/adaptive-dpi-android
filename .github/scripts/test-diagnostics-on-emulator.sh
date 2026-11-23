@@ -95,7 +95,13 @@ done
 
 "$adb" -s "$serial" shell input keyevent 82 || fail "ADB не смог разблокировать экран $serial."
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
-"$adb" -s "$serial" shell appops set org.adaptivedpi.android ACTIVATE_VPN allow
+"$adb" -s "$serial" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+"$adb" -s "$serial" shell pm grant org.adaptivedpi.android android.permission.POST_NOTIFICATIONS
+timeout 60s "$adb" -s "$serial" shell am instrument -w -r \
+  -e class org.adaptivedpi.android.VpnConsentInstrumentedTest#grantsVpnThroughAndroidConfirmationDialog \
+  -e verifyFreshVpnConsent true org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
+  | tr -d '\r' | tee "$log_dir/consent.log"
+grep -Fxq 'OK (1 test)' "$log_dir/consent.log" || fail 'Системный диалог согласия VPN не пройден.'
 fixture_log="$log_dir/fixture.log"
 # 10.0.2.2 в госте — адрес loopback хоста для обоих сценариев TUN.
 tls_dir=$(mktemp -d "$RUNNER_TEMP/transport-tls.XXXXXX")
@@ -115,11 +121,13 @@ if ! grep -qx ready "$fixture_log"; then
   cat "$fixture_log" >&2
   fail "Локальный стенд TCP/UDP/DNS не запустился."
 fi
-export_test='org.adaptivedpi.android.DiagnosticsInstrumentedTest#savesAndSharesIdenticalTransportTextAndKeepsRecentAttachmentsReadable'
+test_filter=$(python3 .github/scripts/verify-android-test-results.py --filter)
 ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class="org.adaptivedpi.android.BuildAndDiagnosticsUiTest,${export_test},org.adaptivedpi.android.TunTransportInstrumentedTest,org.adaptivedpi.android.ApplicationTransportInstrumentedTest" \
+  -Pandroid.testInstrumentationRunnerArguments.class="$test_filter" \
   -Pandroid.testInstrumentationRunnerArguments.transportTarget=10.0.2.2 \
   -Pandroid.testInstrumentationRunnerArguments.transportCertificate="$fixture_certificate" \
   -Pandroid.testInstrumentationRunnerArguments.requireTransportFixture=true \
   2>&1 | tee "$log_dir/gradle-tests.log"
+python3 .github/scripts/verify-android-test-results.py app/build/outputs/androidTest-results/connected \
+  "$log_dir/consent.log" "$log_dir/results.json"
 timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I '*:S' || true

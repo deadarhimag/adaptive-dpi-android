@@ -2,6 +2,7 @@ package org.adaptivedpi.android
 
 import android.Manifest
 import android.app.NotificationManager
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -11,13 +12,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.adaptivedpi.android.vpn.AdaptiveVpnService
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
+import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.util.UUID
@@ -95,6 +101,67 @@ class VpnLifecycleInstrumentedTest {
                 scenario.onActivity { VpnController.stop() }
                 awaitState(VpnState.Idle)
             }
+        }
+    }
+
+    @Test
+    fun androidServiceDestructionCleansUpBeforeRestart() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            try {
+                val first = startSession(scenario)
+                scenario.onActivity { assertTrue(it.stopService(Intent(it, AdaptiveVpnService::class.java))) }
+                awaitState(VpnState.Failed)
+                awaitNotificationRemoval()
+                assertFalse(VpnController.resourcesBlocked.value)
+                acknowledgeNewError(DiagnosticCode.VpnUnexpectedStop, first)
+                assertNotEquals(first, startSession(scenario))
+            } finally {
+                scenario.onActivity { VpnController.stop() }
+                awaitState(VpnState.Idle)
+            }
+        }
+    }
+
+    @Test
+    fun missingTargetPackageFailsStartupAndAllowsAnotherSession() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val previous = VpnDiagnostics.events.value.map { it.id }.toSet()
+            try {
+                scenario.onActivity {
+                    assertNull(VpnService.prepare(it))
+                    assertNull(VpnController.requestStart(it, applicationPackage = "org.adaptivedpi.ci.missing"))
+                    assertEquals(VpnState.Starting, VpnController.state.value)
+                }
+                awaitState(VpnState.StartFailed)
+                awaitNotificationRemoval()
+                assertFalse(VpnController.resourcesBlocked.value)
+                val error = runBlocking {
+                    withTimeout(10_000) {
+                        VpnDiagnostics.events.first { events ->
+                            events.any { it.code == DiagnosticCode.TransportApplicationUnavailable && it.id !in previous }
+                        }.first { it.code == DiagnosticCode.TransportApplicationUnavailable && it.id !in previous }
+                    }
+                }
+                acknowledgeError(error.id)
+                startSession(scenario)
+            } finally {
+                scenario.onActivity { VpnController.stop() }
+                awaitState(VpnState.Idle)
+            }
+        }
+    }
+
+    private fun acknowledgeNewError(code: DiagnosticCode, id: UUID) = runBlocking {
+        withTimeout(10_000) {
+            VpnDiagnostics.events.first { events -> events.any { it.code == code && it.id == id } }
+        }
+        acknowledgeError(id)
+    }
+
+    private fun acknowledgeError(id: UUID) = runBlocking {
+        VpnDiagnostics.acknowledge(id)
+        withTimeout(10_000) {
+            VpnDiagnostics.events.first { events -> events.none { it.id == id && !it.acknowledged } }
         }
     }
 

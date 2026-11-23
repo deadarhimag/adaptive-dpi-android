@@ -64,6 +64,8 @@ class TunTransportInstrumentedTest {
                 val session = "Сеанс ${index + 1}"
                 var ownsSession = false
                 var failure: Throwable? = null
+                var activeTcp: Socket? = null
+                var activeUdp: DatagramSocket? = null
                 try {
                     scenario.onActivity { activity ->
                         requireIdle()
@@ -90,6 +92,20 @@ class TunTransportInstrumentedTest {
                         before = after
                     }
                     assertTrue(before.transferred)
+                    val tcp = Socket(Proxy.NO_PROXY).also { activeTcp = it }
+                    val udp = DatagramSocket().also { activeUdp = it }
+                    assertArrayEquals(byteArrayOf(71), exchangeTcp(tcp, ip, byteArrayOf(71)))
+                    assertArrayEquals(byteArrayOf(72), exchangeUdp(udp, ip, 39_052, byteArrayOf(72)))
+                    runBlocking {
+                        withTimeout(TIMEOUT.toLong()) {
+                            VpnController.transport.first { current ->
+                                current != null && current.openedTcp > before.openedTcp &&
+                                    current.openedUdp > before.openedUdp && current.openedTcp > current.closedTcp &&
+                                    current.openedUdp > current.closedUdp
+                            }
+                        }
+                    }
+                    reportPhase("$session: TCP и UDP подтверждены открытыми перед Stop")
                 } catch (error: Throwable) {
                     failure = error
                     Log.w(TAG, "$session: ${error.javaClass.simpleName}. ${vpnDetails()}")
@@ -115,6 +131,8 @@ class TunTransportInstrumentedTest {
                             Log.w(TAG, "$session: ошибка остановки ${cleanup.javaClass.simpleName}. ${vpnDetails()}")
                             if (failure == null) throw cleanup
                             failure.addSuppressed(cleanup)
+                        } finally {
+                            try { activeTcp?.close() } finally { activeUdp?.close() }
                         }
                     }
                 }
@@ -176,17 +194,12 @@ class TunTransportInstrumentedTest {
     private fun exchangeAll(ip: InetAddress, verified: (String, Int, Int) -> Unit) {
         val tcp = byteArrayOf(1, 2, 3, 4, 97)
         Socket(Proxy.NO_PROXY).use { client ->
-            client.soTimeout = TIMEOUT
-            client.connect(InetSocketAddress(ip, 39_052), TIMEOUT)
-            client.getOutputStream().write(tcp)
-            val returned = ByteArray(tcp.size)
-            DataInputStream(client.getInputStream()).readFully(returned)
-            assertArrayEquals("TCP echo", tcp, returned)
+            assertArrayEquals("TCP echo", tcp, exchangeTcp(client, ip, tcp))
         }
         verified("TCP", tcp.size, tcp.size)
 
         val udp = byteArrayOf(5, 4, 3, 2, -14)
-        assertArrayEquals("UDP echo", udp, exchangeUdp(ip, 39_052, udp))
+        DatagramSocket().use { assertArrayEquals("UDP echo", udp, exchangeUdp(it, ip, 39_052, udp)) }
         verified("UDP", udp.size, udp.size)
 
         val dns = byteArrayOf(
@@ -198,17 +211,24 @@ class TunTransportInstrumentedTest {
             this[3] = 0x80.toByte()
             this[7] = 1
         } + byteArrayOf(0xc0.toByte(), 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192.toByte(), 0, 2, 45)
-        assertArrayEquals("DNS A через UDP", dnsReply, exchangeUdp(ip, 39_053, dns))
+        DatagramSocket().use { assertArrayEquals("DNS A через UDP", dnsReply, exchangeUdp(it, ip, 39_053, dns)) }
         verified("DNS/UDP", dns.size, dnsReply.size)
     }
 
-    private fun exchangeUdp(ip: InetAddress, port: Int, payload: ByteArray): ByteArray = DatagramSocket().use { client ->
+    private fun exchangeTcp(client: Socket, ip: InetAddress, payload: ByteArray): ByteArray {
+        client.soTimeout = TIMEOUT
+        client.connect(InetSocketAddress(ip, 39_052), TIMEOUT)
+        client.getOutputStream().write(payload)
+        return ByteArray(payload.size).also { DataInputStream(client.getInputStream()).readFully(it) }
+    }
+
+    private fun exchangeUdp(client: DatagramSocket, ip: InetAddress, port: Int, payload: ByteArray): ByteArray {
         client.soTimeout = TIMEOUT
         client.connect(InetSocketAddress(ip, port))
         client.send(DatagramPacket(payload, payload.size))
         val packet = DatagramPacket(ByteArray(512), 512)
         client.receive(packet)
-        packet.data.copyOf(packet.length)
+        return packet.data.copyOf(packet.length)
     }
 
     private fun assertOnlyFixtureRoute(connectivity: ConnectivityManager, ip: InetAddress) = runBlocking {

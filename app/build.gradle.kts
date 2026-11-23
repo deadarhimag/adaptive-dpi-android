@@ -17,6 +17,7 @@ val gitRevision = gitOutput("rev-parse", "HEAD").takeIf { it.matches(Regex("[0-9
 val hasLocalChanges = gitRevision != null &&
     gitOutput("-c", "core.fileMode=false", "status", "--porcelain").isNotEmpty()
 val githubActions = providers.environmentVariable("GITHUB_ACTIONS").orNull == "true"
+val minimumVersionCode = 25
 
 fun requiredCiVariable(name: String): String =
     providers.environmentVariable(name).orNull?.takeIf { it.isNotEmpty() }
@@ -42,7 +43,7 @@ android {
         applicationId = "org.adaptivedpi.android"
         minSdk = libs.versions.android.min.get().toInt()
         targetSdk = libs.versions.android.compile.get().toInt()
-        versionCode = 19
+        versionCode = minimumVersionCode
         versionName = "0.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "build_git_revision", gitRevision ?: "unknown")
@@ -75,8 +76,8 @@ android {
 
 if (ciRun != null) {
     androidComponents.onVariants(androidComponents.selector().withBuildType("debug")) { variant ->
-        // Версия 18 уже опубликована. Следующие сборки имеют больший код версии.
-        variant.outputs.forEach { it.versionCode.set(maxOf(19, 1 + ciRun)) }
+        // Сборка b070dc1 уже заняла код версии 24.
+        variant.outputs.forEach { it.versionCode.set(maxOf(minimumVersionCode, 1 + ciRun)) }
     }
 }
 

@@ -10,11 +10,16 @@ destination="$6"
 expected="${ANDROID_CI_DEBUG_CERT_SHA256:-}"
 expected="${expected//:/}"
 expected="${expected,,}"
+android_results="${ANDROID_TEST_RESULTS_JSON:-}"
 if [[ "${GITHUB_ACTIONS:-}" == true || -n "$expected" ]]; then
   if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
     echo "Для CI APK требуется закреплённый ANDROID_CI_DEBUG_CERT_SHA256." >&2
     exit 1
   fi
+fi
+if [[ "${GITHUB_ACTIONS:-}" == true && ! -s "$android_results" ]]; then
+  echo "Для публикации APK необходим подтверждённый отчёт Android-тестов." >&2
+  exit 1
 fi
 package_info=$("$tools/aapt2" dump badging "$apk")
 test_info=$("$tools/aapt2" dump badging "$test_apk")
@@ -106,8 +111,19 @@ mkdir -p "$destination"
 cp "$apk" "$destination/app-debug.apk"
 cp "$test_apk" "$destination/app-debug-androidTest.apk"
 cd "$destination"
-if [[ "${CI_TESTS_VERIFIED:-}" == true ]]; then
-  checks='JVM, Android lint, Compose, TCP/UDP/DNS и HTTPS отдельного пакета через TUN на Android-эмуляторе: успешно'
+if [[ -n "$android_results" ]]; then
+  count=$(python3 - "$android_results" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not summary["executed"] or summary["failed"] or summary["skipped"]:
+    sys.exit("Нет полного успешного инструментального прогона")
+print(summary["executed"])
+PY
+  )
+  checks="JVM, lint debug/release и Android: $count тестов на эмуляторе, ошибок 0, пропусков 0"
 else
   checks='Тесты CI: сведения отсутствуют'
 fi
@@ -117,7 +133,7 @@ fi
   printf 'Test target: org.adaptivedpi.android\nSigner #1 certificate SHA-256 digest: %s\n%s\n' "$fingerprint" "$checks"
   sha256sum app-debug.apk app-debug-androidTest.apk
 } > build-info.txt
-python3 - "$revision" "$build_number" "$fingerprint" "$checks" \
+python3 - "$revision" "$build_number" "$fingerprint" "$checks" "$android_results" \
   "${package_info%%$'\n'*}" "${test_info%%$'\n'*}" > build-info.json <<'PY'
 from pathlib import Path
 import hashlib
@@ -125,7 +141,7 @@ import json
 import re
 import sys
 
-commit, build, certificate, checks, app_info, test_info = sys.argv[1:]
+commit, build, certificate, checks, android_results, app_info, test_info = sys.argv[1:]
 
 def apk_info(name, badging):
     package, code, version = re.match(r"package: name='([^']+)' versionCode='(\d*)' versionName='([^']*)'", badging).groups()
@@ -134,9 +150,11 @@ def apk_info(name, badging):
 
 app = apk_info("app-debug.apk", app_info)
 test = apk_info("app-debug-androidTest.apk", test_info)
-if build != "local" and app["versionCode"] != max(19, 1 + int(build.split(".")[0])):
-    sys.exit("В APK указан неверный versionCode для этого запуска CI.")
+expected_code = 25 if build == "local" else max(25, 1 + int(build.split(".")[0]))
+if app["versionCode"] != expected_code or app["versionName"] != "0.1.1":
+    sys.exit("В APK указана неверная версия для этого запуска.")
 test.update(targetPackage=app["package"], runner="androidx.test.runner.AndroidJUnitRunner")
+result = json.loads(Path(android_results).read_text(encoding="utf-8")) if android_results else None
 print(json.dumps({"commit": commit, "build": build, "certificateSha256": certificate,
-                  "checks": checks, "app": app, "test": test}, ensure_ascii=False, indent=2))
+                  "checks": checks, "androidTests": result, "app": app, "test": test}, ensure_ascii=False, indent=2))
 PY

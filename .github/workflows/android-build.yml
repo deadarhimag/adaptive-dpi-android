@@ -66,18 +66,18 @@ jobs:
           ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
         run: |
           ./gradlew --no-daemon --no-configuration-cache testDebugUnitTest :engine:test
-          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:assembleDebugAndroidTest
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:lintRelease :app:assembleDebugAndroidTest
 
-      - name: Проверить Compose и TCP, UDP, DNS, HTTPS через Android TUN
+      - name: Проверить системное согласие, жизненный цикл, Compose и транспорт через Android TUN
         id: device_tests
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}
           ANDROID_CI_DEBUG_KEY_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_KEY_PASSWORD }}
         run: bash .github/scripts/test-diagnostics-on-emulator.sh
 
       - name: Сохранить диагностику сбоя Android-тестов
-        if: failure() && steps.device_tests.outcome == 'failure'
+        if: always() && (steps.device_tests.outcome == 'failure' || steps.device_tests.outcome == 'cancelled')
         uses: actions/upload-artifact@v7
         with:
           name: tun-test-diagnostics-${{ github.run_number }}.${{ github.run_attempt }}
@@ -85,6 +85,17 @@ jobs:
             ${{ runner.temp }}/tun-ci/
             app/build/outputs/androidTest-results/connected/**/*.xml
           if-no-files-found: warn
+
+      - name: Сохранить результаты пройденных Android-тестов
+        if: steps.device_tests.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-test-results-${{ github.run_number }}.${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tun-ci/results.json
+            ${{ runner.temp }}/tun-ci/consent.log
+            app/build/outputs/androidTest-results/connected/**/TEST-*.xml
+          if-no-files-found: error
 
       - name: Проверить содержимое APK и создать сведения о сборке
         id: apk
@@ -94,7 +105,7 @@ jobs:
           build_number="$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           artifact_name="adaptive-dpi-android-debug-${GITHUB_SHA:0:12}-$build_number"
           output_dir="$RUNNER_TEMP/adaptive-dpi-artifact"
-          CI_TESTS_VERIFIED=true bash .github/scripts/verify-debug-apk.sh \
+          ANDROID_TEST_RESULTS_JSON="$RUNNER_TEMP/tun-ci/results.json" bash .github/scripts/verify-debug-apk.sh \
             app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
             "$ANDROID_HOME/build-tools/35.0.0" "$GITHUB_SHA" "$build_number" "$output_dir"
           cp scripts/test-pixel7.ps1 scripts/transport-fixture.py scripts/apk-certificate.py \
