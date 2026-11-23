@@ -1,6 +1,7 @@
 package org.adaptivedpi.android
 
 import android.Manifest
+import android.app.ActivityManager
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.vpn.AdaptiveVpnService
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
@@ -19,6 +21,7 @@ import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.VpnDiagnostics
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventType
+import org.adaptivedpi.android.vpn.diagnostics.VpnJournalEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -109,15 +112,20 @@ class VpnLifecycleInstrumentedTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             try {
                 val first = startSession(scenario)
+                assertTrue(checkNotNull(runningVpnService()).started)
                 scenario.onActivity { assertTrue(it.stopService(Intent(it, AdaptiveVpnService::class.java))) }
-                awaitState(VpnState.Failed)
+                // Android остаётся клиентом службы, пока открыт TUN.
+                assertFalse(checkNotNull(runningVpnService()).started)
+                scenario.onActivity { VpnController.stop() }
+                awaitState(VpnState.Idle)
                 awaitNotificationRemoval()
                 assertFalse(VpnController.resourcesBlocked.value)
-                acknowledgeNewError(DiagnosticCode.VpnUnexpectedStop, first)
+                assertNull("Перед повторным запуском Android должен удалить старую службу", runningVpnService())
+                assertStopRecorded(first, VpnEventType.StopFromApp)
                 assertNotEquals(first, startSession(scenario))
             } finally {
                 scenario.onActivity { VpnController.stop() }
-                awaitState(VpnState.Idle)
+                if (VpnController.state.value.canStop) awaitState(VpnState.Idle)
             }
         }
     }
@@ -126,6 +134,7 @@ class VpnLifecycleInstrumentedTest {
     fun missingTargetPackageFailsStartupAndAllowsAnotherSession() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val previous = VpnDiagnostics.events.value.map { it.id }.toSet()
+            val previousVpnEvents = VpnEventHistory.state.value.entries.map { it.id }.toSet()
             try {
                 scenario.onActivity {
                     assertNull(VpnService.prepare(it))
@@ -135,6 +144,16 @@ class VpnLifecycleInstrumentedTest {
                 awaitState(VpnState.StartFailed)
                 awaitNotificationRemoval()
                 assertFalse(VpnController.resourcesBlocked.value)
+                runBlocking {
+                    fun isNewStartError(event: VpnJournalEvent) =
+                        event.id !in previousVpnEvents && event.type == VpnEventType.StartError &&
+                            event.code == DiagnosticCode.TransportApplicationUnavailable
+                    val entries = withTimeout(10_000) {
+                        VpnEventHistory.state.first { state -> state.entries.any(::isNewStartError) }.entries
+                    }
+                    val failedSession = checkNotNull(entries.first(::isNewStartError).sessionId)
+                    assertFalse(entries.any { it.sessionId == failedSession && it.type == VpnEventType.TransportTunCreated })
+                }
                 val error = runBlocking {
                     withTimeout(10_000) {
                         VpnDiagnostics.events.first { events ->
@@ -146,16 +165,17 @@ class VpnLifecycleInstrumentedTest {
                 startSession(scenario)
             } finally {
                 scenario.onActivity { VpnController.stop() }
-                awaitState(VpnState.Idle)
+                if (VpnController.state.value.canStop) awaitState(VpnState.Idle)
             }
         }
     }
 
-    private fun acknowledgeNewError(code: DiagnosticCode, id: UUID) = runBlocking {
-        withTimeout(10_000) {
-            VpnDiagnostics.events.first { events -> events.any { it.code == code && it.id == id } }
+    @Suppress("DEPRECATION")
+    private fun runningVpnService(): ActivityManager.RunningServiceInfo? {
+        val manager = checkNotNull(instrumentation.targetContext.getSystemService(ActivityManager::class.java))
+        return manager.getRunningServices(100).firstOrNull {
+            it.service.className == AdaptiveVpnService::class.java.name
         }
-        acknowledgeError(id)
     }
 
     private fun acknowledgeError(id: UUID) = runBlocking {
@@ -238,7 +258,8 @@ class VpnLifecycleInstrumentedTest {
     }
 
     private fun awaitState(expected: VpnState) = runBlocking {
-        withTimeout(10_000) { VpnController.state.first { it == expected } }
+        withTimeoutOrNull(10_000) { VpnController.state.first { it == expected } }
+            ?: error("Ожидалось состояние $expected. Текущее состояние: ${VpnController.state.value}.")
     }
 
     private fun awaitNotification() = runBlocking {

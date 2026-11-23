@@ -13,6 +13,8 @@ import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -196,12 +198,30 @@ class DiagnosticsInstrumentedTest {
             assertEquals("VPN отключён из-за ошибки", posted.notification.extras.getCharSequence("android.title").toString())
             assertEquals("Подробнее", posted.notification.actions.single().title.toString())
 
-            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-                posted.notification.contentIntent.send()
-                await {
-                    var selected = false
-                    scenario.onActivity { selected = VpnDiagnostics.eventId(it.intent) == event.id }
-                    selected
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            ActivityScenario.launch(TransportTestActivity::class.java).use {
+                var reportActivity: MainActivity? = null
+                try {
+                    posted.notification.contentIntent.send()
+                    await {
+                        var selected = false
+                        instrumentation.runOnMainSync {
+                            val resumed = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                                .filterIsInstance<MainActivity>().firstOrNull()
+                            if (resumed != null) reportActivity = resumed
+                            selected = VpnDiagnostics.eventId(resumed?.intent) == event.id
+                        }
+                        selected
+                    }
+                } finally {
+                    reportActivity?.let { activity ->
+                        instrumentation.runOnMainSync { activity.finish() }
+                        await {
+                            var destroyed = false
+                            instrumentation.runOnMainSync { destroyed = activity.isDestroyed }
+                            destroyed
+                        }
+                    }
                 }
             }
         } finally {

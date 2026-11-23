@@ -204,7 +204,12 @@ class AdaptiveVpnService : VpnService() {
             if (applicationPackage != null) {
                 failureCode = DiagnosticCode.TransportApplicationUnavailable
                 require(experimentalTarget == null && applicationPackage != packageName && ExperimentalApplication.isPackageName(applicationPackage))
-                withContext(SESSION_IO) { builder.addAllowedApplication(applicationPackage) }
+                withContext(SESSION_IO) {
+                    // Android 14 может принять отсутствующий пакет при заполнении списка VPN.
+                    @Suppress("DEPRECATION")
+                    packageManager.getApplicationInfo(applicationPackage, 0)
+                    builder.addAllowedApplication(applicationPackage)
+                }
                 failureCode = DiagnosticCode.TunnelFailed
             } else {
                 withContext(SESSION_IO) { builder.addAllowedApplication(packageName) }
