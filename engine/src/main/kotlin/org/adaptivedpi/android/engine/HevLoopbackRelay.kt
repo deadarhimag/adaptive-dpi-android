@@ -16,6 +16,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
@@ -39,6 +41,7 @@ class HevLoopbackRelay internal constructor(
     maxSessions: Int,
     private val failures: TransportFailureReporter,
     startAccepting: (ServerSocket, Thread) -> Unit,
+    tcpIdleTimeoutMillis: Long = 60_000,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     constructor(
@@ -47,11 +50,16 @@ class HevLoopbackRelay internal constructor(
         maxSessions: Int = 16,
         failures: TransportFailureReporter = TransportFailureReporter(),
         onListenerFailure: () -> Unit,
-    ) : this(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, onListenerFailure)
+    ) : this(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, onListenerFailure = onListenerFailure)
 
-    init { require(maxSessions > 0) }
+    init { require(maxSessions > 0 && tcpIdleTimeoutMillis > 0) }
 
     private val lock = Any()
+    private val tcpIdleNanos = TimeUnit.MILLISECONDS.toNanos(tcpIdleTimeoutMillis)
+    private val idleTimers = ScheduledThreadPoolExecutor(1) { task -> Thread(task, "HEV TCP idle") }.apply {
+        removeOnCancelPolicy = true
+        executeExistingDelayedTasksAfterShutdownPolicy = false
+    }
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     private val permits = Semaphore(maxSessions)
     private val clients = mutableSetOf<Peer>()
@@ -134,8 +142,8 @@ class HevLoopbackRelay internal constructor(
                 val command = input.readUnsignedByte()
                 requireProtocol(input.readUnsignedByte() == 0)
                 val endpoint = readEndpoint(input)
-                socket.soTimeout = 60_000
                 requireProtocol(command == 1 || command == 5)
+                socket.soTimeout = if (command == 1) 0 else 60_000
                 command to endpoint
             }
             when (command) {
@@ -177,22 +185,34 @@ class HevLoopbackRelay internal constructor(
             throw error
         }
         connection.use {
-            observe(CONTROL_WRITE, peer) { reply(output, 0) }
-            val response = submit(TCP_SCHEDULE) {
+            connection.useRelayIdleTimeout()
+            val idle = TcpIdle {
                 try {
-                    val buffer = ByteArray(TCP_BUFFER)
-                    while (true) {
-                        val size = connection.read(buffer)
-                        if (size < 0) break
-                        observe(TCP_WRITE, peer) { output.write(buffer, 0, size) }
-                    }
-                    observe(TCP_HALF_CLOSE, peer, fallback = TransportCategory.CLEANUP) { peer.socket.shutdownOutput() }
-                } catch (error: Exception) {
+                    failures.record(TransportFailure(TCP_IDLE, TransportCategory.TIMEOUT, TransportCode.TIMEOUT))
+                } finally {
+                    connection.close()
                     closePeer(peer)
-                    throw error
                 }
             }
+            var response: Future<*>? = null
             try {
+                observe(CONTROL_WRITE, peer) { reply(output, 0) }
+                idle.start()
+                response = submit(TCP_SCHEDULE) {
+                    try {
+                        val buffer = ByteArray(TCP_BUFFER)
+                        while (true) {
+                            val size = connection.read(buffer)
+                            if (size < 0) break
+                            observe(TCP_WRITE, peer) { output.write(buffer, 0, size) }
+                            idle.forwarded()
+                        }
+                        observe(TCP_HALF_CLOSE, peer, fallback = TransportCategory.CLEANUP) { peer.socket.shutdownOutput() }
+                    } catch (error: Exception) {
+                        closePeer(peer)
+                        throw error
+                    }
+                }
                 val buffer = ByteArray(TCP_BUFFER)
                 while (true) {
                     val size = observe(TCP_READ, peer) { input.read(buffer) }
@@ -201,12 +221,56 @@ class HevLoopbackRelay internal constructor(
                         break
                     }
                     connection.write(buffer, 0, size)
+                    idle.forwarded()
                 }
                 connection.shutdownOutput()
                 response.get()
             } finally {
-                finishDirections(peer, connection, response)
+                idle.close()
+                if (response != null) {
+                    finishDirections(peer, connection, response)
+                }
             }
+        }
+    }
+
+    private inner class TcpIdle(private val onTimeout: () -> Unit) : Closeable {
+        private var lastForwarded = 0L
+        private var nextCheck: ScheduledFuture<*>? = null
+        private var finished = false
+
+        @Synchronized
+        fun start() {
+            lastForwarded = System.nanoTime()
+            schedule(tcpIdleNanos)
+        }
+
+        @Synchronized
+        fun forwarded() {
+            lastForwarded = System.nanoTime()
+        }
+
+        private fun schedule(delayNanos: Long) = synchronized(lock) {
+            if (!closing) nextCheck = idleTimers.schedule(::checkDeadline, delayNanos, TimeUnit.NANOSECONDS)
+        }
+
+        private fun checkDeadline() {
+            synchronized(this) {
+                if (finished || closing) return
+                val remaining = tcpIdleNanos - (System.nanoTime() - lastForwarded)
+                if (remaining > 0) {
+                    schedule(remaining)
+                    return
+                }
+                finished = true
+            }
+            onTimeout()
+        }
+
+        @Synchronized
+        override fun close() {
+            finished = true
+            nextCheck?.cancel(false)
         }
     }
 
@@ -345,6 +409,7 @@ class HevLoopbackRelay internal constructor(
         val peers = synchronized(lock) {
             if (closing) return
             closing = true
+            idleTimers.shutdown()
             clients.toList()
         }
         try {
@@ -372,6 +437,7 @@ class HevLoopbackRelay internal constructor(
         }
         requests.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
         responses.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
+        idleTimers.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
         return shutdownStatus()
     }
 
@@ -387,6 +453,7 @@ class HevLoopbackRelay internal constructor(
         acceptThread.join()
         requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
         responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+        idleTimers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
     }
 
     private fun pendingShutdownSteps(): Int {
@@ -395,6 +462,7 @@ class HevLoopbackRelay internal constructor(
         if (!requests.isTerminated) pending = pending or 2
         if (!responses.isTerminated) pending = pending or 4
         if (closeCompleted.count != 0L) pending = pending or 8
+        if (!idleTimers.isTerminated) pending = pending or 16
         return pending
     }
 
@@ -442,6 +510,7 @@ class HevLoopbackRelay internal constructor(
         val CONTROL_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ)
         val CONTROL_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE)
         val TCP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP, TransportDirection.OUTBOUND)
+        val TCP_IDLE = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP)
         val TCP_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE, TransportProtocol.TCP, TransportDirection.INBOUND)
         val TCP_HALF_CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.SHUTDOWN_OUTPUT, TransportProtocol.TCP, TransportDirection.INBOUND)
         val TCP_SCHEDULE = TransportSite(TransportSubsystem.HEV, TransportOperation.SCHEDULE, TransportProtocol.TCP)

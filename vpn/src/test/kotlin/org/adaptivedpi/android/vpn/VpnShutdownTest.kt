@@ -15,6 +15,7 @@ import org.junit.Test
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 class VpnShutdownTest {
     @Test
@@ -132,6 +133,92 @@ class VpnShutdownTest {
             assertTrue(poll.isCompleted)
         } finally {
             releasePoll.countDown()
+        }
+    }
+
+    @Test(timeout = 12_000)
+    fun sharedBridgeLockModelDelaysStopSignalUntilPollUnlocksWithoutReleasingOwnershipEarly() = runBlocking {
+        // Модель общей блокировки bridge.c. JNI и рабочий цикл HEV здесь не запущены.
+        val bridgeLock = ReentrantLock()
+        val pollHasLock = CompletableDeferred<Unit>()
+        val allowPollExit = CountDownLatch(1)
+        val stopFoundBusyLock = CompletableDeferred<Boolean>()
+        val stopSent = CompletableDeferred<Unit>()
+        val warned = CompletableDeferred<Unit>()
+        val completed = CompletableDeferred<Result<Unit>>()
+        val lifecycle = VpnLifecycle()
+        val id = "process:00000000-0000-0000-0000-000000000001"
+        val pollIo = Dispatchers.IO.limitedParallelism(1)
+        val stopIo = Dispatchers.IO.limitedParallelism(1)
+        val poll = launch(pollIo) {
+            check(bridgeLock.tryLock(5, TimeUnit.SECONDS))
+            try {
+                pollHasLock.complete(Unit)
+                check(allowPollExit.await(5, TimeUnit.SECONDS))
+            } finally {
+                bridgeLock.unlock()
+            }
+        }
+        val shutdown = VpnShutdown(
+            scope = this,
+            delayMillis = 100,
+            clock = { System.nanoTime() / 1_000_000 },
+            release = {
+                requestStopAndAwaitPoll(poll) {
+                    withContext(stopIo) {
+                        val immediatelyAcquired = bridgeLock.tryLock()
+                        if (immediatelyAcquired) bridgeLock.unlock()
+                        stopFoundBusyLock.complete(!immediatelyAcquired)
+                        check(bridgeLock.tryLock(5, TimeUnit.SECONDS))
+                        try {
+                            stopSent.complete(Unit)
+                        } finally {
+                            bridgeLock.unlock()
+                        }
+                    }
+                }
+            },
+            onDelay = {
+                lifecycle.cleanupDelayed(id, CleanupStep.NativeStop.title)
+                warned.complete(Unit)
+            },
+            onComplete = {
+                it.onSuccess { lifecycle.serviceEnded(id, VpnEvent.ServiceDestroyed) }
+                completed.complete(it)
+            },
+        )
+        try {
+            withTimeout(3_000) { pollHasLock.await() }
+            assertTrue(lifecycle.beginConsent(id))
+            lifecycle.update(id, VpnEvent.StartRequested)
+            assertTrue(lifecycle.attachService(id, shutdown::start))
+            lifecycle.update(id, VpnEvent.ServiceStarted)
+            val sessionId = checkNotNull(lifecycle.currentSessionId)
+            lifecycle.stop()
+            lifecycle.stop()
+
+            withTimeout(3_000) {
+                assertTrue(stopFoundBusyLock.await())
+                warned.await()
+            }
+            assertEquals(CleanupStep.NativeStop.title, lifecycle.cleanupDelay.value)
+            assertEquals(VpnState.Stopping, lifecycle.state.value)
+            assertEquals(sessionId, lifecycle.currentSessionId)
+            assertFalse(stopSent.isCompleted)
+            assertFalse(completed.isCompleted)
+            assertFalse(lifecycle.beginConsent("overlap"))
+            allowPollExit.countDown()
+
+            withTimeout(3_000) {
+                stopSent.await()
+                completed.await().getOrThrow()
+            }
+            assertTrue(poll.isCompleted)
+            assertEquals(VpnState.Idle, lifecycle.state.value)
+            assertEquals(null, lifecycle.currentSessionId)
+            assertTrue(lifecycle.beginConsent("restart"))
+        } finally {
+            allowPollExit.countDown()
         }
     }
 

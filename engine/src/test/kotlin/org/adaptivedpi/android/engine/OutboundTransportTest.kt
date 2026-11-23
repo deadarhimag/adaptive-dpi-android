@@ -18,6 +18,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class OutboundTransportTest {
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -46,6 +47,89 @@ class OutboundTransportTest {
                 }
             }
             assertEquals(0, transport.statistics().activeUdp)
+        }
+    }
+
+    @Test(timeout = 15_000)
+    fun pendingTcpPreparationCannotConnectAfterStopEvenBeforeBackgroundCleanup() =
+        verifyStopDuringTcpPreparation(closeDuringPreparation = false)
+
+    @Test(timeout = 15_000)
+    fun backgroundStopClosesPendingTcpWithoutClosingActiveConnections() =
+        verifyStopDuringTcpPreparation(closeDuringPreparation = true)
+
+    private fun verifyStopDuringTcpPreparation(closeDuringPreparation: Boolean) {
+        val preparing = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val pendingSocket = AtomicReference<Socket>()
+        var holdPreparation = false
+        val policy = object : OutboundSocketPolicy by localPolicy {
+            override fun prepare(socket: Socket) {
+                localPolicy.prepare(socket)
+                if (!holdPreparation) return
+                pendingSocket.set(socket)
+                preparing.countDown()
+                check(resume.await(TIMEOUT.toLong(), TimeUnit.MILLISECONDS))
+                if (closeDuringPreparation) {
+                    // Android-политика оборачивает IOException привязки в ошибку операции BIND.
+                    val closed = assertThrows(SocketException::class.java) { socket.soTimeout = TIMEOUT }
+                    throw TransportSocketException(TransportCode.UNKNOWN, TransportCategory.SOCKET_SETUP, TransportOperation.BIND, closed)
+                }
+            }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            ServerSocket(0, 1, loopback).use { listener ->
+                listener.soTimeout = TIMEOUT
+                transport(maxSockets = 2).use { transport ->
+                    transport.updateNetwork(policy)
+                    val active = transport.connectTcp(loopback, listener.localPort)
+                    listener.accept().use { activePeer ->
+                        activePeer.soTimeout = TIMEOUT
+                        holdPreparation = true
+                        val request = executor.submit<TransportSocketException> {
+                            assertThrows(TransportSocketException::class.java) {
+                                transport.connectTcp(loopback, listener.localPort)
+                            }
+                        }
+                        assertTrue("Подготовка сокета должна начаться до Stop", preparing.await(3, TimeUnit.SECONDS))
+                        val socket = checkNotNull(pendingSocket.get())
+                        assertFalse(socket.isConnected)
+                        assertEquals(1, transport.statistics().pending)
+
+                        transport.stopAcceptingNewConnections()
+                        if (closeDuringPreparation) {
+                            transport.closePendingTcpConnections()
+                            transport.closePendingTcpConnections()
+                            assertTrue("Фоновая очистка закрывает сокет до возврата из prepare()", socket.isClosed)
+                            assertEquals(0, transport.statistics().pending)
+                        }
+                        resume.countDown()
+                        val error = request.get(TIMEOUT.toLong(), TimeUnit.MILLISECONDS)
+                        assertEquals(TransportCode.SESSION_CANCELLED, error.code)
+                        assertEquals(TransportCategory.CANCELLED, error.category)
+                        if (closeDuringPreparation) assertEquals(TransportOperation.BIND, error.operation)
+                        listener.soTimeout = 250
+                        assertThrows(SocketTimeoutException::class.java) { listener.accept().use { } }
+                        assertFalse(socket.isConnected)
+                        assertTrue("Сокет должен быть закрыт уже при отказе операции", socket.isClosed)
+                        assertEquals(0, transport.statistics().pending)
+                        assertEquals(1, transport.statistics().activeTcp)
+                        assertEquals(1L, transport.statistics().openedTcp)
+                        assertEquals(SocketCloseSummary(closed = 1), transport.socketClosures())
+                        active.write(byteArrayOf(42))
+                        assertEquals(42, activePeer.getInputStream().read())
+                        transport.close()
+                        assertEquals(-1, activePeer.getInputStream().read())
+                        assertEquals(0, transport.statistics().activeTcp)
+                        assertEquals(SocketCloseSummary(closed = 2), transport.socketClosures())
+                    }
+                }
+            }
+        } finally {
+            resume.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
         }
     }
 

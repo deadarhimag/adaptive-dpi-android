@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.DatagramPacket
@@ -14,12 +15,14 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class HevLoopbackRelayTest {
     private val ip = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -69,6 +72,117 @@ class HevLoopbackRelayTest {
                     }
                 }
             }
+        }
+    }
+
+    @Test(timeout = 85_000)
+    fun activeDownloadSurvivesSixtySecondsOfSilenceInRequestDirection() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        val sender = Executors.newSingleThreadScheduledExecutor()
+        val marker = 42
+        try {
+            ServerSocket(0, 1, ip).use { listener ->
+                listener.soTimeout = 3_000
+                relay(failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
+                    client(relay).use { client ->
+                        val input = DataInputStream(client.getInputStream())
+                        val output = DataOutputStream(client.getOutputStream())
+                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                        command(output, 1, listener.localPort)
+                        assertEquals(0, reply(input))
+                        val connectedAt = System.nanoTime()
+                        client.soTimeout = 5_000
+
+                        listener.accept().use { peer ->
+                            val stream = peer.getOutputStream()
+                            // Сервер продолжает попытки отправки за 60 с. Обратное направление остаётся открытым и молчит.
+                            val sending = sender.scheduleAtFixedRate({ stream.write(marker) }, 0, 1, TimeUnit.SECONDS)
+                            try {
+                                val deadline = connectedAt + TimeUnit.SECONDS.toNanos(65)
+                                var received = 0
+                                do {
+                                    assertEquals("Загрузка прервалась после $received байт", marker, input.read())
+                                    received++
+                                } while (System.nanoTime() < deadline)
+                                val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - connectedAt)
+                                assertTrue("До контрольного срока должны поступать данные, получено $received", received >= 60)
+                                assertFalse(failures.any { it.code == TransportCode.TIMEOUT })
+                                assertEquals(0L, transport.statistics().sentBytes)
+                                assertEquals(1, transport.statistics().activeTcp)
+                                println("TCP: загрузка активна через ${elapsed} мс, получено $received байт")
+                            } finally {
+                                sending.cancel(false)
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            sender.shutdownNow()
+            assertTrue(sender.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test(timeout = 12_000)
+    fun activeUploadOutlivesBothReadTimeoutsThenIdleClosesBothSockets() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        val sender = Executors.newSingleThreadScheduledExecutor()
+        val idleTimeoutMillis = 1_000L
+        val marker = 43
+        try {
+            ServerSocket(0, 1, ip).use { listener ->
+                listener.soTimeout = 3_000
+                relay(
+                    failures = TransportFailureReporter(sink = failures::add),
+                    tcpIdleTimeoutMillis = idleTimeoutMillis,
+                    readTimeoutMillis = 500,
+                ) { relay, transport ->
+                    client(relay).use { client ->
+                        val input = DataInputStream(client.getInputStream())
+                        val output = DataOutputStream(client.getOutputStream())
+                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                        command(output, 1, listener.localPort)
+                        assertEquals(0, reply(input))
+                        listener.accept().use { peer ->
+                            peer.soTimeout = 3_000
+                            val peerInput = peer.getInputStream()
+                            val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1_500)
+                            val lastSendStarted = AtomicLong()
+                            val sending = sender.scheduleAtFixedRate({
+                                lastSendStarted.set(System.nanoTime())
+                                output.write(marker)
+                            }, 0, 100, TimeUnit.MILLISECONDS)
+                            try {
+                                do {
+                                    assertEquals(marker, peerInput.read())
+                                } while (System.nanoTime() < until)
+                                assertEquals(1, transport.statistics().activeTcp)
+                                assertFalse(failures.any { it.code == TransportCode.TIMEOUT })
+                            } finally {
+                                sending.cancel(false)
+                            }
+                            // Барьер исполнителя гарантирует, что поток отправки больше не пишет.
+                            sender.submit {}.get(2, TimeUnit.SECONDS)
+                            while (true) {
+                                val value = peerInput.read()
+                                if (value == -1) break
+                                assertEquals(marker, value)
+                            }
+                            val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastSendStarted.get())
+                            assertTrue("Соединение закрылось через $elapsed мс после начала последней отправки", elapsed >= idleTimeoutMillis)
+                            assertEquals(-1, input.read())
+                            val timeout = failures.single { it.code == TransportCode.TIMEOUT }
+                            assertEquals(TransportCategory.TIMEOUT, timeout.category)
+                            assertEquals(TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP), timeout.site)
+                            assertEquals(0, transport.statistics().activeTcp)
+                            assertEquals(SocketCloseSummary(closed = 1), transport.socketClosures())
+                        }
+                    }
+                }
+            }
+        } finally {
+            sender.shutdownNow()
+            assertTrue(sender.awaitTermination(2, TimeUnit.SECONDS))
         }
     }
 
@@ -440,6 +554,64 @@ class HevLoopbackRelayTest {
         }
     }
 
+    @Test(timeout = 15_000)
+    fun oversizedOutboundUdpFrameClosesAnEstablishedAssociation() {
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
+            server.soTimeout = 3_000
+            relay(failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    command(output, 5, 0)
+                    assertEquals(0, reply(input))
+
+                    val valid = ByteArray(1_500) { it.toByte() }
+                    frame(output, server.localPort, valid)
+                    val packet = DatagramPacket(ByteArray(1_501), 1_501)
+                    server.receive(packet)
+                    assertArrayEquals(valid, packet.data.copyOf(packet.length))
+                    server.send(DatagramPacket(valid, valid.size, packet.socketAddress))
+                    assertArrayEquals(valid, response(input))
+                    assertEquals(1, transport.statistics().activeUdp)
+
+                    val oversized = ByteArrayOutputStream()
+                    frame(DataOutputStream(oversized), server.localPort, ByteArray(1_501))
+                    output.write(oversized.toByteArray())
+                    try {
+                        assertEquals("Уже установленная ассоциация завершилась", -1, input.read())
+                    } catch (_: SocketException) {
+                        // Стек TCP может вернуть RST при закрытии с непрочитанным телом кадра.
+                        // Причину и закрытие исходящего UDP проверяем ниже.
+                    }
+                    val rejected = failures.single { it.code == TransportCode.RELAY_PROTOCOL }
+                    assertEquals(TransportCategory.RELAY_PROTOCOL, rejected.category)
+                    assertEquals(
+                        TransportSite(TransportSubsystem.HEV, TransportOperation.READ,
+                            TransportProtocol.UDP, TransportDirection.OUTBOUND),
+                        rejected.site,
+                    )
+                    assertEquals(0, transport.statistics().activeUdp)
+                    assertEquals(1L, transport.statistics().sentDatagrams)
+                    assertEquals(SocketCloseSummary(closed = 1), transport.socketClosures())
+                }
+
+                client(relay).use { fresh ->
+                    val input = DataInputStream(fresh.getInputStream())
+                    val output = DataOutputStream(fresh.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    command(output, 5, 0)
+                    assertEquals(0, reply(input))
+                    frame(output, server.localPort, byteArrayOf(17))
+                    val packet = DatagramPacket(ByteArray(16), 16)
+                    server.receive(packet)
+                    assertArrayEquals(byteArrayOf(17), packet.data.copyOf(packet.length))
+                }
+            }
+        }
+    }
+
     @Test
     fun stopClosesActiveTcpAndUdpAndDrainsBothPools() {
         ServerSocket(0, 1, ip).use { tcp ->
@@ -568,10 +740,14 @@ class HevLoopbackRelayTest {
         destination: InetAddress? = ip,
         maxSessions: Int = 16,
         failures: TransportFailureReporter = TransportFailureReporter(),
+        tcpIdleTimeoutMillis: Long = 60_000,
+        readTimeoutMillis: Int = 15_000,
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
-        val transport = OutboundTransport(failures = failures).apply { updateNetwork(policy) }
-        val relay = HevLoopbackRelay(transport, destination, maxSessions, failures) { error("Неожиданная остановка релея") }
+        val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
+        val relay = HevLoopbackRelay(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, tcpIdleTimeoutMillis) {
+            error("Неожиданная остановка релея")
+        }
         relay.use { test(it, transport) }
         assertTrue(relay.awaitShutdown())
         assertTrue(relay.isTerminated)

@@ -155,6 +155,8 @@ internal class ExperimentalTransport(
         stopAcceptingNewConnections()
         if (stopping.compareAndSet(false, true)) {
             diagnostics.stateChanged(VpnState.Stopping)
+            step(CleanupStep.PendingTcpClose)
+            cleanupStep(CleanupStep.PendingTcpClose, RELAY_STOP, outbound::closePendingTcpConnections)
             step(CleanupStep.NativeStop)
             cleanupStep(CleanupStep.NativeStop, RELAY_STOP) { HevBridge.stop(token, VpnState.Stopping.ordinal) }
             step(CleanupStep.RelayClose)

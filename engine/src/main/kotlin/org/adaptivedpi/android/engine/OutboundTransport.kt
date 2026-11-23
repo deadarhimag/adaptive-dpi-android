@@ -1,6 +1,7 @@
 package org.adaptivedpi.android.engine
 
 import java.io.Closeable
+import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -39,6 +40,7 @@ class OutboundTransport(
     private val failures: TransportFailureReporter = TransportFailureReporter(),
 ) : Closeable {
     private val lock = Any()
+    private val tcpConnectGate = Any()
     private val sockets = LinkedHashMap<Closeable, SocketLease<*>>()
     private var network: OutboundSocketPolicy? = null
     private var closed = false
@@ -104,7 +106,16 @@ class OutboundTransport(
 
     fun socketClosures(): SocketCloseSummary = closures.snapshot()
 
-    fun stopAcceptingNewConnections() { accepting = false }
+    fun stopAcceptingNewConnections() = synchronized(tcpConnectGate) { accepting = false }
+
+    /** Фоновая часть Stop. Активные соединения по-прежнему закрывает владелец релея. */
+    fun closePendingTcpConnections() = synchronized(lock) {
+        check(!accepting)
+        sockets.values.filter { it.socket is Socket && !it.active }.forEach {
+            sockets.remove(it.socket)
+            closeSocket(it, TransportCancellation.SESSION)
+        }
+    }
 
     override fun close() = synchronized(lock) {
         if (closed) return@synchronized
@@ -120,6 +131,10 @@ class OutboundTransport(
         private val writeSite = site.copy(operation = TransportOperation.WRITE)
         private val closeSite = site.copy(operation = TransportOperation.SHUTDOWN_OUTPUT)
         @Volatile private var peerEof = false
+
+        internal fun useRelayIdleTimeout() = countFailures(readSite, { lease.cancellation }) {
+            socket.soTimeout = 0
+        }
 
         fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int = countFailures(
             readSite, { lease.cancellation },
@@ -207,19 +222,42 @@ class OutboundTransport(
                 }
             }
             return countFailures(site, { lease.cancellation }) {
+                if (socket is Socket) synchronized(tcpConnectGate) {
+                    // Допуск упорядочен со Stop. Сам блокирующий connect выполняется вне замков.
+                    checkConnectAllowed(lease)
+                }
                 connect(socket)
                 synchronized(lock) {
-                    lease.cancellation?.let { throw TransportSocketException(it.code, TransportCategory.CANCELLED) }
-                    if (!accepting) throw TransportSocketException(TransportCode.SESSION_CANCELLED, TransportCategory.CANCELLED)
-                    lease.active = true
-                    if (socket is Socket) openedTcp++ else openedUdp++
+                    if (socket is Socket) synchronized(tcpConnectGate) { activate(lease) } else activate(lease)
                     connected = true
                 }
                 lease
             }
+        } catch (error: IOException) {
+            if (socket is Socket) {
+                val reason = connectCancellation(lease)
+                val reported = error as? TransportSocketException
+                if (reason != null && reported?.code != reason.code) {
+                    throw TransportSocketException(reason.code, TransportCategory.CANCELLED, reported?.operation, error)
+                }
+            }
+            throw error
         } finally {
             if (!connected) release(lease)
         }
+    }
+
+    private fun connectCancellation(lease: SocketLease<*>) =
+        lease.cancellation ?: if (!accepting) TransportCancellation.SESSION else null
+
+    private fun checkConnectAllowed(lease: SocketLease<*>) {
+        connectCancellation(lease)?.let { throw TransportSocketException(it.code, TransportCategory.CANCELLED) }
+    }
+
+    private fun activate(lease: SocketLease<*>) {
+        checkConnectAllowed(lease)
+        lease.active = true
+        if (lease.socket is Socket) openedTcp++ else openedUdp++
     }
 
     private fun release(lease: SocketLease<*>) = synchronized(lock) {

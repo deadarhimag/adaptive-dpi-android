@@ -12,6 +12,7 @@ internal enum class CleanupStep(val title: String) {
     EngineStop("остановка движка"), ForegroundNotification("закрытие уведомления VPN"),
     ActiveMarker("запись состояния сеанса"), ServiceStop("завершение службы Android"),
     StartupDrain("завершение операции запуска"), NativeExit("выход рабочего цикла HEV"),
+    PendingTcpClose("закрытие ожидающих TCP-подключений"),
 }
 
 internal data class CleanupIssue(val step: CleanupStep, val exception: ExceptionKind)
@@ -68,6 +69,7 @@ internal data class VpnCleanupDetails(
         if (mask and 2 != 0) add("пул запросов")
         if (mask and 4 != 0) add("пул ответов")
         if (mask and 8 != 0) add("закрытие сокетов и пулов")
+        if (mask and 16 != 0) add("завершение таймеров простоя TCP")
     }.joinToString(", ")
 
     companion object {
