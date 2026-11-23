@@ -4,7 +4,9 @@ import org.adaptivedpi.android.vpn.VpnState
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 
 internal class DiagnosticJournal(
@@ -58,7 +60,13 @@ internal class DiagnosticJournal(
     fun clearActive() = Files.deleteIfExists(active.toPath())
 
     private fun readEvents(file: File): List<DiagnosticEvent> {
-        if (!file.isFile || file.length() > maxBytes) return emptyList()
+        val attributes = try {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+        } catch (_: NoSuchFileException) {
+            return emptyList()
+        }
+        check(attributes.isRegularFile)
+        if (attributes.size() > maxBytes) return emptyList()
         return file.useLines { lines ->
             lines.take(maxEntries).mapNotNull { line -> runCatching { decode(line) }.getOrNull() }.toList()
         }

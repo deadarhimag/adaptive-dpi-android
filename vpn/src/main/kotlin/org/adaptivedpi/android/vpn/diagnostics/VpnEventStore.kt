@@ -24,11 +24,20 @@ internal class VpnEventStore(
     }
 
     fun bounded(events: List<VpnJournalEvent>): List<VpnJournalEvent> {
+        val distinct = events.distinctBy(VpnJournalEvent::id)
+        val selected = mutableSetOf<UUID>()
         var size = 0
-        return events.distinctBy(VpnJournalEvent::id).take(maxEntries).takeWhile {
-            size += encode(it).toByteArray(Charsets.UTF_8).size + 1
-            size <= maxBytes
+        fun keep(event: VpnJournalEvent) {
+            if (selected.size >= maxEntries || event.id in selected) return
+            val bytes = encode(event).toByteArray(Charsets.UTF_8).size + 1
+            if (size + bytes <= maxBytes) {
+                selected.add(event.id)
+                size += bytes
+            }
         }
+        distinct.asSequence().filter { it.critical }.take(minOf(maxEntries / 4, 16)).forEach(::keep)
+        distinct.forEach(::keep)
+        return distinct.filter { it.id in selected }
     }
 
     fun write(events: List<VpnJournalEvent>) {

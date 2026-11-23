@@ -10,11 +10,16 @@ internal class DiagnosticCenter(
     private val version: String?,
     private val api: Int,
     private val androidVersion: String?,
+    private val current: MutableStateFlow<List<DiagnosticEvent>> = MutableStateFlow(emptyList()),
     private val notify: (DiagnosticEvent) -> Boolean,
 ) {
-    private val current = MutableStateFlow(runCatching(journal::read).getOrDefault(emptyList()))
     val events = current.asStateFlow()
     private val collectingCrash = AtomicBoolean()
+    private var historyRead = false
+
+    init {
+        current.value = readHistory().orEmpty()
+    }
 
     val recovered = recover()
 
@@ -93,11 +98,18 @@ internal class DiagnosticCenter(
             }
         }
         // Уже прочитанные события сохраняют свои отметки, если удаление слота не удалось.
-        val newEvents = recovered.filter { event -> current.value.none { it.id == event.id } }
+        val newEvents = recovered.filter { event ->
+            val previous = current.value.firstOrNull { it.id == event.id }
+            previous == null || event.code == DiagnosticCode.AppCrash && previous.code != DiagnosticCode.AppCrash
+        }
         val merged = newEvents + current.value
         if (store(merged)) {
-            runCatching(journal::clearCrash)
-            runCatching(journal::clearActive)
+            if (crash != null && current.value.any { it.id == crash.id && it.code == DiagnosticCode.AppCrash }) {
+                runCatching(journal::clearCrash)
+            }
+            if (interrupted != null && current.value.any { it.id == interrupted.id || it.id == crash?.id }) {
+                runCatching(journal::clearActive)
+            }
         }
         return newEvents.map { event ->
             val sessionId = interrupted?.id?.takeIf { it == event.id }
@@ -106,10 +118,13 @@ internal class DiagnosticCenter(
     }
 
     private fun store(entries: List<DiagnosticEvent>): Boolean {
-        val bounded = journal.bounded(entries)
+        val unread = if (historyRead) emptyList() else readHistory()
+        val bounded = journal.bounded(entries + unread.orEmpty())
         current.value = bounded
-        return runCatching { journal.write(bounded) }.isSuccess
+        return historyRead && runCatching { journal.write(bounded) }.isSuccess
     }
+
+    private fun readHistory() = runCatching(journal::read).onSuccess { historyRead = true }.getOrNull()
 
     private fun newEvent(
         code: DiagnosticCode,

@@ -103,8 +103,11 @@ class TunTransportInstrumentedTest {
                             awaitRouteRemoval(connectivity, ip)
                             if (failure == null) {
                                 assertEquals("$session: не завершён штатно. ${vpnDetails()}", VpnState.Idle, stopped)
-                                assertFalse(snapshot().running)
-                                assertEquals(0, snapshot().connections)
+                                val final = snapshot()
+                                assertFalse(final.running)
+                                assertTrue("$session: счётчики TUN должны быть итоговыми", final.finalized)
+                                assertTrue(final.transferred)
+                                assertEquals(0, final.connections)
                                 reportPhase("$session: маршрут снят, активных соединений 0")
                                 reportProgress("session${index + 1}=closed")
                             }

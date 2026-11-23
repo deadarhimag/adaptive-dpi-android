@@ -101,6 +101,29 @@ class VpnEventHistoryTest {
     }
 
     @Test
+    fun criticalEventSurvivesOrdinaryRotationDuringDiskFailureAndIsSavedOnRecovery() = runBlocking {
+        val directory = File(folder.root, "blocked-history")
+        directory.writeText("занято")
+        val store = VpnEventStore(File(directory, "events"), maxEntries = 8)
+        val critical = VpnJournalEvent.create(VpnEventType.StopError, code = DiagnosticCode.VpnCleanupFailed)
+        val next = VpnJournalEvent.create(VpnEventType.StartRequested)
+        withWriter(store) { writer ->
+            assertTrue(writer.record(critical))
+            val ordinary = List(12) { VpnJournalEvent.create(VpnEventType.ActivityRestored) }
+            ordinary.forEach { assertTrue(writer.record(it)) }
+            val snapshot = withTimeout(5_000) { writer.state.first { it.entries.firstOrNull() == ordinary.last() } }
+            assertTrue(snapshot.storageError)
+            assertTrue(snapshot.entries.contains(critical))
+            assertEquals(0L, snapshot.droppedCritical)
+
+            assertTrue(directory.delete())
+            assertTrue(writer.record(next))
+            withTimeout(5_000) { writer.state.first { !it.storageError && it.entries.firstOrNull() == next } }
+            assertTrue(store.read().contains(critical))
+        }
+    }
+
+    @Test
     fun failedReadIsReportedAndDamagedLinesDoNotHideValidRows() = runBlocking {
         val file = folder.newFolder("not-a-file")
         val event = VpnJournalEvent.create(VpnEventType.Started)
@@ -146,6 +169,20 @@ class VpnEventHistoryTest {
             writer.record(other)
             assertEquals(listOf(other, stopped), writer.awaitEntries(2))
         }
+    }
+
+    @Test
+    fun confirmedCrashSupersedesRecoveredInterruptionWithTheSameId() = runBlocking {
+        val store = VpnEventStore(File(folder.root, "events"))
+        val session = UUID.randomUUID()
+        val interrupted = VpnJournalEvent.create(VpnEventType.InterruptedSession, session, id = session)
+        val crash = VpnJournalEvent.create(VpnEventType.ProcessCrash, id = session)
+        store.write(listOf(interrupted))
+        withWriter(store) { writer ->
+            assertTrue(writer.record(crash))
+            withTimeout(5_000) { writer.state.first { it.entries == listOf(crash) } }
+        }
+        assertEquals(listOf(crash), store.read())
     }
 
     private suspend fun VpnEventWriter.awaitEntries(count: Int) =

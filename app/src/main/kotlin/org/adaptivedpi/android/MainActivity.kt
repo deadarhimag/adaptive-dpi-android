@@ -123,15 +123,19 @@ class MainActivity : ComponentActivity() {
 
             AdaptiveDpiTheme(mode) {
                 val vpnState = VpnController.state.collectAsStateWithLifecycle().value
-                LaunchedEffect(vpnState) { refreshVpnAvailability() }
+                val resourcesBlocked = VpnController.resourcesBlocked.collectAsStateWithLifecycle().value
+                val cleanupDelay = VpnController.cleanupDelay.collectAsStateWithLifecycle().value
+                LaunchedEffect(vpnState, resourcesBlocked) { refreshVpnAvailability() }
                 AdaptiveDpiApp(
                     vpnState = vpnState,
+                    resourcesBlocked = resourcesBlocked,
+                    cleanupDelay = cleanupDelay,
                     vpnAvailability = vpnAvailability.value,
                     themeMode = mode,
                     diagnosticEvents = VpnDiagnostics.events.collectAsStateWithLifecycle().value,
                     diagnosticRequest = diagnosticRequest.value,
                     onDiagnosticRequestHandled = { diagnosticRequest.value = null },
-                    onDiagnosticAcknowledge = VpnDiagnostics::acknowledge,
+                    onDiagnosticAcknowledge = VpnDiagnostics::acknowledgeAsync,
                     onSaveDiagnostic = ::saveDiagnostic,
                     onShareDiagnostic = ::shareDiagnostic,
                     vpnEventHistory = VpnEventHistory.state.collectAsStateWithLifecycle().value,
@@ -153,7 +157,7 @@ class MainActivity : ComponentActivity() {
                     onThemeChange = ::saveTheme,
                     onNotificationSettings = ::openNotificationSettings,
                 )
-                if (pendingVpnSwitch.value != null && vpnState.canStart) {
+                if (pendingVpnSwitch.value != null && vpnState.canStart && !resourcesBlocked) {
                     VpnSwitchDialog(
                         restricted = vpnAvailability.value == VpnAvailability.Restricted,
                         onSwitch = ::confirmVpnSwitch,
@@ -213,7 +217,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestVpnStart(target: String? = null, application: String? = null) {
-        if (!VpnController.state.value.canStart || pendingVpnSwitch.value != null) return
+        if (!VpnController.state.value.canStart || VpnController.resourcesBlocked.value || pendingVpnSwitch.value != null) return
         when (refreshVpnAvailability()) {
             VpnAvailability.OtherVpn, VpnAvailability.Restricted -> pendingVpnSwitch.value = VpnSelection(target, application)
             else -> startVpn(target, application)
@@ -291,7 +295,7 @@ class MainActivity : ComponentActivity() {
 
     private fun reportExportError(code: DiagnosticCode, error: Exception) {
         Toast.makeText(this, code.description, Toast.LENGTH_LONG).show()
-        VpnDiagnostics.record(code, error)
+        VpnDiagnostics.recordAsync(code, error)
     }
 
     private fun clearVpnEventHistory() {
@@ -322,14 +326,14 @@ class MainActivity : ComponentActivity() {
         ) {
             settings.edit().putBoolean(NOTIFICATION_REQUESTED, true).apply()
             runCatching { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) }
-                .onFailure { VpnDiagnostics.record(DiagnosticCode.NotificationSettingsFailed, it) }
+                .onFailure { VpnDiagnostics.recordAsync(DiagnosticCode.NotificationSettingsFailed, it) }
         }
     }
 
     private fun openNotificationSettings() {
         runCatching {
             startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
-        }.onFailure { VpnDiagnostics.record(DiagnosticCode.NotificationSettingsFailed, it) }
+        }.onFailure { VpnDiagnostics.recordAsync(DiagnosticCode.NotificationSettingsFailed, it) }
     }
 
     private fun openVpnSettings() {

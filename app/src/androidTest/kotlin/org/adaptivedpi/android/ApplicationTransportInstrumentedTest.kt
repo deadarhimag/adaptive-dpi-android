@@ -85,6 +85,8 @@ class ApplicationTransportInstrumentedTest {
                 assertEquals(VpnState.Idle, VpnController.state.value)
                 val stopped = checkNotNull(VpnController.transport.value)
                 assertFalse(stopped.running)
+                assertTrue("Показатели должны быть сохранены после выхода HEV и задач релея", stopped.finalized)
+                assertTrue(stopped.transferred)
                 assertEquals(0, stopped.connections)
                 assertEquals(stopped.openedTcp, stopped.closedTcp)
                 assertEquals(stopped.openedUdp, stopped.closedUdp)

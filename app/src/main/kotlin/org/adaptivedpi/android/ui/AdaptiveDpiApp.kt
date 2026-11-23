@@ -46,6 +46,7 @@ import org.adaptivedpi.android.vpn.TransportSnapshot
 import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.ExperimentalApplication
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
+import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.TransportJournalView
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
@@ -55,6 +56,8 @@ private enum class Screen { Home, Settings, Diagnostics, About }
 @Composable
 internal fun AdaptiveDpiApp(
     vpnState: VpnState,
+    resourcesBlocked: Boolean,
+    cleanupDelay: String?,
     vpnAvailability: VpnAvailability,
     themeMode: ThemeMode,
     diagnosticEvents: List<DiagnosticEvent>,
@@ -102,6 +105,8 @@ internal fun AdaptiveDpiApp(
                 Screen.Home -> ScreenContent(R.string.app_name) {
                     HomeScreen(
                         vpnState = vpnState,
+                        resourcesBlocked = resourcesBlocked,
+                        cleanupDelay = cleanupDelay,
                         vpnAvailability = vpnAvailability,
                         onStartVpn = onStartVpn,
                         onStartTransport = onStartTransport,
@@ -121,7 +126,9 @@ internal fun AdaptiveDpiApp(
                 Screen.Diagnostics -> ScreenContent(R.string.diagnostics, onBack = { screen = Screen.Home }) {
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
-                    DiagnosticsScreen(vpnState, transport)
+                    DiagnosticsScreen(vpnState, transport, resourcesBlocked)
+                    if (resourcesBlocked) Text(stringResource(R.string.vpn_cleanup_pending))
+                    cleanupDelay?.let { Text(stringResource(R.string.vpn_cleanup_delayed, it)) }
                     VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
                     TransportJournalPanel(transportJournal, onSaveTransportJournal, onShareTransportJournal)
                     VpnStopHelp(onVpnSettings)
@@ -139,11 +146,11 @@ internal fun AdaptiveDpiApp(
         }
     }
     val event = diagnosticEvents.firstOrNull { it.id.toString() == selectedEventId }
-        ?: diagnosticEvents.firstOrNull { !it.acknowledged }
+        ?: diagnosticEvents.firstOrNull { !it.acknowledged && it.code != DiagnosticCode.VpnCleanupDelayed }
     if (event != null) {
         DiagnosticErrorDialog(
             event = event,
-            canStartVpn = vpnState.canStart,
+            canStartVpn = vpnState.canStart && !resourcesBlocked,
             canStopVpn = vpnState.canStop,
             onClose = {
                 onDiagnosticAcknowledge(event.id)
@@ -188,6 +195,8 @@ private fun ScreenContent(
 @Composable
 private fun HomeScreen(
     vpnState: VpnState,
+    resourcesBlocked: Boolean,
+    cleanupDelay: String?,
     vpnAvailability: VpnAvailability,
     onStartVpn: () -> Unit,
     onStartTransport: (String) -> Unit,
@@ -213,10 +222,12 @@ private fun HomeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        if (resourcesBlocked) Text(stringResource(R.string.vpn_cleanup_pending))
+        cleanupDelay?.let { Text(stringResource(R.string.vpn_cleanup_delayed, it)) }
         val canStop = vpnState.canStop
         Button(
             onClick = if (canStop) onStopVpn else onStartVpn,
-            enabled = canStop || vpnState.canStart,
+            enabled = canStop || vpnState.canStart && !resourcesBlocked,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(stringResource(if (canStop) R.string.vpn_stop else R.string.vpn_start))
@@ -225,7 +236,7 @@ private fun HomeScreen(
 
     VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
 
-    if (vpnState == VpnState.Stopping || vpnState == VpnState.Failed || vpnState == VpnState.StartFailed) {
+    if (cleanupDelay != null || vpnState == VpnState.Stopping || vpnState == VpnState.Failed || vpnState == VpnState.StartFailed) {
         VpnStopHelp(onVpnSettings)
     }
 
@@ -236,7 +247,7 @@ private fun HomeScreen(
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(stringResource(R.string.smart_bypass), style = MaterialTheme.typography.titleMedium)
-                EngineStatus(vpnState, transport)
+                EngineStatus(vpnState, transport, resourcesBlocked)
             }
             Switch(checked = false, onCheckedChange = null, enabled = false)
         }
@@ -250,7 +261,7 @@ private fun HomeScreen(
             Text(stringResource(R.string.diagnostics))
         }
     }
-    if (vpnState.canStart) {
+    if (vpnState.canStart && !resourcesBlocked) {
         var application by rememberSaveable { mutableStateOf("com.android.chrome") }
         AdaptivePanel {
             Text(stringResource(R.string.vpn_app_transport_title), style = MaterialTheme.typography.titleMedium)
@@ -341,14 +352,15 @@ private fun VpnStopHelp(onVpnSettings: () -> Unit) {
 }
 
 @Composable
-private fun DiagnosticsScreen(vpnState: VpnState, transport: TransportSnapshot?) {
+private fun DiagnosticsScreen(vpnState: VpnState, transport: TransportSnapshot?, resourcesBlocked: Boolean) {
     AdaptivePanel {
         VpnStatus(vpnState)
     }
     AdaptivePanel {
         Text(stringResource(R.string.engine_status), style = MaterialTheme.typography.titleMedium)
-        EngineStatus(vpnState, transport)
+        EngineStatus(vpnState, transport, resourcesBlocked)
         if (transport != null) {
+            Text(stringResource(if (transport.finalized) R.string.vpn_transport_final else R.string.vpn_transport_provisional))
             if (transport.applicationMode) {
                 Text(stringResource(R.string.vpn_app_transport_scope))
                 Text(stringResource(R.string.vpn_app_transport_connections, transport.openedTcp, transport.closedTcp, transport.openedUdp, transport.closedUdp))
@@ -388,10 +400,12 @@ private fun VpnStatus(state: VpnState) {
 }
 
 @Composable
-private fun EngineStatus(vpnState: VpnState, transport: TransportSnapshot?) {
+private fun EngineStatus(vpnState: VpnState, transport: TransportSnapshot?, resourcesBlocked: Boolean) {
     Text(
         text = stringResource(
             when {
+                resourcesBlocked -> R.string.vpn_transport_release_unknown
+                vpnState == VpnState.Stopping -> R.string.vpn_stopping
                 vpnState == VpnState.TransportStarting -> R.string.vpn_transport_initializing
                 transport?.running == true && transport.transferred -> R.string.vpn_transport_transferred
                 transport?.running == true -> R.string.vpn_transport_running

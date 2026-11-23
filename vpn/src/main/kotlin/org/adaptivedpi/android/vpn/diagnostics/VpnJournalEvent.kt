@@ -49,6 +49,9 @@ data class VpnJournalEvent internal constructor(
     val code: DiagnosticCode?,
     val state: VpnState?,
 ) {
+    internal val critical get() = type.level == VpnEventLevel.ERROR || type == VpnEventType.SystemRevoked ||
+        type == VpnEventType.InterruptedSession || type == VpnEventType.Stopped
+
     fun details(): String = buildString {
         appendLine("Тип: ${type.name}")
         appendLine("Событие: $id")

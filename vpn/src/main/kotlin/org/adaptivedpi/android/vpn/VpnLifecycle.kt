@@ -10,14 +10,18 @@ import java.util.UUID
 /** Все обращения к экземпляру выполняются в главном потоке процесса. */
 internal class VpnLifecycle(private val record: (VpnJournalEvent) -> Unit = {}) {
     private val currentState = MutableStateFlow(VpnState.Idle)
+    private val blocked = MutableStateFlow(false)
+    private val delayedStep = MutableStateFlow<String?>(null)
     private var operationId: String? = null
     private var stopService: (() -> Unit)? = null
     private var stopIssued = false
     private val recordedPermissionResults = mutableSetOf<VpnEventType>()
     val state = currentState.asStateFlow()
+    val resourcesBlocked = blocked.asStateFlow()
+    val cleanupDelay = delayedStep.asStateFlow()
 
     fun beginConsent(id: String, restoring: Boolean = false): Boolean {
-        if (!state.value.canStart || (restoring && state.value != VpnState.Idle)) return false
+        if (blocked.value || !state.value.canStart || (restoring && state.value != VpnState.Idle)) return false
         operationId = id
         stopIssued = false
         recordedPermissionResults.clear()
@@ -83,10 +87,18 @@ internal class VpnLifecycle(private val record: (VpnJournalEvent) -> Unit = {}) 
         stopService?.invoke()
     }
 
-    fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode? = null) {
+    fun cleanupDelayed(id: String, step: String) {
+        if (id == operationId && stopService != null && state.value.canStop) delayedStep.value = step
+    }
+
+    fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode? = null, released: Boolean = true) {
         if (id != operationId || stopService == null) return
         stopService = null
-        update(id, event, code)
+        delayedStep.value = null
+        if (!released) blocked.value = true
+        update(id, if (released) event else VpnEvent.CleanupFailed, code)
+        if (state.value.canStart) operationId = null
+        if (released) blocked.value = false
     }
 
     private fun record(type: VpnEventType, id: String?, code: DiagnosticCode? = null) {

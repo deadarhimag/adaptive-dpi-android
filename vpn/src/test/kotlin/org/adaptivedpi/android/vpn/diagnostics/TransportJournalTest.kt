@@ -6,6 +6,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.adaptivedpi.android.engine.TransportCategory
 import org.adaptivedpi.android.engine.TransportFailure
 import org.adaptivedpi.android.engine.TransportFailureReporter
@@ -116,6 +117,10 @@ class TransportJournalTest {
                 }
                 jobs.forEach { it.get(3, TimeUnit.SECONDS) }
                 session.finish()
+                withTimeout(3_000) { journal.flush() }
+                assertEquals(10_001L, TransportLogStore(directory).readSummary()?.total)
+                assertEquals(2, journal.state.value.storedRecords)
+                assertFalse(export.isCompleted)
             } finally {
                 release.countDown()
             }

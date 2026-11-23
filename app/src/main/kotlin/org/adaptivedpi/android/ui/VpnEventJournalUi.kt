@@ -37,6 +37,9 @@ internal fun VpnEventJournal(history: VpnEventHistoryState, onClear: () -> Unit)
         if (history.storageError) {
             Text(stringResource(R.string.vpn_journal_storage_error), color = MaterialTheme.colorScheme.error)
         }
+        if (history.droppedInformational > 0 || history.droppedCritical > 0) {
+            Text(stringResource(R.string.vpn_journal_drops, history.droppedInformational, history.droppedCritical))
+        }
         if (!history.loaded) {
             Text(stringResource(R.string.vpn_journal_loading))
         } else if (history.entries.isEmpty()) {

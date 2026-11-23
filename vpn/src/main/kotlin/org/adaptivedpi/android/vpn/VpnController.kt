@@ -17,6 +17,8 @@ object VpnController {
     private val processId = UUID.randomUUID().toString()
     private val lifecycle = VpnLifecycle(VpnEventHistory::record)
     val state = lifecycle.state
+    val resourcesBlocked = lifecycle.resourcesBlocked
+    val cleanupDelay = lifecycle.cleanupDelay
     private val transportSnapshot = MutableStateFlow<TransportSnapshot?>(null)
     val transport = transportSnapshot.asStateFlow()
     val processIdentity get() = processId
@@ -26,7 +28,7 @@ object VpnController {
     }
 
     fun availability(context: Context): VpnAvailability = runCatching {
-        observeVpnAvailability(context, state.value)
+        if (resourcesBlocked.value) VpnAvailability.Unknown else observeVpnAvailability(context, state.value)
     }.getOrDefault(VpnAvailability.Unknown)
 
     // Запросы Activity и события службы обрабатываются в главном потоке.
@@ -83,7 +85,7 @@ object VpnController {
     fun consentLaunchFailed(id: String, exception: RuntimeException) {
         if (lifecycle.isAwaitingConsent(id)) {
             lifecycle.update(id, VpnEvent.ServiceFailed, DiagnosticCode.ConsentFailed)
-            VpnDiagnostics.record(DiagnosticCode.ConsentFailed, exception)
+            VpnDiagnostics.recordAsync(DiagnosticCode.ConsentFailed, exception)
         }
     }
 
@@ -96,8 +98,9 @@ object VpnController {
     internal fun updateTransport(snapshot: TransportSnapshot) { transportSnapshot.value = snapshot }
     internal fun engineConfirmed(id: String) = lifecycle.update(id, VpnEvent.EngineConfirmed)
     internal fun serviceStopping(id: String) = lifecycle.update(id, VpnEvent.StopRequested)
-    internal fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode?) =
-        lifecycle.serviceEnded(id, event, code)
+    internal fun cleanupDelayed(id: String, step: String) = lifecycle.cleanupDelayed(id, step)
+    internal fun serviceEnded(id: String, event: VpnEvent, code: DiagnosticCode?, released: Boolean = true) =
+        lifecycle.serviceEnded(id, event, code, released)
 
     private fun start(context: Context, id: String, target: String?, applicationPackage: String?) {
         lifecycle.update(id, VpnEvent.StartRequested)
@@ -110,7 +113,7 @@ object VpnController {
             checkNotNull(context.startForegroundService(intent))
         } catch (exception: RuntimeException) {
             lifecycle.update(id, VpnEvent.ServiceFailed, DiagnosticCode.VpnStartFailed)
-            VpnDiagnostics.record(DiagnosticCode.VpnStartFailed, exception)
+            VpnDiagnostics.recordAsync(DiagnosticCode.VpnStartFailed, exception)
         }
     }
 

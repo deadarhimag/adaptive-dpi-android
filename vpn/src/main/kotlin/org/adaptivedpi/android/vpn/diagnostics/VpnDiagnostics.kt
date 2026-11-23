@@ -12,8 +12,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Process
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -29,18 +31,22 @@ object VpnDiagnostics {
     private const val EXTRA_EVENT_ID = "org.adaptivedpi.android.DIAGNOSTIC_EVENT_ID"
     private const val NOTIFICATION_ID = 2
 
-    private val empty = MutableStateFlow<List<DiagnosticEvent>>(emptyList()).asStateFlow()
+    private val current = MutableStateFlow<List<DiagnosticEvent>>(emptyList())
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
-    @Volatile private var center: DiagnosticCenter? = null
+    @Volatile private var startup: Deferred<DiagnosticCenter>? = null
     @Volatile private var activeVpn: Pair<UUID, VpnSnapshot>? = null
     private var notifications: CriticalNotifications? = null
 
-    val events get() = center?.events ?: empty
+    val events = current.asStateFlow()
 
     @Synchronized
     fun install(context: Context) {
-        if (center != null) return
+        if (startup != null) return
         val app = context.applicationContext
+        startup = io.async { restore(app) }
+    }
+
+    private fun restore(app: Context): DiagnosticCenter {
         val dispatcher = CriticalNotifications(app)
         val version = runCatching {
             @Suppress("DEPRECATION")
@@ -51,10 +57,10 @@ object VpnDiagnostics {
             version,
             Build.VERSION.SDK_INT,
             Build.VERSION.RELEASE,
+            current,
             dispatcher::post,
         )
         notifications = dispatcher
-        center = initialized
         initialized.recovered.forEach { (event, sessionId) ->
             val type = if (event.code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
             VpnEventHistory.record(type, sessionId, event.code, event.vpn.state, id = event.id)
@@ -64,35 +70,46 @@ object VpnDiagnostics {
         initialized.events.value.firstOrNull {
             it.requiresNotification && !it.acknowledged && !it.notified
         }?.let { initialized.notifyOnce(it.id) }
+        return initialized
     }
 
     fun record(code: DiagnosticCode, error: Throwable? = null, vpn: VpnSnapshot = snapshot()) {
-        runCatching { center?.record(code, vpn, error) }
+        enqueue { it.record(code, vpn, error) }
     }
 
+    fun recordAsync(code: DiagnosticCode, error: Throwable? = null) = record(code, error)
+
     internal fun recordCleanupAsync(code: DiagnosticCode, vpn: VpnSnapshot, details: VpnCleanupDetails, error: Throwable? = null) {
-        io.launch { runCatching { center?.record(code, vpn, error, details) } }
+        enqueue { it.record(code, vpn, error, details) }
     }
 
     fun prune() {
-        io.launch { runCatching { center?.prune() } }
+        enqueue { it.prune() }
     }
 
     fun acknowledge(id: UUID) {
-        runCatching { center?.acknowledge(id) }
-        runCatching { notifications?.cancel(id) }
+        enqueue { center ->
+            center.acknowledge(id)
+            runCatching { notifications?.cancel(id) }
+        }
+    }
+
+    fun acknowledgeAsync(id: UUID) = acknowledge(id)
+
+    private fun enqueue(action: (DiagnosticCenter) -> Unit) {
+        io.launch { runCatching { startup?.await()?.let(action) } }
     }
 
     internal fun markActive(vpn: VpnSnapshot, sessionId: UUID?): UUID {
         val id = sessionId ?: UUID.randomUUID()
         activeVpn = id to vpn
-        io.launch { center?.markActive(vpn, id) }
+        enqueue { it.markActive(vpn, id) }
         return id
     }
 
     internal fun endActive(id: UUID, keepMarker: Boolean = false) {
         if (activeVpn?.first == id) activeVpn = null
-        if (!keepMarker) io.launch { center?.clearActive(id) }
+        if (!keepMarker) enqueue { it.clearActive(id) }
     }
 
     internal fun persistCritical(
@@ -103,13 +120,12 @@ object VpnDiagnostics {
         afterJournalAttempt: () -> Unit = {},
     ) {
         io.launch {
-            val recorder = center
-            val id = try {
-                runCatching { recorder?.persistCritical(code, vpn, error, activeId) }.getOrNull()
-            } finally {
-                runCatching(afterJournalAttempt)
+            val result = runCatching {
+                val recorder = startup?.await() ?: return@runCatching null
+                recorder to recorder.persistCritical(code, vpn, error, activeId)
             }
-            if (id != null) runCatching { recorder?.notifyOnce(id) }
+            runCatching(afterJournalAttempt)
+            result.getOrNull()?.let { (recorder, id) -> runCatching { recorder.notifyOnce(id) } }
         }
     }
 

@@ -42,11 +42,13 @@ class OutboundTransport(
     private val sockets = LinkedHashMap<Closeable, SocketLease<*>>()
     private var network: OutboundSocketPolicy? = null
     private var closed = false
+    @Volatile private var accepting = true
     private val sentBytes = AtomicLong()
     private val receivedBytes = AtomicLong()
     private val sentDatagrams = AtomicLong()
     private val receivedDatagrams = AtomicLong()
     private val failedOperations = AtomicLong()
+    private val closures = SocketClosures()
     private var openedTcp = 0L
     private var openedUdp = 0L
 
@@ -100,8 +102,13 @@ class OutboundTransport(
         )
     }
 
+    fun socketClosures(): SocketCloseSummary = closures.snapshot()
+
+    fun stopAcceptingNewConnections() { accepting = false }
+
     override fun close() = synchronized(lock) {
         if (closed) return@synchronized
+        stopAcceptingNewConnections()
         closed = true
         network = null
         closeAll(TransportCancellation.SESSION)
@@ -183,7 +190,7 @@ class OutboundTransport(
         val setup = site.copy(subsystem = TransportSubsystem.SOCKET, operation = TransportOperation.INIT, direction = TransportDirection.CONTROL)
         val (policy, lease) = countFailures(setup, fallback = TransportCategory.SOCKET_SETUP) {
             synchronized(lock) {
-                if (closed) throw TransportSocketException(TransportCode.SESSION_CANCELLED, TransportCategory.CANCELLED)
+                if (!accepting) throw TransportSocketException(TransportCode.SESSION_CANCELLED, TransportCategory.CANCELLED)
                 val currentNetwork = network ?: throw TransportSocketException(TransportCode.NO_PHYSICAL_NETWORK, TransportCategory.UNREACHABLE)
                 if (sockets.size >= maxSockets) throw TransportSocketException(TransportCode.SOCKET_LIMIT, TransportCategory.LIMIT)
                 currentNetwork to SocketLease(create()).also { sockets[it.socket] = it }
@@ -203,6 +210,7 @@ class OutboundTransport(
                 connect(socket)
                 synchronized(lock) {
                     lease.cancellation?.let { throw TransportSocketException(it.code, TransportCategory.CANCELLED) }
+                    if (!accepting) throw TransportSocketException(TransportCode.SESSION_CANCELLED, TransportCategory.CANCELLED)
                     lease.active = true
                     if (socket is Socket) openedTcp++ else openedUdp++
                     connected = true
@@ -228,7 +236,11 @@ class OutboundTransport(
         lease.cancellation = reason
         val socket = lease.socket
         val protocol = if (socket is Socket) TransportProtocol.TCP else TransportProtocol.UDP
-        runCatching { countFailures(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE, protocol), fallback = TransportCategory.CLEANUP) { socket.close() } }
+        closures.close(socket) { error ->
+            failedOperations.incrementAndGet()
+            failures.recordError(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE, protocol), error,
+                fallback = TransportCategory.CLEANUP)
+        }
     }
 
     private inline fun <T> countFailures(

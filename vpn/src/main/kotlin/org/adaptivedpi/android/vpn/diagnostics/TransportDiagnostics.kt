@@ -35,7 +35,10 @@ object TransportDiagnostics {
     fun install(context: Context) {
         if (journal != null) return
         val application = context.applicationContext
-        journal = TransportJournal(CoroutineScope(SupervisorJob() + Dispatchers.IO), current = current) {
+        journal = TransportJournal(
+            CoroutineScope(SupervisorJob() + Dispatchers.IO), current = current,
+            exportFile = { File(application.cacheDir, "transport-journal-export.tmp") },
+        ) {
             TransportLogStore(File(application.noBackupFilesDir, "transport-diagnostics"))
         }
     }
@@ -49,6 +52,7 @@ object TransportDiagnostics {
 }
 
 internal class TransportSessionDiagnostics(val id: UUID, private val journal: TransportJournal?) {
+    private val countsLock = Any()
     private val counts = AtomicLongArray(TransportCategory.entries.size)
     private val operations = AtomicLong()
     private val merged = AtomicLong()
@@ -79,7 +83,7 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
         journal?.requestFlush()
     }
 
-    private fun incrementCounts(category: TransportCategory, end: Long, count: Long) {
+    private fun incrementCounts(category: TransportCategory, end: Long, count: Long) = synchronized(countsLock) {
         counts.addAndGet(category.ordinal, count)
         operations.addAndGet(count)
         last.accumulateAndGet(end, ::maxOf)
@@ -92,14 +96,14 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
         if (finished.compareAndSet(false, true)) journal?.completed(this)
     }
 
-    fun summary(): TransportSessionSummary {
+    fun summary(): TransportSessionSummary = synchronized(countsLock) {
         val dropsBySource = buildMap {
             for (source in TransportDropSource.entries) {
                 val count = dropped.get(source.ordinal)
                 if (count > 0) put(source, count)
             }
         }
-        return TransportSessionSummary(
+        TransportSessionSummary(
             id,
             buildMap {
                 for (category in TransportCategory.entries) {
@@ -118,6 +122,7 @@ internal class TransportJournal(
     scope: CoroutineScope,
     private val batchMillis: Long = 1_000,
     private val current: MutableStateFlow<TransportJournalView> = MutableStateFlow(TransportJournalView()),
+    private val exportFile: () -> File = { File.createTempFile("transport-journal-", ".tmp") },
     private val storeFactory: () -> TransportLogStore,
 ) {
     private data class Key(val session: UUID, val state: VpnState, val failure: TransportFailure)
@@ -126,10 +131,13 @@ internal class TransportJournal(
     private val pending = LinkedHashMap<Key, Bucket>()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val io = Mutex()
+    private val exportIo = Mutex()
     private val selected = AtomicReference<TransportSessionDiagnostics?>()
     private val completed = AtomicReference<TransportSessionDiagnostics?>()
     private var store: TransportLogStore? = null
     private var lastSummary: TransportSessionSummary? = null
+    private var persistedSummary: TransportSessionSummary? = null
+    private var lastCompletedSession: TransportSessionDiagnostics? = null
     private var storageError = false
     val state = current.asStateFlow()
 
@@ -181,7 +189,19 @@ internal class TransportJournal(
 
     suspend fun flush() = io.withLock { flushLocked() }
 
-    suspend fun export(writer: Writer) = io.withLock {
+    suspend fun export(writer: Writer) {
+        exportIo.withLock {
+            val file = exportFile()
+            try {
+                io.withLock { file.bufferedWriter(Charsets.UTF_8).use(::writeExportLocked) }
+                file.bufferedReader(Charsets.UTF_8).use { it.copyTo(writer) }
+            } finally {
+                file.delete()
+            }
+        }
+    }
+
+    private fun writeExportLocked(writer: Writer) {
         flushLocked()
         val snapshot = current.value
         writer.appendLine("Журнал транспорта adaptive-dpi-android")
@@ -194,7 +214,7 @@ internal class TransportJournal(
 
     private fun flushLocked() {
         val disk = ensureStore()
-        val finished = completed.getAndSet(null)
+        completed.getAndSet(null)?.let { lastCompletedSession = it }
         val batch = pendingLock.withThreadLock {
             ArrayDeque(pending.entries.map { it.key to it.value }).also { pending.clear() }
         }
@@ -211,9 +231,14 @@ internal class TransportJournal(
                 bucket.session.drop(TransportDropSource.STORAGE, bucket.repeats)
             }
         }
-        finished?.let { session ->
-            lastSummary = session.summary()
-            if (disk != null) runCatching { disk.saveSummary(checkNotNull(lastSummary)) }.onFailure { storageError = true }
+        lastCompletedSession?.let { session ->
+            val snapshot = session.summary()
+            lastSummary = snapshot
+            if (disk != null && snapshot != persistedSummary) {
+                runCatching { disk.saveSummary(snapshot) }
+                    .onSuccess { persistedSummary = snapshot }
+                    .onFailure { storageError = true }
+            }
         }
         publish()
     }
@@ -222,7 +247,8 @@ internal class TransportJournal(
         store?.let { return it }
         return runCatching(storeFactory).onSuccess {
             store = it
-            if (lastSummary == null) lastSummary = it.readSummary()
+            persistedSummary = it.readSummary()
+            if (lastSummary == null) lastSummary = persistedSummary
         }.onFailure { storageError = true }.getOrNull()
     }
 

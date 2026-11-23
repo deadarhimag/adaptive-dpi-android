@@ -30,6 +30,7 @@ fun combinedDiagnosticReport(
     }
     appendLine("Сетевой движок: $engine")
     if (transport != null) {
+        appendLine("Снимок транспорта: ${if (transport.finalized) "итоговый" else "предварительный"}.")
         if (transport.applicationMode) {
             appendLine("Маршрутизация: 0.0.0.0/0 для выбранного приложения, DNS физической сети по IPv4. IPv6 заблокирован для выбранного приложения.")
             appendLine("Соединения открыто/закрыто: TCP ${transport.openedTcp}/${transport.closedTcp}, UDP ${transport.openedUdp}/${transport.closedUdp}.")
@@ -56,6 +57,9 @@ fun combinedDiagnosticReport(
     appendLine()
     appendLine("Журнал событий VPN")
     if (vpnHistory.storageError) appendLine("Хранилище журнала недоступно. Список может быть неполным.")
+    if (vpnHistory.droppedInformational > 0 || vpnHistory.droppedCritical > 0) {
+        appendLine("Пропуски истории: обычные ${vpnHistory.droppedInformational}, критические ${vpnHistory.droppedCritical}.")
+    }
     if (vpnHistory.entries.isEmpty()) appendLine("Записей нет.")
     for (event in vpnHistory.entries) {
         appendLine()

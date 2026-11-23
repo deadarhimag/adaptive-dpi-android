@@ -14,6 +14,8 @@ import androidx.core.content.IntentCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
@@ -148,8 +150,38 @@ class DiagnosticsInstrumentedTest {
     }
 
     @Test
+    fun parallelLargeTxtAttachmentsKeepIndependentUrisNamesAndBytes() = runBlocking<Unit>(Dispatchers.IO) {
+        val resolver = context.contentResolver
+        val files = listOf(DiagnosticExports.TRANSPORT_FILE_NAME, DiagnosticExports.COMBINED_FILE_NAME, "adaptive-dpi-audit.txt")
+        val written = java.util.concurrent.ConcurrentLinkedQueue<Uri>()
+        try {
+            val results = files.mapIndexed { index, name ->
+                async {
+                    val report = "$index\n" + "Синтетические данные. ".repeat(50_000)
+                    val chooser = DiagnosticExports.shareChooser(DiagnosticExports.shareIntent(context, name, report), "Поделиться")
+                    val uri = checkNotNull(chooser.clipData).getItemAt(0).uri
+                    written.add(uri)
+                    assertEquals("content", uri.scheme)
+                    assertTrue(chooser.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+                    assertFalse(chooser.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0)
+                    checkNotNull(resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)).use {
+                        assertTrue(it.moveToFirst())
+                        assertEquals(name, it.getString(0))
+                    }
+                    assertArrayEquals(report.toByteArray(Charsets.UTF_8), checkNotNull(resolver.openInputStream(uri)).use { it.readBytes() })
+                    uri
+                }
+            }.awaitAll()
+            assertEquals(files.size, results.toSet().size)
+        } finally {
+            written.forEach { resolver.delete(it, null, null) }
+        }
+    }
+
+    @Test
     fun criticalErrorPostsOneNotificationAndOpensItsDiagnosticEvent() {
         assumeTrue("На тестовом Android включите уведомления приложения", notifications.areNotificationsEnabled())
+        await { notifications.getNotificationChannel(VpnDiagnostics.CHANNEL_ID) != null }
         assumeTrue(
             "На тестовом Android включите канал критических ошибок",
             notifications.getNotificationChannel(VpnDiagnostics.CHANNEL_ID)?.importance == NotificationManager.IMPORTANCE_HIGH,
@@ -198,6 +230,7 @@ class DiagnosticsInstrumentedTest {
         val argument = InstrumentationRegistry.getArguments().getString("recoveredVpnError")
         assumeTrue("Тест запускается после отдельного аварийного завершения приложения", argument != null)
         val code = DiagnosticCode.valueOf(checkNotNull(argument))
+        await { VpnDiagnostics.events.value.any { it.code == code && !it.acknowledged } }
         val event = VpnDiagnostics.events.value.first { it.code == code && !it.acknowledged }
         try {
             assertTrue(event.vpnStopped)
@@ -211,8 +244,10 @@ class DiagnosticsInstrumentedTest {
     }
 
     private fun record(code: DiagnosticCode): DiagnosticEvent {
+        val previous = VpnDiagnostics.events.value.map { it.id }.toSet()
         VpnDiagnostics.record(code)
-        return VpnDiagnostics.events.value.first { it.code == code }
+        await { VpnDiagnostics.events.value.any { it.id !in previous && it.code == code } }
+        return VpnDiagnostics.events.value.first { it.id !in previous && it.code == code }
     }
 
     private fun await(condition: () -> Boolean) {

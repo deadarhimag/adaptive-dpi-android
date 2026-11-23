@@ -50,6 +50,9 @@ class BuildAndDiagnosticsUiTest {
     fun individualErrorUsesTheSameExportActionsAndReturnsToItsReportOnCancel() {
         val previous = VpnDiagnostics.events.value.map { it.id }.toSet()
         VpnDiagnostics.record(DiagnosticCode.SaveFailed)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            VpnDiagnostics.events.value.any { it.id !in previous && it.code == DiagnosticCode.SaveFailed }
+        }
         val event = VpnDiagnostics.events.value.first { it.id !in previous && it.code == DiagnosticCode.SaveFailed }
         try {
             compose.onNodeWithText(string(R.string.diagnostic_technical)).performClick()

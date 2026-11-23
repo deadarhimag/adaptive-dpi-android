@@ -31,6 +31,11 @@
     <string name="vpn_transport_stopped">Экспериментальный транспорт остановлен</string>
     <string name="vpn_transport_counters">Пакеты TUN %1$d / %2$d. Байты прямого тракта %3$d / %4$d. Соединения %5$d. Ошибки %6$d.</string>
     <string name="vpn_stopping">Служба останавливается</string>
+    <string name="vpn_cleanup_pending">Освобождение ресурсов предыдущего сеанса не подтверждено. Новый запуск недоступен. Проверьте отчёт в разделе диагностики. Если состояние сохраняется, отключите VPN в настройках Android, затем принудительно остановите приложение через настройки и откройте его снова.</string>
+    <string name="vpn_cleanup_delayed">Остановка продолжается. Задержка обнаружена на этапе «%1$s». Если отключение через настройки VPN не помогло, принудительно остановите приложение в настройках Android и откройте его снова.</string>
+    <string name="vpn_transport_release_unknown">Завершение транспорта не подтверждено</string>
+    <string name="vpn_transport_final">Итоговые показатели сеанса</string>
+    <string name="vpn_transport_provisional">Предварительные показатели сеанса</string>
     <string name="vpn_consent_denied">Разрешение отклонено</string>
     <string name="vpn_consent_revoked">Разрешение отозвано</string>
     <string name="vpn_start_failed">Не удалось запустить VPN</string>
@@ -84,6 +89,7 @@
     <string name="vpn_journal_title">Журнал событий VPN</string>
     <string name="vpn_journal_empty">В журнале пока нет событий VPN</string>
     <string name="vpn_journal_loading">Загрузка журнала событий</string>
+    <string name="vpn_journal_drops">Пропущено событий. Обычные: %1$d, критические: %2$d.</string>
     <string name="vpn_journal_storage_error">Не удалось прочитать или записать журнал. Часть событий может быть недоступна после перезапуска.</string>
     <string name="vpn_journal_clear">Очистить журнал</string>
     <string name="vpn_journal_clear_title">Очистить журнал событий VPN?</string>

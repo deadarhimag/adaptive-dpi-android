@@ -21,6 +21,8 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static jlong owner;
 static bool ready;
 static bool stopping;
+static bool running;
+static size_t final_sent, final_received;
 
 /* Рабочие задачи HEV используют отдельные стеки. Отсюда нельзя вызывать JNI. */
 enum { FAULT_LIMIT = 16, FAULT_FIELDS = 8, FAULT_CATEGORIES = 6 };
@@ -98,6 +100,8 @@ Java_org_adaptivedpi_android_vpn_HevBridge_reserve(JNIEnv *env, jobject instance
     if (accepted) {
         owner = token;
         stopping = false;
+        ready = false;
+        final_sent = final_received = 0;
         fault_count = 0;
         atomic_store(&fault_state, state);
         atomic_store(&fault_last_drop, 0);
@@ -155,13 +159,15 @@ Java_org_adaptivedpi_android_vpn_HevBridge_takeFaults(JNIEnv *env, jobject insta
     return output;
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_org_adaptivedpi_android_vpn_HevBridge_release(JNIEnv *env, jobject instance, jlong token)
 {
     pthread_mutex_lock(&lock);
-    if (owner == token)
+    bool released = owner == token && !running;
+    if (released)
         owner = 0;
     pthread_mutex_unlock(&lock);
+    return released;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -178,8 +184,14 @@ Java_org_adaptivedpi_android_vpn_HevBridge_counters(JNIEnv *env, jobject instanc
 {
     size_t sent = 0, received = 0;
     pthread_mutex_lock(&lock);
-    if (owner == token && ready)
-        hev_socks5_tunnel_stats(&sent, NULL, &received, NULL);
+    if (owner == token) {
+        if (ready)
+            hev_socks5_tunnel_stats(&sent, NULL, &received, NULL);
+        else {
+            sent = final_sent;
+            received = final_received;
+        }
+    }
     pthread_mutex_unlock(&lock);
     jlong values[] = { (jlong)sent, (jlong)received };
     jlongArray result = (*env)->NewLongArray(env, 2);
@@ -188,9 +200,7 @@ Java_org_adaptivedpi_android_vpn_HevBridge_counters(JNIEnv *env, jobject instanc
     return result;
 }
 
-JNIEXPORT jint JNICALL
-Java_org_adaptivedpi_android_vpn_HevBridge_run(JNIEnv *env, jobject instance, jlong token,
-                                            jbyteArray config, jint fd)
+static jint run_transport(JNIEnv *env, jlong token, jbyteArray config, jint fd)
 {
     jbyte *bytes = (*env)->GetByteArrayElements(env, config, NULL);
     if (!bytes) {
@@ -244,6 +254,7 @@ Java_org_adaptivedpi_android_vpn_HevBridge_run(JNIEnv *env, jobject instance, jl
             adaptive_transport_fault(ADAPTIVE_HEV_LOOP, result, 0);
         log_phase("loop-exit", result);
         pthread_mutex_lock(&lock);
+        hev_socks5_tunnel_stats(&final_sent, NULL, &final_received, NULL);
         ready = false;
         pthread_mutex_unlock(&lock);
         hev_socks5_tunnel_fini();
@@ -256,5 +267,24 @@ socks_logger:
     hev_socks5_logger_fini();
 logger:
     hev_logger_fini();
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_adaptivedpi_android_vpn_HevBridge_run(JNIEnv *env, jobject instance, jlong token,
+                                            jbyteArray config, jint fd)
+{
+    pthread_mutex_lock(&lock);
+    bool accepted = owner == token && !running && !stopping;
+    if (accepted)
+        running = true;
+    pthread_mutex_unlock(&lock);
+    if (!accepted)
+        return 0;
+
+    jint result = run_transport(env, token, config, fd);
+    pthread_mutex_lock(&lock);
+    running = false;
+    pthread_mutex_unlock(&lock);
     return result;
 }

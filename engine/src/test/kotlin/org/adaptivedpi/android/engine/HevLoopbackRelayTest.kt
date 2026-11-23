@@ -15,6 +15,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -25,6 +26,22 @@ class HevLoopbackRelayTest {
     private val policy = object : OutboundSocketPolicy {
         override fun prepare(socket: Socket) = Unit
         override fun prepare(socket: DatagramSocket) = Unit
+    }
+
+    @Test
+    fun failedStartOfAcceptThreadClosesTheListener() {
+        val failure = IllegalThreadStateException("Тестовый отказ старта потока")
+        var listener: ServerSocket? = null
+        OutboundTransport().use { transport ->
+            val thrown = assertThrows(IllegalThreadStateException::class.java) {
+                HevLoopbackRelay(transport, ip, 1, TransportFailureReporter(), { socket, _ ->
+                    listener = socket
+                    throw failure
+                }) { error("Обработчик не должен запуститься") }
+            }
+            assertEquals(failure, thrown)
+            assertTrue(checkNotNull(listener).isClosed)
+        }
     }
 
     @Test
@@ -234,6 +251,170 @@ class HevLoopbackRelayTest {
     }
 
     @Test
+    fun auditMixedLoopbackTrafficTransfersOneThousandTcpAndUdpAndFiveHundredDnsExchanges() {
+        val serverThreads = Executors.newFixedThreadPool(3)
+        val clients = Executors.newFixedThreadPool(8)
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        val tcpCount = 1_000
+        val udpCount = 1_000
+        val dnsCount = 500
+        val question = byteArrayOf(5, 97, 117, 100, 105, 116, 4, 116, 101, 115, 116, 0, 0, 1, 0, 1)
+        fun query(id: Int) = ByteBuffer.allocate(12 + question.size).putShort(id.toShort())
+            .putShort(0x0100).putShort(1).putShort(0).putShort(0).putShort(0).put(question).array()
+        fun answer(query: ByteArray) = query.copyOf().apply {
+            this[2] = 0x81.toByte()
+            this[3] = 0x80.toByte()
+            this[7] = 1
+        } + byteArrayOf(0xc0.toByte(), 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192.toByte(), 0, 2, 10)
+
+        try {
+            ServerSocket(0, 16, ip).use { tcp ->
+                DatagramSocket(InetSocketAddress(ip, 0)).use { udp ->
+                    DatagramSocket(InetSocketAddress(ip, 0)).use { dns ->
+                        tcp.soTimeout = 8_000
+                        val fixtures = listOf(
+                            serverThreads.submit {
+                                repeat(tcpCount) {
+                                    tcp.accept().use { peer ->
+                                        peer.soTimeout = 5_000
+                                        val payload = DataInputStream(peer.getInputStream()).readExact(4)
+                                        assertEquals(-1, peer.getInputStream().read())
+                                        // Два вызова записи. Границы чтения TCP могут отличаться.
+                                        peer.getOutputStream().write(payload, 0, 2)
+                                        peer.getOutputStream().write(payload, 2, 2)
+                                    }
+                                }
+                            },
+                            serverThreads.submit { serveDatagrams(udp, udpCount) { it } },
+                            serverThreads.submit {
+                                serveDatagrams(dns, dnsCount) { payload ->
+                                    val id = ByteBuffer.wrap(payload).short.toInt()
+                                    assertArrayEquals(query(id), payload)
+                                    answer(payload)
+                                }
+                            },
+                        )
+                        relay(maxSessions = 8, failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
+                            repeat(100) { batch ->
+                                // Ограничиваем очередь генератора и перемешиваем протоколы в каждом пакете.
+                                val jobs = (0 until 25).map { index ->
+                                    clients.submit {
+                                        val kind = index % 5
+                                        val id = batch * 25 + index
+                                        client(relay).use { socket ->
+                                            socket.soTimeout = 6_000
+                                            val input = DataInputStream(socket.getInputStream())
+                                            val output = DataOutputStream(socket.getOutputStream())
+                                            assertEquals(0, authenticate(relay.configSecret, input, output))
+                                            val data = ByteBuffer.allocate(4).putInt(id).array()
+                                            if (kind < 2) {
+                                                command(output, 1, tcp.localPort)
+                                                assertEquals(0, reply(input))
+                                                output.write(data, 0, 1)
+                                                output.write(data, 1, 3)
+                                                socket.shutdownOutput()
+                                                assertArrayEquals(data, input.readExact(data.size))
+                                                assertEquals(-1, input.read())
+                                            } else {
+                                                command(output, 5, 0)
+                                                assertEquals(0, reply(input))
+                                                if (kind == 4) {
+                                                    val request = query(id)
+                                                    frame(output, dns.localPort, request)
+                                                    assertArrayEquals(answer(request), response(input))
+                                                } else {
+                                                    frame(output, udp.localPort, data)
+                                                    assertArrayEquals(data, response(input))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                jobs.forEach { it.get(20, TimeUnit.SECONDS) }
+                            }
+                            fixtures.forEach { it.get(3, TimeUnit.SECONDS) }
+                            relay.close()
+                            relay.close()
+                            assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.awaitShutdownResult())
+                            val stats = transport.statistics()
+                            assertEquals(tcpCount.toLong(), stats.closedTcp)
+                            assertEquals((udpCount + dnsCount).toLong(), stats.closedUdp)
+                            assertEquals((udpCount + dnsCount).toLong(), stats.receivedDatagrams)
+                            assertEquals(0, stats.pending)
+                        }
+                    }
+                }
+            }
+            assertFalse(failures.any { it.code == TransportCode.WORKER_REJECTED || it.category == TransportCategory.CLEANUP })
+        } finally {
+            clients.shutdownNow()
+            serverThreads.shutdownNow()
+        }
+    }
+
+    private fun serveDatagrams(socket: DatagramSocket, count: Int, respond: (ByteArray) -> ByteArray) {
+        socket.soTimeout = 8_000
+        repeat(count) {
+            val packet = DatagramPacket(ByteArray(128), 128)
+            socket.receive(packet)
+            val response = respond(packet.data.copyOf(packet.length))
+            socket.send(DatagramPacket(response, response.size, packet.socketAddress))
+        }
+    }
+
+    @Test
+    fun auditConcurrentStopsDrainEightUdpAssociationsWaitingForReplies() {
+        val callers = Executors.newFixedThreadPool(2)
+        val failures = ConcurrentLinkedQueue<TransportFailure>()
+        try {
+            DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
+                server.soTimeout = 3_000
+                relay(maxSessions = 8, failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
+                    val sockets = mutableListOf<Socket>()
+                    try {
+                        repeat(8) { index ->
+                            val socket = client(relay).also(sockets::add)
+                            val input = DataInputStream(socket.getInputStream())
+                            val output = DataOutputStream(socket.getOutputStream())
+                            assertEquals(0, authenticate(relay.configSecret, input, output))
+                            command(output, 5, 0)
+                            assertEquals(0, reply(input))
+                            frame(output, server.localPort, byteArrayOf(index.toByte()))
+                        }
+                        val received = List(8) {
+                            val packet = DatagramPacket(ByteArray(1), 1)
+                            server.receive(packet)
+                            packet.data.single().toInt()
+                        }
+                        assertEquals((0..7).toSet(), received.toSet())
+                        assertEquals(8, transport.statistics().activeUdp)
+
+                        val ready = CountDownLatch(2)
+                        val start = CountDownLatch(1)
+                        val stops = List(2) {
+                            callers.submit {
+                                ready.countDown()
+                                check(start.await(3, TimeUnit.SECONDS))
+                                relay.close()
+                            }
+                        }
+                        assertTrue(ready.await(2, TimeUnit.SECONDS))
+                        start.countDown()
+                        stops.forEach { it.get(3, TimeUnit.SECONDS) }
+                        assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.awaitShutdownResult())
+                        assertEquals(8L, transport.statistics().closedUdp)
+                    } finally {
+                        sockets.forEach(Socket::close)
+                    }
+                }
+            }
+            assertFalse(failures.any { it.category == TransportCategory.CLEANUP || it.code == TransportCode.WORKER_REJECTED })
+        } finally {
+            callers.shutdownNow()
+        }
+    }
+
+    @Test
     fun oversizedUdpReplyIsDroppedAndFollowingLargeValidReplyKeepsAssociation() {
         val failures = ConcurrentLinkedQueue<TransportFailure>()
         DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
@@ -331,7 +512,7 @@ class HevLoopbackRelayTest {
     }
 
     @Test
-    fun cleanupTimeoutRemainsAnErrorAndReportsTheUnfinishedPoolOnce() {
+    fun observationsShowUnfinishedPoolAndLaterReleaseWithoutFalseCleanupError() {
         val entered = CountDownLatch(1)
         val leave = CountDownLatch(1)
         val interrupted = CountDownLatch(1)
@@ -370,9 +551,8 @@ class HevLoopbackRelayTest {
                 assertEquals(1, atDeadline.requestsActive)
                 assertFalse(relay.isTerminated)
                 assertFalse(relay.awaitShutdown(100))
-                val failure = failures.single { it.code == TransportCode.RELAY_STOP }
-                assertEquals(TransportCategory.CLEANUP, failure.category)
-                assertEquals(2, failure.result)
+                assertEquals(2, atDeadline.pendingMask)
+                assertFalse(failures.any { it.code == TransportCode.RELAY_STOP })
             }
         } finally {
             leave.countDown()
@@ -381,6 +561,7 @@ class HevLoopbackRelayTest {
             assertTrue(relay.isTerminated)
             assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.shutdownStatus())
         }
+        assertFalse(failures.any { it.code == TransportCode.RELAY_STOP })
     }
 
     private fun relay(

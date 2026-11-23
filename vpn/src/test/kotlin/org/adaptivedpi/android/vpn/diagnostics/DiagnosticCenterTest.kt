@@ -11,6 +11,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import java.util.UUID
 
 class DiagnosticCenterTest {
@@ -33,6 +34,75 @@ class DiagnosticCenterTest {
         assertEquals("16", read.androidVersion)
         assertEquals(running, read.vpn)
         assertTrue(read.acknowledged)
+    }
+
+    @Test
+    fun recoveryWriteFailurePreservesCrashSlotUntilItCanBeRecovered() {
+        val directory = temporary.root
+        val journal = DiagnosticJournal(directory)
+        center(journal).captureCrash(running, IllegalStateException())
+        val crash = checkNotNull(journal.readCrash())
+        assertTrue(File(directory, "journal.tmp").mkdir())
+
+        val firstRecovery = center(journal)
+        assertEquals(crash.id, firstRecovery.events.value.single().id)
+        assertEquals(crash.id, journal.readCrash()?.id)
+        assertTrue(journal.read().isEmpty())
+
+        val nextRecovery = center(journal)
+        assertEquals(crash.id, nextRecovery.events.value.single().id)
+        assertEquals(crash.id, journal.read().single().id)
+        assertEquals(null, journal.readCrash())
+    }
+
+    @Test
+    fun unreadableHistoryIsRetriedAndMergedBeforeNewEventsReplaceIt() {
+        val directory = temporary.root
+        val journal = DiagnosticJournal(directory)
+        val original = center(journal)
+        val old = original.record(DiagnosticCode.SaveFailed, idle)
+        original.captureCrash(running, IOException())
+        val crash = checkNotNull(journal.readCrash())
+        val history = File(directory, "journal").toPath()
+        val backup = File(directory, "journal-test-original").toPath()
+        Files.move(history, backup)
+        Files.createDirectory(history)
+
+        val recovering = center(journal)
+        assertEquals(crash.id, recovering.events.value.single().id)
+        assertEquals(crash.id, journal.readCrash()?.id)
+        Files.delete(history)
+        Files.move(backup, history)
+        val fresh = recovering.record(DiagnosticCode.ShareFailed, idle)
+
+        assertEquals(listOf(fresh.id, crash.id, old.id), journal.read().map { it.id })
+        val reloaded = center(journal)
+        assertEquals(setOf(fresh.id, crash.id, old.id), reloaded.events.value.map { it.id }.toSet())
+        assertEquals(null, journal.readCrash())
+    }
+
+    @Test
+    fun recoveringActiveMarkerDoesNotDiscardAnUnreadCrashSlot() {
+        val directory = temporary.root
+        val journal = DiagnosticJournal(directory)
+        val prior = center(journal)
+        val session = UUID.randomUUID()
+        prior.markActive(running, session)
+        prior.captureCrash(running, IOException(), session)
+        val crash = checkNotNull(journal.readCrash())
+        val crashSlot = File(directory, "last-crash").toPath()
+        val backup = File(directory, "last-crash-test-original").toPath()
+        Files.move(crashSlot, backup)
+        Files.createDirectory(crashSlot)
+
+        assertEquals(DiagnosticCode.VpnInterrupted, center(journal).events.value.single().code)
+        assertTrue(Files.isDirectory(crashSlot))
+        Files.delete(crashSlot)
+        Files.move(backup, crashSlot)
+        val recovered = center(journal).events.value.single()
+        assertEquals(crash.id, recovered.id)
+        assertEquals(DiagnosticCode.AppCrash, recovered.code)
+        assertEquals(null, journal.readCrash())
     }
 
     @Test
@@ -227,5 +297,5 @@ class DiagnosticCenterTest {
     }
 
     private fun center(journal: DiagnosticJournal, notify: (DiagnosticEvent) -> Boolean = { false }) =
-        DiagnosticCenter(journal, "0.1.0", 36, "16", notify)
+        DiagnosticCenter(journal, "0.1.0", 36, "16", notify = notify)
 }

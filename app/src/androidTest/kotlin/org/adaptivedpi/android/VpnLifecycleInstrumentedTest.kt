@@ -47,6 +47,58 @@ class VpnLifecycleInstrumentedTest {
     }
 
     @Test
+    fun oneHundredAndroidServiceSessionsRejectDuplicateStartsAndReachIdle() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var prepared = false
+            scenario.onActivity { prepared = VpnService.prepare(it) == null }
+            assumeTrue("Требуется предварительно выданное согласие Android", prepared)
+            try {
+                repeat(100) {
+                    scenario.onActivity { activity ->
+                        assertEquals(VpnState.Idle, VpnController.state.value)
+                        assertNull(VpnController.requestStart(activity))
+                        assertNull(VpnController.requestStart(activity))
+                        assertEquals(VpnState.Starting, VpnController.state.value)
+                    }
+                    awaitState(VpnState.TestSessionRunning)
+                    scenario.onActivity {
+                        VpnController.stop()
+                        VpnController.stop()
+                    }
+                    awaitState(VpnState.Idle)
+                }
+            } finally {
+                scenario.onActivity { VpnController.stop() }
+            }
+        }
+    }
+
+    @Test
+    fun immediateStopWhileStartingReleasesServiceAndAllowsNewSession() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var prepared = false
+            scenario.onActivity { prepared = VpnService.prepare(it) == null }
+            assumeTrue("Требуется предварительно выданное согласие Android", prepared)
+            try {
+                scenario.onActivity { activity ->
+                    assertNull(VpnController.requestStart(activity))
+                    assertEquals(VpnState.Starting, VpnController.state.value)
+                    VpnController.stop()
+                    assertEquals(VpnState.Stopping, VpnController.state.value)
+                    assertNull(VpnController.requestStart(activity))
+                    assertEquals(VpnState.Stopping, VpnController.state.value)
+                }
+                awaitState(VpnState.Idle)
+                awaitNotificationRemoval()
+                startSession(scenario)
+            } finally {
+                scenario.onActivity { VpnController.stop() }
+                awaitState(VpnState.Idle)
+            }
+        }
+    }
+
+    @Test
     fun activeSessionSurvivesRecreationAndOldNotificationCannotStopItsSuccessor() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             var prepared = false

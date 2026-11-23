@@ -20,7 +20,6 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 data class RelayShutdownStatus(
@@ -34,18 +33,26 @@ data class RelayShutdownStatus(
 }
 
 /** Одноразовый локальный интерфейс HEV. UDP проходит здесь в кадрах поверх TCP. */
-class HevLoopbackRelay(
+class HevLoopbackRelay internal constructor(
     private val transport: OutboundTransport,
     private val destination: InetAddress?,
-    maxSessions: Int = 16,
-    private val failures: TransportFailureReporter = TransportFailureReporter(),
+    maxSessions: Int,
+    private val failures: TransportFailureReporter,
+    startAccepting: (ServerSocket, Thread) -> Unit,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
+    constructor(
+        transport: OutboundTransport,
+        destination: InetAddress?,
+        maxSessions: Int = 16,
+        failures: TransportFailureReporter = TransportFailureReporter(),
+        onListenerFailure: () -> Unit,
+    ) : this(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, onListenerFailure)
+
     init { require(maxSessions > 0) }
 
     private val lock = Any()
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
-    private val listener = ServerSocket(0, maxSessions, loopback)
     private val permits = Semaphore(maxSessions)
     private val clients = mutableSetOf<Peer>()
     // Слот соединения резервирует место в обоих пулах. Очереди покрывают возврат потока
@@ -53,14 +60,30 @@ class HevLoopbackRelay(
     private val requests = RelayPool(maxSessions, "HEV request")
     private val responses = RelayPool(maxSessions, "HEV response")
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
-    private val shutdownErrorReported = AtomicBoolean()
+    private val closures = SocketClosures()
     private val closeCompleted = CountDownLatch(1)
     @Volatile private var closing = false
-    private val acceptThread = Thread(::accept, "HEV accept").apply { start() }
+    private val acceptThread = Thread(::accept, "HEV accept")
+    private val listener = ServerSocket(0, maxSessions, loopback)
 
     val port: Int = listener.localPort
     val configSecret: String get() = secret
     val isTerminated: Boolean get() = pendingShutdownSteps() == 0
+
+    init {
+        try {
+            startAccepting(listener, acceptThread)
+        } catch (failure: Throwable) {
+            closing = true
+            try {
+                listener.close()
+            } catch (closeError: Exception) {
+                failure.addSuppressed(closeError)
+                failures.recordError(CLOSE, closeError, fallback = TransportCategory.CLEANUP)
+            }
+            throw failure
+        }
+    }
 
     private fun accept() {
         try {
@@ -313,7 +336,7 @@ class HevLoopbackRelay(
     }
 
     private fun closeRelay(socket: Closeable) {
-        runCatching(socket::close).onFailure {
+        closures.close(socket) {
             failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP)
         }
     }
@@ -349,16 +372,22 @@ class HevLoopbackRelay(
         }
         requests.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
         responses.awaitTermination(remaining(), TimeUnit.NANOSECONDS)
-        val state = shutdownStatus()
-        if (!state.terminated && shutdownErrorReported.compareAndSet(false, true)) {
-            failures.record(TransportFailure(STOP, TransportCategory.CLEANUP, TransportCode.RELAY_STOP, result = state.pendingMask))
-        }
-        return state
+        return shutdownStatus()
     }
 
     fun shutdownStatus() = RelayShutdownStatus(
         pendingShutdownSteps(), requests.activeCount, requests.queue.size, responses.activeCount, responses.queue.size,
     )
+
+    fun socketClosures(): SocketCloseSummary = closures.snapshot() + transport.socketClosures()
+
+    /** Владелец ждёт фактического освобождения на фоновом потоке. */
+    fun awaitDrained() {
+        closeCompleted.await()
+        acceptThread.join()
+        requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+        responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+    }
 
     private fun pendingShutdownSteps(): Int {
         var pending = 0
@@ -410,7 +439,6 @@ class HevLoopbackRelay(
         val ACCEPT = TransportSite(TransportSubsystem.HEV, TransportOperation.ACCEPT)
         val AUTH = TransportSite(TransportSubsystem.HEV, TransportOperation.AUTHENTICATE)
         val CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.CLOSE)
-        val STOP = TransportSite(TransportSubsystem.HEV, TransportOperation.STOP)
         val CONTROL_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ)
         val CONTROL_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE)
         val TCP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP, TransportDirection.OUTBOUND)

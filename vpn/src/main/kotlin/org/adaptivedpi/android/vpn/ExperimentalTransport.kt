@@ -3,11 +3,11 @@ package org.adaptivedpi.android.vpn
 import android.net.Network
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
 import org.adaptivedpi.android.engine.HevLoopbackRelay
 import org.adaptivedpi.android.engine.OutboundTransport
 import org.adaptivedpi.android.engine.OutboundStatistics
-import org.adaptivedpi.android.engine.RelayShutdownStatus
 import org.adaptivedpi.android.engine.TransportCancellation
 import org.adaptivedpi.android.engine.TransportCategory
 import org.adaptivedpi.android.engine.TransportCode
@@ -60,6 +60,7 @@ data class TransportSnapshot(
     val openedUdp: Long = 0,
     val closedUdp: Long = 0,
     val sessionId: UUID? = null,
+    val finalized: Boolean = false,
 ) {
     val transferred get() = tunSentPackets > 0 && tunReceivedPackets > 0 && sentBytes > 0 && receivedBytes > 0
 }
@@ -71,7 +72,7 @@ internal object HevBridge {
     external fun stop(token: Long, state: Int)
     external fun setFaultState(token: Long, state: Int)
     external fun takeFaults(token: Long): LongArray?
-    external fun release(token: Long)
+    external fun release(token: Long): Boolean
     external fun isReady(token: Long): Boolean
     external fun counters(token: Long): LongArray
 }
@@ -92,12 +93,15 @@ internal class ExperimentalTransport(
     private val drainLock = ReentrantLock()
     private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000, failures = failures)
     private val relay: HevLoopbackRelay
+    private var worker: Thread? = null
     val finished = CompletableDeferred<Unit>()
     @Volatile var tunClosed = false
         private set
     @Volatile private var nativeReleased = false
-    @Volatile private var relayWait: RelayShutdownStatus? = null
     @Volatile private var finalOutbound: OutboundStatistics? = null
+    @Volatile private var finalCounters: LongArray? = null
+    @Volatile var finalizationStep: Pair<CleanupStep, Long>? = null
+        private set
     private val cleanupIssues = ConcurrentHashMap<CleanupStep, ExceptionKind>()
 
     init {
@@ -108,9 +112,9 @@ internal class ExperimentalTransport(
             requirePreviousTransportReleased()
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
             relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, onFailure)
-        } catch (error: Exception) {
-            outbound.close()
-            HevBridge.release(token)
+        } catch (error: Throwable) {
+            runCatching(outbound::close).exceptionOrNull()?.let(error::addSuppressed)
+            runCatching { check(HevBridge.release(token)) }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
         }
     }
@@ -138,20 +142,35 @@ internal class ExperimentalTransport(
                     finish()
                     onExit(failure)
                 }
-            }, "HEV TUN").start()
+            }, "HEV TUN").also { worker = it }.start()
         } catch (failure: RuntimeException) {
             finish()
             throw failure
         }
     }
 
-    fun stop() {
+    fun stopAcceptingNewConnections() = outbound.stopAcceptingNewConnections()
+
+    fun stop(step: (CleanupStep) -> Unit) {
+        stopAcceptingNewConnections()
         if (stopping.compareAndSet(false, true)) {
             diagnostics.stateChanged(VpnState.Stopping)
+            step(CleanupStep.NativeStop)
             cleanupStep(CleanupStep.NativeStop, RELAY_STOP) { HevBridge.stop(token, VpnState.Stopping.ordinal) }
+            step(CleanupStep.RelayClose)
             cleanupStep(CleanupStep.RelayClose, RELAY_STOP, relay::close)
         }
     }
+
+    fun abortBeforeStart() {
+        stopAcceptingNewConnections()
+        stopping.set(true)
+        finish()
+    }
+
+    fun awaitWorkerExit() = worker?.join()
+
+    fun awaitRelayRelease() = relay.awaitDrained()
 
     fun snapshot(): TransportSnapshot {
         drainFaults()
@@ -170,20 +189,23 @@ internal class ExperimentalTransport(
     }
 
     fun cleanupDetails(elapsedMillis: Long, serviceIssues: List<CleanupIssue>): VpnCleanupDetails {
-        val stats = finalOutbound
         val relayNow = relay.shutdownStatus()
+        val stats = if (relayNow.terminated) outbound.statistics().also { finalOutbound = it } else finalOutbound
         return VpnCleanupDetails(
-            diagnostics.id, elapsedMillis, tunClosed, nativeReleased, relayWait?.pendingMask, relayNow,
+            diagnostics.id, elapsedMillis, tunClosed, nativeReleased, null, relayNow,
             stats?.let { it.activeTcp + it.activeUdp }, stats?.pending,
             serviceIssues + cleanupIssues.map { (step, error) -> CleanupIssue(step, error) },
+            sockets = relay.socketClosures(),
         )
     }
 
     fun stoppedSnapshot(last: TransportSnapshot?): TransportSnapshot? = finalOutbound?.let { stats ->
+        val counters = finalCounters
         TransportSnapshot(
-            false, last?.tunSentPackets ?: 0, last?.tunReceivedPackets ?: 0,
+            false, maxOf(counters?.get(0) ?: 0, last?.tunSentPackets ?: 0), maxOf(counters?.get(1) ?: 0, last?.tunReceivedPackets ?: 0),
             stats.sentBytes, stats.receivedBytes, stats.activeTcp + stats.activeUdp, diagnostics.total,
             target == null, stats.openedTcp, stats.closedTcp, stats.openedUdp, stats.closedUdp, diagnostics.id,
+            finalized = counters != null,
         )
     }
 
@@ -198,31 +220,34 @@ internal class ExperimentalTransport(
 
     private fun finish() {
         try {
+            finalizationStep = CleanupStep.TransportSnapshot to SystemClock.elapsedRealtime()
             diagnostics.stateChanged(VpnState.Stopping)
-            runCatching { drainFaults(final = true) }.onFailure {
+            runCatching {
+                drainFaults(final = true)
+                finalCounters = HevBridge.counters(token)
+            }.onFailure {
+                cleanupIssues[CleanupStep.TransportSnapshot] = ExceptionKind.from(it)
                 failures.recordError(NATIVE_RUN, it, fallback = TransportCategory.INTERNAL)
             }
+            finalizationStep = CleanupStep.RelayClose to SystemClock.elapsedRealtime()
             cleanupStep(CleanupStep.RelayClose, RELAY_STOP, relay::close)
+            finalizationStep = CleanupStep.TunClose to SystemClock.elapsedRealtime()
             val descriptor = tunnel.fileDescriptor
             cleanupStep(CleanupStep.TunClose, TUN_CLOSE) {
-                tunnel.close()
+                if (descriptor.valid()) tunnel.close()
             }
             tunClosed = !descriptor.valid()
             if (!tunClosed) drainingTun.set(descriptor)
-            cleanupStep(CleanupStep.RelayWait, RELAY_STOP) {
-                relayWait = relay.awaitShutdownResult()
-            }
-            // Не ждём блокировку исходящих сокетов, если этап их закрытия
-            // сам не успел завершиться. В отчёте количество останется неизвестным.
-            if (relay.shutdownStatus().pendingMask and 8 == 0) finalOutbound = outbound.statistics()
         } finally {
             if (!relay.isTerminated) drainingRelay.set(relay)
             try {
+                finalizationStep = CleanupStep.NativeRelease to SystemClock.elapsedRealtime()
                 cleanupStep(CleanupStep.NativeRelease, RELAY_STOP) {
-                    HevBridge.release(token)
+                    check(HevBridge.release(token))
                     nativeReleased = true
                 }
             } finally {
+                finalizationStep = null
                 finished.complete(Unit)
             }
         }

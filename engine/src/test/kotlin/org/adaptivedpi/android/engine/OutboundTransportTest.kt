@@ -34,6 +34,22 @@ class OutboundTransportTest {
     }
 
     @Test
+    fun stopRejectsNewConnectionsBeforeClosingExistingSockets() {
+        transport().use { transport ->
+            udpServer().use { peer ->
+                transport.connectUdp(loopback, peer.localPort).use {
+                    transport.stopAcceptingNewConnections()
+                    val error = assertThrows(TransportSocketException::class.java) { transport.connectUdp(loopback, peer.localPort) }
+                    assertEquals(TransportCode.SESSION_CANCELLED, error.code)
+                    assertEquals(0, transport.statistics().pending)
+                    assertEquals(1, transport.statistics().activeUdp)
+                }
+            }
+            assertEquals(0, transport.statistics().activeUdp)
+        }
+    }
+
+    @Test
     fun closingTransportReportsCancelledDatagramReceiveOnce() {
         val recorded = mutableListOf<TransportFailure>()
         val transport = OutboundTransport(failures = TransportFailureReporter(sink = recorded::add))
