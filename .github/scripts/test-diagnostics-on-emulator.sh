@@ -211,6 +211,13 @@ timeout 60s "$adb" -s "$serial" shell am instrument -w -r \
   | tr -d '\r' | tee "$log_dir/consent.log"
 grep -Fxq 'OK (1 test)' "$log_dir/consent.log" || fail 'Системный диалог согласия VPN не пройден.'
 consent_in_progress=false
+# Диалоги ANR скрыты, поэтому ANR приложения проверяется по журналу событий отдельно от лаунчера.
+check_app_anr() {
+  if timeout 10s "$adb" -s "$serial" logcat -d -b events -s am_anr 2>/dev/null \
+      | grep -F 'org.adaptivedpi.android' > "$log_dir/app-anr.txt"; then
+    fail "ANR приложения на $serial, подробности в app-anr.txt."
+  fi
+}
 fixture_log="$log_dir/fixture.log"
 # 10.0.2.2 в госте — адрес loopback хоста для обоих сценариев TUN.
 tls_dir=$(mktemp -d "$RUNNER_TEMP/transport-tls.XXXXXX")
@@ -247,6 +254,7 @@ if [[ "$mode" == --extended ]]; then
   grep -Eq '^[1-9][0-9]*$' "$log_dir/blocked-syn-count.txt" || fail 'Стенд не зафиксировал SYN блокируемого connect.'
   timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief ExtendedTunTest:I AdaptiveTun:I '*:S' \
     > "$log_dir/extended-android.log" || true
+  check_app_anr
   exit 0
 fi
 test_filter=$(python3 .github/scripts/verify-android-test-results.py --filter)
@@ -260,3 +268,4 @@ ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:con
 python3 .github/scripts/verify-android-test-results.py app/build/outputs/androidTest-results/connected \
   "$log_dir/consent.log" "$log_dir/results.json"
 timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I '*:S' || true
+check_app_anr

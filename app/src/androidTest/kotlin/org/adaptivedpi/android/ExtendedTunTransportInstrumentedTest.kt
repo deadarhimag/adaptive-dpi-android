@@ -408,7 +408,10 @@ class ExtendedTunTransportInstrumentedTest {
             listOf("/proc/net/tcp", "/proc/net/tcp6").any { path ->
                 shell("cat $path").lineSequence().drop(1).any { line ->
                     val fields = line.trim().split(WHITESPACE)
-                    fields.size > 3 && fields[2].endsWith(remotePort) && fields[3] == TCP_SYN_SENT
+                    // Сокет теста в TUN имеет адрес 192.0.2.1 и тот же удалённый порт: исключаем его,
+                    // чтобы засчитать только исходящий сокет релея в физической сети.
+                    fields.size > 3 && fields[2].endsWith(remotePort) && fields[3] == TCP_SYN_SENT &&
+                        !fields[1].substringBefore(':').endsWith(TUN_ADDRESS_HEX)
                 }
             }
         }
@@ -445,6 +448,8 @@ class ExtendedTunTransportInstrumentedTest {
         const val LONG_TCP = 39_055
         const val BLOCKED_TCP = 39_056
         const val TCP_SYN_SENT = "02"
+        /** 192.0.2.1 в формате /proc/net/tcp: байты адреса в порядке хоста. */
+        const val TUN_ADDRESS_HEX = "010200C0"
         val WHITESPACE = Regex("\\s+")
         const val COUNTER = 39_057
         const val SAMPLES = 281
