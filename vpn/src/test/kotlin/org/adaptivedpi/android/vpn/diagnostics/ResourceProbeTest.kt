@@ -45,6 +45,14 @@ class ResourceProbeTest {
     }
 
     @Test
+    fun localCleartextPolicyIsNotReportedAsAServerRestriction() = runBlocking<Unit> {
+        val probe = ResourceProbe(resolve = { throw AssertionError("DNS не должен вызываться") }, cleartextAllowed = { false })
+        val result = probe.check(URI("http://localhost/resource")).single()
+        assertEquals(ProbeStatus.CLEARTEXT_BLOCKED, result.status)
+        assertEquals(null, result.httpStatus)
+    }
+
+    @Test
     fun reportsDnsFailureAndUsesAnIndependentHeaderDeadline() = runBlocking<Unit> {
         val unresolved = ResourceProbe(resolve = { throw UnknownHostException() }, cleartextAllowed = { true })
         assertEquals(ProbeStatus.DNS_ERROR, unresolved.check(URI("http://localhost/")).single().status)

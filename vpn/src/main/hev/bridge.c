@@ -161,19 +161,31 @@ Java_org_adaptivedpi_android_vpn_HevBridge_takeFaults(JNIEnv *env, jobject insta
         return NULL;
     }
     bool any = fault_count != 0;
-    for (size_t i = 0; i < FAULT_CATEGORIES; i++) {
-        values[1 + i] = atomic_exchange(&fault_dropped[i], 0);
-        any = any || values[1 + i] != 0;
+    for (size_t i = 0; i < FAULT_CATEGORIES; i++) any = any || atomic_load(&fault_dropped[i]) != 0;
+    if (!any) {
+        pthread_mutex_unlock(&fault_lock);
+        pthread_mutex_unlock(&lock);
+        return NULL;
     }
+    /*
+     * Массив Java выделяется до очистки: при отказе выделения записи остаются в очереди
+     * и уходят следующим опросом. Пока fault_lock занят, рабочие задачи HEV не ждут его
+     * (trylock) и считают события в агрегатах, поэтому fault_count здесь не меняется.
+     */
+    jlongArray output = (*env)->NewLongArray(env, (jsize)(length + fault_count * FAULT_FIELDS));
+    if (!output) {
+        pthread_mutex_unlock(&fault_lock);
+        pthread_mutex_unlock(&lock);
+        return NULL;
+    }
+    for (size_t i = 0; i < FAULT_CATEGORIES; i++) values[1 + i] = atomic_exchange(&fault_dropped[i], 0);
     values[0] = atomic_load(&fault_last_drop);
     for (size_t i = 0; i < fault_count; i++)
         for (size_t field = 0; field < FAULT_FIELDS; field++) values[length++] = faults[i][field];
     fault_count = 0;
     pthread_mutex_unlock(&fault_lock);
     pthread_mutex_unlock(&lock);
-    if (!any) return NULL;
-    jlongArray output = (*env)->NewLongArray(env, (jsize)length);
-    if (output) (*env)->SetLongArrayRegion(env, output, 0, (jsize)length, values);
+    (*env)->SetLongArrayRegion(env, output, 0, (jsize)length, values);
     return output;
 }
 

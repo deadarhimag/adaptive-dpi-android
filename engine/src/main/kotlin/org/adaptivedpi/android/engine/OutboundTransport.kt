@@ -110,6 +110,11 @@ class OutboundTransport(
 
     fun socketClosures(): SocketCloseSummary = closures.snapshot()
 
+    /** Повтор закрытия сокетов, освобождение которых не подтвердилось; ошибки - в журнал транспорта. */
+    fun retryUnconfirmedClosures() = closures.retryUnconfirmed { error ->
+        failures.recordError(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE), error, fallback = TransportCategory.CLEANUP)
+    }
+
     fun stopAcceptingNewConnections() = synchronized(tcpConnectGate) { accepting = false }
 
     /** Фоновая часть Stop. Активные соединения по-прежнему закрывает владелец релея. */
@@ -226,11 +231,20 @@ class OutboundTransport(
                 }
             }
             return countFailures(site, { lease.cancellation }) {
-                if (socket is Socket) synchronized(tcpConnectGate) {
-                    // Допуск упорядочен со Stop. Сам блокирующий connect выполняется вне замков.
-                    checkConnectAllowed(lease)
+                if (socket is Socket) {
+                    synchronized(tcpConnectGate) {
+                        // Допуск упорядочен со Stop. Сам блокирующий connect выполняется вне замков.
+                        checkConnectAllowed(lease)
+                    }
+                    connect(socket)
+                } else {
+                    // Для UDP connect только запоминает адрес и не блокирует, поэтому выполняется под тем же
+                    // замком, что и допуск: принятый Stop не даёт уже подготовленному сокету подключиться.
+                    synchronized(tcpConnectGate) {
+                        checkConnectAllowed(lease)
+                        connect(socket)
+                    }
                 }
-                connect(socket)
                 synchronized(lock) {
                     if (socket is Socket) synchronized(tcpConnectGate) { activate(lease) } else activate(lease)
                     connected = true

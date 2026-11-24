@@ -199,6 +199,25 @@ class VpnEventHistoryTest {
     }
 
     @Test
+    fun partiallyDamagedHistoryKeepsValidEventsAndReportsTheLoss() = runBlocking {
+        val file = File(folder.root, "events")
+        val first = VpnJournalEvent.create(VpnEventType.Started)
+        val second = VpnJournalEvent.create(VpnEventType.Stopped)
+        val store = VpnEventStore(file)
+        store.write(listOf(second, first))
+        file.appendText("1\tоборванная строка\n")
+
+        assertEquals(StoredVpnEvents(listOf(second, first), 1), store.readStored())
+        withWriter(store) { writer ->
+            val state = withTimeout(5_000) { writer.state.first { it.loaded } }
+            assertEquals(listOf(second, first), state.entries)
+            assertEquals(1L, state.unreadableRecords)
+            assertFalse(state.storageError)
+            assertEquals(0L, state.droppedInformational)
+        }
+    }
+
+    @Test
     fun retriesInitialReadBeforeReplacingOlderHistory() = runBlocking {
         val file = folder.newFolder("unavailable")
         val previous = VpnJournalEvent.create(VpnEventType.Started)

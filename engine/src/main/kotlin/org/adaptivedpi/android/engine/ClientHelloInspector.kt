@@ -31,7 +31,8 @@ internal object ClientHelloInspector {
             if (size >= 4) {
                 val bodyLength = (unsigned(handshake[1]) shl 16) or u16(handshake, 2)
                 if (bodyLength !in 41..MAX_PREFIX - 4) return Result.Unknown
-                if (size >= bodyLength + 4) return parseHello(handshake, bodyLength + 4)
+                // Разбор только после полной TLS-записи: следующей стадии нужны границы записи, а не только сообщения.
+                if (size >= bodyLength + 4) return if (available < length) incomplete else parseHello(handshake, bodyLength + 4)
             }
             if (available < length) return incomplete
             offset += length

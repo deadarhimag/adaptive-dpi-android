@@ -384,7 +384,8 @@ class AdaptiveVpnService : VpnService() {
             trafficConfirmed = true
             recordTransportEvent(VpnEventType.TransportTraffic)
         }
-        if (stats.errors > 0 && !transportErrorReported) {
+        // Общий счётчик отказов включает штатные тайм-ауты и отмены; предупреждение - только по первому неожиданному или неизвестному.
+        if (!transportErrorReported && (transportDiagnostics?.problems ?: 0L) > 0L) {
             transportErrorReported = true
             recordTransportEvent(VpnEventType.TransportOperationFailed)
         }

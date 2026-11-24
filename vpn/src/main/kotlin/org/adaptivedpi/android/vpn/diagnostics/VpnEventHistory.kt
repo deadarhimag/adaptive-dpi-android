@@ -22,6 +22,8 @@ data class VpnEventHistoryState(
     val storageError: Boolean = false,
     val droppedInformational: Long = 0,
     val droppedCritical: Long = 0,
+    /** Строки журнала на диске, которые не удалось прочитать; отдельно от вытеснения очереди. */
+    val unreadableRecords: Long = 0,
 )
 
 object VpnEventHistory {
@@ -71,15 +73,17 @@ internal class VpnEventWriter(
     private val commands = Channel<Command>(capacity = 288)
     private val droppedInformational = AtomicLong()
     private val droppedCritical = AtomicLong()
+    private val unreadableRecords = AtomicLong()
     private val unpersistedCritical = mutableSetOf<UUID>()
     val state = current.asStateFlow()
     private var diskHistoryRead = false
 
     init {
         scope.launch {
-            val stored = runCatching(store::read)
+            val stored = runCatching(store::readStored)
             diskHistoryRead = stored.isSuccess
-            publish(VpnEventHistoryState(stored.getOrDefault(emptyList()), true, stored.isFailure))
+            stored.getOrNull()?.let { unreadableRecords.addAndGet(it.unreadable.toLong()) }
+            publish(VpnEventHistoryState(stored.getOrNull()?.entries.orEmpty(), true, stored.isFailure))
             for (command in commands) {
                 when (command) {
                     is Command.Append -> {
@@ -114,6 +118,7 @@ internal class VpnEventWriter(
     private fun VpnEventHistoryState.withLosses() = copy(
         droppedInformational = this@VpnEventWriter.droppedInformational.get(),
         droppedCritical = this@VpnEventWriter.droppedCritical.get(),
+        unreadableRecords = this@VpnEventWriter.unreadableRecords.get(),
     )
 
     private fun publish(next: VpnEventHistoryState) {
@@ -132,7 +137,10 @@ internal class VpnEventWriter(
 
     private fun append(event: VpnJournalEvent) {
         val existing = current.value.entries
-        val restored = if (diskHistoryRead) emptyList() else runCatching(store::read).getOrNull()
+        val restored = if (diskHistoryRead) emptyList() else runCatching(store::readStored).getOrNull()?.let {
+            unreadableRecords.addAndGet(it.unreadable.toLong())
+            it.entries
+        }
         if (restored == null) {
             if (event.critical) unpersistedCritical.add(event.id)
             val visible = store.bounded(listOf(event) + existing)

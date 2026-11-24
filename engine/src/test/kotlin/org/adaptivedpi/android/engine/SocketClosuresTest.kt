@@ -26,7 +26,39 @@ class SocketClosuresTest {
         closures.close({ closed = true; throw error }, { closed }) { reported = it }
         closures.close({}, { false }) { throw AssertionError(it) }
         assertEquals(error, reported)
-        assertEquals(SocketCloseSummary(failed = 1, unknown = 1), closures.snapshot())
+        assertEquals(SocketCloseSummary(failed = 1, unknown = 1, unconfirmed = 2), closures.snapshot())
         assertFalse(closures.snapshot().confirmed)
+    }
+
+    @Test
+    fun confirmedRetryReleasesTheBlockButKeepsTheFirstFailureAsWarning() {
+        val closures = SocketClosures()
+        var attempts = 0
+        var closed = false
+        val reported = mutableListOf<Exception>()
+        closures.close({ attempts++; throw IOException("первая попытка") }, { closed }) { reported += it }
+        assertFalse(closures.snapshot().confirmed)
+
+        closures.retryUnconfirmed { reported += it }
+        assertFalse("Повтор с ошибкой оставляет сокет неподтверждённым", closures.snapshot().confirmed)
+
+        closures.close({ throw AssertionError("не тот сокет") }, { true }) { throw AssertionError(it) }
+        closed = true
+        closures.retryUnconfirmed { reported += it }
+        assertEquals(SocketCloseSummary(alreadyClosed = 1, failed = 1), closures.snapshot())
+        assertTrue(closures.snapshot().confirmed)
+        assertEquals(2, attempts)
+        assertEquals(2, reported.size)
+    }
+
+    @Test
+    fun retryClosesARealSocketThatWasNotClosed() {
+        val closures = SocketClosures()
+        val socket = Socket()
+        closures.close({ throw IOException("сбой") }, socket::isClosed) {}
+        assertFalse(closures.snapshot().confirmed)
+        closures.retryUnconfirmed { throw AssertionError(it) }
+        assertTrue(socket.isClosed)
+        assertTrue(closures.snapshot().confirmed)
     }
 }

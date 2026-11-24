@@ -50,6 +50,22 @@ class CombinedDiagnosticReportTest {
     }
 
     @Test
+    fun buildIdentityDistinguishesApksWithTheSameVersionName() {
+        fun report(build: BuildIdentity) = combinedDiagnosticReport(
+            "0.1.1", "16", 36, "Pixel 7", VpnState.Idle,
+            VpnEventHistoryState(loaded = true, unreadableRecords = 2), emptyList(), build = build,
+        )
+        val first = report(BuildIdentity(25, "41", "a1b2c3d4e5f6", false))
+        val second = report(BuildIdentity(26, "42", "0f1e2d3c4b5a", true))
+        assertTrue(first.contains("Сборка: код версии 25, запуск CI 41, коммит a1b2c3d4e5f6"))
+        assertTrue(second.contains("Сборка: код версии 26, запуск CI 42, коммит 0f1e2d3c4b5a, есть локальные изменения"))
+        assertTrue(first.contains("Повреждённые записи на диске: 2. История неполная."))
+        val local = report(BuildIdentity(null, "local", "evil\nline", false))
+        assertTrue(local.contains("Сборка: код версии неизвестен, локальная сборка, коммит неизвестен"))
+        assertFalse(local.contains("evil"))
+    }
+
+    @Test
     fun includesAggregatesAndDistinguishesEngineReadinessFromBidirectionalTraffic() {
         val transport = TransportSnapshot(true, 3, 2, 30, 0, 1, 2)
         val report = combinedDiagnosticReport(

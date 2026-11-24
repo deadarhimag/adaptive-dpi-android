@@ -2,6 +2,7 @@ package org.adaptivedpi.android.vpn.diagnostics
 
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.engine.RelayShutdownStatus
+import org.adaptivedpi.android.engine.SocketCloseSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -120,6 +121,21 @@ class DiagnosticCenterTest {
         assertTrue(read.report().contains("RELAY_STOP, пул запросов"))
         assertTrue(read.report().contains("Релей при завершении службы: завершён"))
         assertTrue(read.report().contains(details.session.toString()))
+    }
+
+    @Test
+    fun socketCloseWarningDoesNotBlockWhenTheRetryConfirmedRelease() {
+        val base = VpnCleanupDetails(UUID.randomUUID(), 10, true, true, null,
+            RelayShutdownStatus(0, 0, 0, 0, 0), 0, 0, emptyList())
+        val retried = base.copy(sockets = SocketCloseSummary(closed = 3, failed = 1, unconfirmed = 0))
+        assertFalse(retried.incomplete)
+        assertEquals(retried, VpnCleanupDetails.decode(retried.encode()))
+        assertTrue(retried.text().contains("ошибки закрытия 1"))
+        assertTrue(base.copy(sockets = SocketCloseSummary(failed = 1, unconfirmed = 1)).incomplete)
+
+        // Запись старого формата без пятого поля: ошибка закрытия по-прежнему считается неподтверждённой.
+        val legacy = retried.encode().replace(";3,0,1,0,0;", ";3,0,1,0;")
+        assertTrue(VpnCleanupDetails.decode(legacy).incomplete)
     }
 
     @Test
@@ -250,6 +266,24 @@ class DiagnosticCenterTest {
         reloaded.prune()
         assertTrue(reloaded.events.value.isEmpty())
         assertEquals("", File(temporary.root, "journal").readText())
+    }
+
+    @Test
+    fun clockMovedBackwardsKeepsRecentRecordsAndCrashSlot() {
+        var now = 10_000L
+        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now })
+        val first = center(journal)
+        val recent = first.record(DiagnosticCode.SaveFailed, idle)
+        first.captureCrash(idle, IllegalStateException())
+        now -= 1_000
+
+        assertEquals(listOf(recent.id), journal.read().map(DiagnosticEvent::id))
+        assertNotNull(journal.readCrash())
+        now += 1_000
+        assertEquals(listOf(recent.id), journal.read().map(DiagnosticEvent::id))
+
+        now += 500
+        assertTrue(journal.read().isEmpty())
     }
 
     @Test

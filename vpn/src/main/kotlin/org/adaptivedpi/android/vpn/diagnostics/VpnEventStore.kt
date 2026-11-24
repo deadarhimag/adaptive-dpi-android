@@ -5,6 +5,8 @@ import java.io.File
 import java.time.OffsetDateTime
 import java.util.UUID
 
+internal data class StoredVpnEvents(val entries: List<VpnJournalEvent>, val unreadable: Int)
+
 internal class VpnEventStore(
     private val file: File,
     private val maxEntries: Int = 128,
@@ -14,13 +16,19 @@ internal class VpnEventStore(
         require(maxEntries > 0 && maxBytes > 0)
     }
 
-    fun read(): List<VpnJournalEvent> {
-        if (!file.exists()) return emptyList()
+    fun read(): List<VpnJournalEvent> = readStored().entries
+
+    /** Пригодные записи и число строк, которые не удалось разобрать: частичная потеря не должна выглядеть полной историей. */
+    fun readStored(): StoredVpnEvents {
+        if (!file.exists()) return StoredVpnEvents(emptyList(), 0)
         check(file.isFile && file.length() <= maxBytes)
-        return file.useLines(Charsets.UTF_8) { lines ->
-            lines.mapNotNull { runCatching { decode(it) }.getOrNull() }
-                .distinctBy(VpnJournalEvent::id).take(maxEntries).toList()
+        var unreadable = 0
+        val entries = file.useLines(Charsets.UTF_8) { lines ->
+            lines.filter(String::isNotEmpty).mapNotNull { line ->
+                runCatching { decode(line) }.onFailure { unreadable++ }.getOrNull()
+            }.toList()
         }
+        return StoredVpnEvents(entries.distinctBy(VpnJournalEvent::id).take(maxEntries), unreadable)
     }
 
     fun bounded(events: List<VpnJournalEvent>): List<VpnJournalEvent> {
