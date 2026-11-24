@@ -97,19 +97,17 @@ Always-on VPN и автозапуск (`SUPPORTS_ALWAYS_ON = true`, измене
 
 **Распространение - только GitHub Releases.** Release-сборка подписывается отдельным ключом выпуска; ключ хранится в секретах GitHub, не в репозитории. Workflow выпуска запускается вручную по тегу и прикладывает к релизу APK, SHA-256 файла и список изменений из коммитов. Приложение само в сеть за обновлениями не ходит: в «О приложении» - ссылка на страницу релизов и версия. Окончательная лицензия проекта выбирается до первого релиза (п. 14 AGENTS.md). Публикация релиза - только с разрешения пользователя (п. 15).
 
-## Что удаляется из кода
+## Удалённый код
 
-Перед удалением проверить все места вызова, включая манифест, JNI, нативную часть, рефлексию и ресурсы (п. 25 AGENTS.md). Удаление выполняется отдельным коммитом с прохождением сборки и тестов.
+Удалено отдельным коммитом после проверки всех мест вызова (манифест, JNI, ресурсы, тесты, workflow; п. 25 AGENTS.md):
 
-**Формат сохранённых данных (п. 27 AGENTS.md).** Значения `CleanupStep.EngineMonitor`, `EngineTunnel`, `EngineStop` записываются в историю по имени и читаются через `CleanupStep.valueOf` (`VpnCleanupDetails`); `DiagnosticCode.EngineHung` хранится в журнале ошибок. Эти значения enum **не удалять**: либо оставить как устаревшие, либо добавить совместимое чтение старой истории с тестом.
+- `PacketEngine`, `PacketEngineSession`, `PacketTunnel`, `SocketProtector` - не использовались;
+- `superviseEngine()`, `monitorEngine()`, `EngineHealth*`, `EngineWatchdog`, `EngineSignal`, `EngineNetwork`, `EngineEmergencyStop`, поля `engineMonitor` и `engineEmergencyStop`, шаги очистки `EngineTunnel`, `EngineStop`, `EngineMonitor`, `EngineWatchdogTest` - не были подключены; здоровье HEV отслеживает существующий опрос;
+- `ClientHelloSplitWriter`, флаг `splitClientHelloForTest`, их тесты и два сценария `HevLoopbackRelayTest` - фиксированный разрез на 3-м байте был шаблоном; замена - операции [OPERATIONS.md](OPERATIONS.md) в конвейере потока;
+- `tools/native-send/` и шаг его сборки в `transport-host.yml` - дублировал `Os.sendto`; замена - нативная функция `TCP_INFO` (этап 1.6);
+- `ResourceIdentity` и его тест - требовал UID, которого нет в тракте; замена - `DpiKey` и уровни достоверности из [ENGINE.md](ENGINE.md).
 
-| Что | Где | Почему | Чем заменяется |
-| --- | --- | --- | --- |
-| `PacketEngine`, `PacketEngineSession`, `PacketTunnel`, `SocketProtector` | `engine/.../PacketEngine.kt` | Не используются; тракт построен иначе | Ничем |
-| `superviseEngine()`, поля `engineMonitor` и `engineEmergencyStop`, шаги очистки `EngineTunnel`, `EngineStop` и `cleanupStage(CleanupStep.EngineMonitor)` в службе; функция `monitorEngine()`; `EngineHealthSource`, `EngineEmergencyStop`, `EngineWatchdog`, `EngineSignal`, `EngineHealth`, `EngineNetwork`; тест `EngineWatchdogTest` | `vpn/.../AdaptiveVpnService.kt`, `vpn/.../EngineHealthMonitor.kt`, `engine/.../EngineHealth.kt`, `engine/src/test/.../EngineWatchdogTest.kt` | Не подключены; здоровье HEV уже отслеживает `inspectTransport` - второй механизм дублирует первый | Существующий опрос HEV |
-| `ClientHelloSplitWriter`, флаг `splitClientHelloForTest`, тест `ClientHelloSplitWriterTest` и два сценария с `splitClientHelloForTest = true` в `HevLoopbackRelayTest` | ветка `stage3-experimental` | Фиксированный разрез на 3-м байте - шаблон; удерживает данные до 6 байт | Операции из [OPERATIONS.md](OPERATIONS.md) в конвейере потока |
-| `send_once.c`, `send_once.h`, `send_once_test.c` и шаг их сборки в `.github/workflows/transport-host.yml` | `tools/native-send/`, ветка `stage3-experimental` | Дублирует `Os.sendto` | Нативная функция чтения `TCP_INFO` (этап 1.6); шаг workflow заменяется её тестом |
-| `ResourceIdentity` в текущем виде и `ResourceIdentityTest` | ветка `stage3-experimental` | Требует UID, которого нет в тракте; при ECH отбрасывает видимое имя | `DpiKey` и уровни достоверности из [ENGINE.md](ENGINE.md) |
+**Формат сохранённых данных (п. 27 AGENTS.md).** Значения enum `CleanupStep.EngineMonitor`, `EngineTunnel`, `EngineStop` и `DiagnosticCode.EngineHung`, `EngineFailed` не удалены: они читаются из сохранённой истории и журнала ошибок (`CleanupStep.valueOf` в `VpnCleanupDetails`). `VpnController.engineConfirmed` после удаления `superviseEngine` не вызывается; решение по нему - отдельно.
 
 Сохраняются и дорабатываются: `ResourceProbe` (1.3), `ClientHelloInspector` (1.4), `RelayHandshakeInput` (вместе с 1.1), стенд целостности и его workflow.
 

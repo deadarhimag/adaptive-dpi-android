@@ -45,7 +45,6 @@ class HevLoopbackRelay internal constructor(
     private val failures: TransportFailureReporter,
     startAccepting: (ServerSocket, Thread) -> Unit,
     tcpIdleTimeoutMillis: Long = 60_000,
-    private val splitClientHelloForTest: Boolean = false,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     constructor(
@@ -227,20 +226,14 @@ class HevLoopbackRelay internal constructor(
                     }
                 }
                 val buffer = ByteArray(TCP_BUFFER)
-                val split = if (splitClientHelloForTest) ClientHelloSplitWriter(connection::write) else null
                 while (true) {
                     val size = observe(TCP_READ, peer) { input.read(buffer) }
                     if (size < 0) {
                         peer.eof = true
-                        split?.finish()
                         break
                     }
-                    if (split == null) {
-                        connection.write(buffer, 0, size)
-                        idle.forwarded()
-                    } else if (split.write(buffer, size)) {
-                        idle.forwarded()
-                    }
+                    connection.write(buffer, 0, size)
+                    idle.forwarded()
                 }
                 connection.shutdownOutput()
                 response.get()

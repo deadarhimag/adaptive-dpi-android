@@ -52,7 +52,7 @@
 
 | Модуль, пакет | Классы | Что делают | Опора на существующее |
 | --- | --- | --- | --- |
-| `:engine`, `org.adaptivedpi.android.engine` | `HevLoopbackRelay` (есть) | Точка встраивания конвейера - функция `tcp()`: после `reply(output, 0)` первое чтение клиента идёт в `FlowPipeline`, ветка `ClientHelloSplitWriter` удаляется | Релей, `OutboundTransport`, `TransportFailure` |
+| `:engine`, `org.adaptivedpi.android.engine` | `HevLoopbackRelay` (есть) | Точка встраивания конвейера - функция `tcp()`: после `reply(output, 0)` первое чтение клиента идёт в `FlowPipeline` (сейчас там обычное копирование) | Релей, `OutboundTransport`, `TransportFailure` |
 | `:engine`, `...engine.flow` | `FlowPipeline`, `FlowClassifier`, `MeasureExecutor`, `FlowOutcomeRecorder` | Захват префикса, ключ DPI, применение меры, сбор исхода | `ClientHelloInspector` (расширить результат: смещение и длина SNI, число записей, размер, ALPN) |
 | `:engine`, `...engine.ops` | `SocketOps` (интерфейс), операции Kotlin | Операции каталога; всё платформенное - через `SocketOps` | Шаблон `OutboundSocketPolicy`: интерфейс в `:engine`, реализация в `:vpn` |
 | `:analysis` (новый JVM-модуль), `org.adaptivedpi.android.analysis` | `AnalysisActor`, `HypothesisSpace`, `ProbePlanner`, `MeasureSynthesizer`, `KeyLifecycle`, `Budgets`, `ProfileStore`, `ReasoningJournal` | Всё из [ENGINE.md](ENGINE.md); раздел 28 - алгоритмы | Только `kotlinx-coroutines-core` (уже в проекте) |

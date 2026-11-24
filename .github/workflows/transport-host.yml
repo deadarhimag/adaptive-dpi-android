@@ -15,12 +15,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Проверить обычную отправку и обработку ошибок C
-        run: |
-          cc -std=c17 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
-            tools/native-send/send_once.c tools/native-send/send_once_test.c -o "$RUNNER_TEMP/send-once-test"
-          ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 timeout 10s "$RUNNER_TEMP/send-once-test"
-
       - name: Проверить содержимое TCP, UDP и HTTPS на localhost
         run: |
           fixture="$(mktemp -d)"
