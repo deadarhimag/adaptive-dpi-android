@@ -196,24 +196,33 @@ class ExtendedTunTransportInstrumentedTest {
         val session = start(activity)
         DatagramSocket().use { socket ->
             socket.soTimeout = 5_000
-            val payload = byteArrayOf(42)
-            socket.send(DatagramPacket(payload, payload.size, ip, UDP_ECHO))
-            val reply = DatagramPacket(ByteArray(8), 8)
-            socket.receive(reply)
-            assertEquals(1, reply.length)
-            assertEquals(payload.single(), reply.data[reply.offset])
+            // Отправляем вторую датаграмму, пока поток ответа ждёт на том же сокете.
+            for (value in listOf(42.toByte(), 43.toByte())) {
+                val payload = byteArrayOf(value)
+                socket.send(DatagramPacket(payload, payload.size, ip, UDP_ECHO))
+                val reply = DatagramPacket(ByteArray(8), 8)
+                socket.receive(reply)
+                assertEquals(1, reply.length)
+                assertEquals(value, reply.data[reply.offset])
 
-            // Оставляем клиентский сокет открытым и ждём фактического входа релея в poll().
-            awaitCondition(5_000) {
-                Thread.getAllStackTraces().any { (thread, stack) ->
-                    thread.name.startsWith("HEV response ") &&
-                        stack.any { it.methodName.startsWith("poll") } &&
-                        stack.any { it.className.endsWith("OutboundTransport\$UdpConnection") && it.methodName == "receive" }
+                awaitCondition(5_000) {
+                    Thread.getAllStackTraces().any { (thread, stack) ->
+                        thread.name.startsWith("HEV response ") &&
+                            stack.any { it.methodName.startsWith("poll") || it.methodName == "recvfrom" } &&
+                            stack.any { it.className.endsWith("OutboundTransport\$UdpConnection") && it.methodName == "receive" }
+                    }
                 }
             }
+            awaitSnapshot { it.sessionId == session && it.openedUdp == 1L }
             stop()
+            assertEquals(1L, snapshot().closedUdp)
         }
-        assertTrue(awaitTransportJournal(session).any { it.contains("RECEIVE") && it.contains("SESSION_CANCELLED") })
+        val journal = awaitTransportJournal(session)
+        // Нативное завершение HEV может закрыть поток до вызова relay.close().
+        assertTrue("Ожидалась отмена UDP RECEIVE при Stop. Журнал: $journal", journal.any {
+            it.contains("UDP / RECEIVE /") && it.contains("(CANCELLED, EXPECTED)") &&
+                (it.contains("SESSION_CANCELLED") || it.contains("FLOW_CANCELLED"))
+        })
         Log.i(TAG, "UDP: Stop завершил активное ожидание ответа, соединения освобождены")
     }
 

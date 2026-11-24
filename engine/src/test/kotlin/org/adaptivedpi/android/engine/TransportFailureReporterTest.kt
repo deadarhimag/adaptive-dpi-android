@@ -32,6 +32,19 @@ class TransportFailureReporterTest {
     }
 
     @Test
+    fun kernelReadTimeoutKeepsItsCategoryWithEagainCause() {
+        val site = TransportSite(TransportSubsystem.UDP, TransportOperation.RECEIVE, TransportProtocol.UDP)
+        val records = mutableListOf<TransportFailure>()
+        val reporter = TransportFailureReporter({ 11 }, records::add)
+        reporter.recordError(site, SocketTimeoutException())
+        reporter.recordError(site, SocketException())
+        assertEquals(TransportCategory.TIMEOUT, records[0].category)
+        assertEquals(TransportCode.TIMEOUT, records[0].code)
+        assertEquals(11, records[0].errno)
+        assertEquals(TransportCategory.BACKPRESSURE, records[1].category)
+    }
+
+    @Test
     fun badDescriptorAndNativeCancellationRequireEvidenceOfClose() {
         val site = TransportSite(TransportSubsystem.DNS, TransportOperation.RECEIVE, TransportProtocol.UDP, TransportDirection.INBOUND)
         for (errno in listOf(9, 125)) {

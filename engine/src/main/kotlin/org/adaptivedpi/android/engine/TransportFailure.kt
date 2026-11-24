@@ -142,6 +142,8 @@ class TransportFailureReporter(
             nativeError == ErrnoCategory.ENOTCONN && site.operation == TransportOperation.SHUTDOWN_OUTPUT && peerEof ->
                 TransportCategory.CLOSED to TransportCode.PEER_EOF
             fallback == TransportCategory.CLEANUP -> fallback to codeFromType
+            error is SocketTimeoutException && nativeError == ErrnoCategory.EAGAIN ->
+                TransportCategory.TIMEOUT to TransportCode.TIMEOUT
             nativeError?.category != null -> nativeError.category to TransportCode.UNKNOWN
             nativeError == ErrnoCategory.EBADF || nativeError == ErrnoCategory.ECANCELED -> TransportCategory.INTERNAL to codeFromType
             error is SocketTimeoutException -> TransportCategory.TIMEOUT to TransportCode.TIMEOUT

@@ -4,6 +4,11 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructTimeval
 import android.util.Log
 import org.adaptivedpi.android.engine.OutboundSocketPolicy
 import org.adaptivedpi.android.engine.TransportCategory
@@ -35,6 +40,21 @@ internal class VpnOutboundSocketPolicy(
         socket.reuseAddress
         if (!vpn.protect(socket)) rejectProtection("UDP")
         bind { network.bindSocket(socket) }
+    }
+
+    override fun configureUdpReadTimeout(socket: DatagramSocket, timeoutMillis: Int) {
+        // Java-тайм-аут Android использует poll(), который может пережить close().
+        // Тайм-аут ядра оставляет receive в recvfrom(), где close будит заблокированный поток.
+        ParcelFileDescriptor.fromDatagramSocket(socket).use { descriptor ->
+            try {
+                Os.setsockoptTimeval(
+                    descriptor.fileDescriptor, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
+                    StructTimeval.fromMillis(timeoutMillis.toLong()),
+                )
+            } catch (error: ErrnoException) {
+                throw IOException("Не удалось настроить тайм-аут UDP.", error)
+            }
+        }
     }
 
     private fun rejectProtection(protocol: String): Nothing {
