@@ -146,7 +146,9 @@ class HevLoopbackRelay internal constructor(
                 DataInputStream(socket.getInputStream()) to DataOutputStream(socket.getOutputStream())
             }
             observe(AUTH, peer) {
-                authenticate(input, output)
+                val handshake = DataInputStream(RelayHandshakeInput(input, socket::setSoTimeout, peer.acceptedAt))
+                authenticate(handshake, output)
+                socket.soTimeout = 5_000
             }
             val (command, endpoint) = observe(CONTROL_READ, peer) {
                 requireProtocol(input.readUnsignedByte() == 5)
@@ -561,6 +563,7 @@ class HevLoopbackRelay internal constructor(
     }
 
     private class Peer(val socket: Socket) {
+        val acceptedAt = System.nanoTime()
         val cancellation = AtomicReference<TransportCancellation?>()
         @Volatile var eof = false
     }
