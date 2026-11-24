@@ -103,6 +103,65 @@ class ResourceProbeTest {
         }
     }
 
+    @Test
+    fun triesNextAddressAfterIpv6ConnectFails() = runBlocking<Unit> {
+        val ipv6 = InetAddress.getByAddress(ByteArray(16).apply { this[15] = 1 })
+        val probe = ResourceProbe(resolve = { arrayOf(ipv6, loopback) }, cleartextAllowed = { true })
+        serve(ServerSocket(0, 1, loopback), { respond(it, 200, "expected") }) { port ->
+            val result = probe.check(URI("http://localhost:$port/"), sha256("expected"))
+            val attempts = result.filter { it.stage == ProbeStage.TCP }
+            assertEquals(listOf(1, 2), attempts.map { it.attempt })
+            assertEquals(listOf(ProbeStatus.NETWORK_ERROR, ProbeStatus.OK), attempts.map { it.status })
+            assertEquals(ProbeStatus.OK, result.last().status)
+        }
+    }
+
+    @Test
+    fun usesOverallDeadlineWhenStageBudgetIsLonger() = runBlocking<Unit> {
+        val probe = ResourceProbe(resolve = { arrayOf(loopback) }, cleartextAllowed = { true })
+        serve(ServerSocket(0, 1, loopback), {
+            requestHeaders(it)
+            assertEquals(-1, it.getInputStream().read())
+        }) { port ->
+            val result = probe.check(URI("http://localhost:$port"), totalTimeoutMillis = 700)
+            assertEquals(ProbeStage.HTTP, result.last().stage)
+            assertEquals(ProbeStatus.TIMEOUT, result.last().status)
+            assertTrue(result.last().elapsedMillis < 2_000)
+        }
+    }
+
+    @Test
+    fun followsSameOriginRedirectAndRejectsExternalOrigin() = runBlocking<Unit> {
+        val probe = ResourceProbe(resolve = { arrayOf(loopback) }, cleartextAllowed = { true })
+        ServerSocket(0, 2, loopback).use { listener ->
+            listener.soTimeout = 3_000
+            val replies = FutureTask {
+                listener.accept().use { client ->
+                    client.soTimeout = 3_000
+                    requestHeaders(client)
+                    client.getOutputStream().write("HTTP/1.0 302 Redirect\r\nLocation: /resource\r\n\r\n".toByteArray())
+                }
+                listener.accept().use { client ->
+                    client.soTimeout = 3_000
+                    respond(client, 200, "expected")
+                }
+            }
+            Thread(replies, "Probe redirect fixture").apply { isDaemon = true; start() }
+            val result = probe.check(URI("http://localhost:${listener.localPort}/"), sha256("expected"))
+            assertEquals(listOf(ProbeStatus.REDIRECT, ProbeStatus.OK), result.filter { it.stage == ProbeStage.HTTP }.map { it.status })
+            assertEquals(1, result.last().hop)
+            replies.get(3, TimeUnit.SECONDS)
+        }
+        serve(ServerSocket(0, 1, loopback), {
+            requestHeaders(it)
+            it.getOutputStream().write("HTTP/1.0 302 Redirect\r\nLocation: http://outside.invalid/\r\n\r\n".toByteArray())
+        }) { port ->
+            val result = probe.check(URI("http://localhost:$port"))
+            assertEquals(1, result.count { it.stage == ProbeStage.DNS })
+            assertEquals(ProbeStatus.INDETERMINATE, result.last().status)
+        }
+    }
+
     private suspend fun serve(listener: ServerSocket, responder: (Socket) -> Unit, check: suspend (Int) -> Unit) {
         listener.use {
             listener.soTimeout = 5_000
