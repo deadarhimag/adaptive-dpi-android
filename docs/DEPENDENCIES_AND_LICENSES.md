@@ -15,6 +15,12 @@
 
 Прямой просмотр magisk-zapret2 в веб-инструменте и загрузка `/raw/` оказались недоступны. `git ls-remote` вернул ревизию, а `docs/README.md`, `docs/LICENSING.md` и `docs/LICENSE.md` на этой ревизии прочитаны через [API Forgejo по исходному адресу](https://git-p2.zapret.moe/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/contents/docs/LICENSING.md?ref=378947743bd5e6018097c3e89916c28fa670fc7d). Лицензии загружаемых внешних бинарников, Lua и импортированных активов не проверены по отдельности и не входят в эту оценку.
 
+## Библиотеки Kotlin
+
+| Библиотека и версия | Лицензия | Назначение |
+| --- | --- | --- |
+| `org.jetbrains.kotlinx:kotlinx-serialization-json` 1.11.0, тег `v1.11.0` (`6956af2`), плагин `org.jetbrains.kotlin.plugin.serialization` | Apache 2.0 (`LICENSE.txt` в теге) | JSON хранения анализа и экспорта ([ARCHITECTURE.md](ARCHITECTURE.md), «Реализация модулей»). Выпуск 1.11.0 собран на Kotlin 2.3.20; 1.12.0 собран на Kotlin 2.4.10 и с Kotlin проекта 2.3.21 не берётся |
+
 ## Вложенные компоненты hev-socks5-tunnel
 
 Список получен из [Git-подмодулей](https://github.com/heiher/hev-socks5-tunnel/blob/fc3f90040b8d4b537341c96538669a9b2e35d514/.gitmodules), зафиксированных в дереве указанной ревизии. Для четырёх подмодулей проверены корневые тексты лицензий.

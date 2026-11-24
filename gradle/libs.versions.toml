@@ -9,6 +9,8 @@ androidx-core = "1.15.0"
 compose-bom = "2024.06.00"
 lifecycle = "2.9.4"
 coroutines = "1.10.2"
+# kotlinx.serialization 1.11.0 собран на Kotlin 2.3.20 - совместим с Kotlin проекта 2.3.x.
+serialization = "1.11.0"
 junit = "4.13.2"
 androidx-test = "1.7.0"
 
@@ -22,6 +24,7 @@ compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
 lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-test-core = { module = "androidx.test:core", version.ref = "androidx-test" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidx-test" }
@@ -32,3 +35,4 @@ android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
