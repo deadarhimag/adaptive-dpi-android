@@ -18,7 +18,7 @@
 
 | Изменено | Обязательно |
 | --- | --- |
-| Код Kotlin, C, Gradle | `testDebugUnitTest :engine:test` и `assembleDebug`; для общего транспортного кода (`HevLoopbackRelay`, `OutboundTransport`, `AdaptiveVpnService`, мост HEV) - ещё базовый и расширенный наборы AVD |
+| Код Kotlin, C, Gradle | `testDebugUnitTest :engine:test` и `assembleDebug`; для общего транспортного кода (`HevLoopbackRelay`, `OutboundTransport`, `AdaptiveVpnService`, мост HEV) - ещё базовый и расширенный наборы AVD. Новый или переименованный инструментальный тест вносится в списки `verify-android-test-results.py` (базовый набор) или `verify-extended-transport-results.py` (расширенный): они сверяют точные имена |
 | Workflow и скрипты CI | `actionlint`, `bash -n`, синтаксис Python; прогон затронутого workflow |
 | Только документация (`*.md`, `docs/**`, `LICENSE`) | Сборка не нужна; ссылки и согласованность документов между собой. Исключение - `docs/PIXEL7_TESTING_RU.md`: он входит в артефакт сборки |
 | Выпуск | Задача 5.7 |
