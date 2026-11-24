@@ -70,3 +70,20 @@
 Проверка libcore выявила дополнительное ограничение: адаптер `DatagramSocketAdaptor` использует общий `blockingLock()` для send и receive, удерживая его при ожидании датаграммы. Чтобы сохранить двунаправленный UDP, следующий коммит возвращает обычный сокет и переносит только Android-тайм-аут в `SO_RCVTIMEO`. Политика настраивает его после protect и bind через публичные API Android 29. Временная копия FD закрывается до connect. Механизм libcore для `recvfrom()` различает сигнал закрытия через `AsynchronousCloseMonitor` и обычный `EINTR`. На JVM сохраняется прежняя настройка `soTimeout`. Классификация отличает `SocketTimeoutException` с причиной `EAGAIN` от реального backpressure. [Блокировка адаптера](https://android.googlesource.com/platform/libcore/+/android-14.0.0_r1/ojluni/src/main/java/sun/nio/ch/DatagramSocketAdaptor.java#139) · [Обработка recvfrom](https://android.googlesource.com/platform/libcore/+/android-14.0.0_r1/luni/src/main/native/libcore_io_Linux.cpp#154) · [API Android](https://developer.android.com/reference/android/system/Os#setsockoptTimeval(java.io.FileDescriptor,int,int,android.system.StructTimeval)).
 
 Новая регрессия проверяет два обмена по одной UDP-ассоциации. Второй запрос отправляется при заблокированном чтении, а Stop подаётся во время ожидания после второго обмена. Проверяются ноль активных соединений, ровно одна закрытая ассоциация и ожидаемая отмена UDP RECEIVE. При Stop поток запроса может закрыть ассоциацию по EOF от HEV до закрытия релея. Тогда законный код — `FLOW_CANCELLED`, при закрытии всего транспорта — `SESSION_CANCELLED`. При несовпадении тест выводит безопасный снимок записей того же сеанса.
+
+### Android CI 33.1, контроль после исправления
+
+[Успешный запуск 33.1](https://github.com/deadarhimag/adaptive-dpi-android/actions/runs/45334207987) проверил `6b869fbb7808813cf798c5c5ddf0e962ee54ec54`. База 21/21, расширение 7/7, ошибок и пропусков нет. Локально 116 JVM-тестов, в CI прошли JVM, lint debug/release и сборка трёх APK. Суммарное время семи расширенных тестов — 286,048 с. [База](https://github.com/deadarhimag/adaptive-dpi-android/actions/runs/45334207987/artifacts/14893228590) · [XML, журналы и стенд](https://github.com/deadarhimag/adaptive-dpi-android/actions/runs/45334207987/artifacts/14893858446).
+
+| Проверка | Наблюдение |
+| --- | --- |
+| TCP через TUN | Загрузка 70 026 мс, отправка 70 001 мс, совпали 281 контрольное число в каждом направлении. Полный простой закрыл сокет через 59 511 мс. |
+| UDP и Stop | Два UDP-ответа на одной ассоциации, закрытие во время ожидающего чтения, освобождение соединений и классификация отмены. |
+| TCP Stop | Прошли Stop/prepare и Stop/connect. Счётчик стенда — 11 SYN. |
+| JNI | Опрос предупредил о задержке через 5 с. На `NativeStop` был виден диагностический порог, затем после освобождения mutex транспорт остановился и запустился заново. |
+| Нагрузка | 10 циклов, по 120 TCP, UDP и DNS-обменов. FD 104 → 103, сокеты 11 → 11, TUN FD 0 → 0, потоки транспорта 0 → 0. После каждого Stop проверено ноль активных соединений. |
+| HTTPS | В базовом наборе отдельный UID передал TCP, UDP, DNS и получил контрольное содержимое HTTPS через TUN в обоих сеансах. |
+
+Скачанные APK перепроверены по SHA-256, `apksigner` и `llvm-nm`. Debug — 0.1.1 (34), AndroidTest предназначен для `org.adaptivedpi.android`. Оба подписаны сертификатом `fcc54b93089dbf3467ec6c6edc6cd03766cdae5a6cb98e104fdb30b6ab9675de`. Unsigned release — 0.1.1 (25), `apksigner` подтверждает отсутствие подписи. HEV присутствует в arm64-v8a и x86_64, тестовый JNI-экспорт есть в debug и отсутствует в release. [Debug APK, тесты и скрипт Pixel 7](https://github.com/deadarhimag/adaptive-dpi-android/actions/runs/45334207987/artifacts/14893199628) · [Unsigned release](https://github.com/deadarhimag/adaptive-dpi-android/actions/runs/45334207987/artifacts/14893209490).
+
+Транспортный этап подтверждён на Android 14 AVD. Повторная проверка Pixel 7 Android 17 требуется для реального arm64, смены физических сетей и Stop во время UDP. Отдельная работа с пробами и экспериментами остаётся в локальных коммитах.
