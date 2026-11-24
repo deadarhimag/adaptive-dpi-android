@@ -61,6 +61,44 @@
 | шум p | Параметр любой модели: срабатывание с вероятностью p |
 | `loss` | Без DPI, но с потерями пакетов (netem) |
 
+### Схема каталога моделей [план]
+
+Файл `analysis/src/main/resources/catalog/models.json` - единственный источник моделей для `:analysis` и стенда. Интерпретатор один на обоих сторонах: Kotlin `MechanismModel.predict(v)` и Python-обработчик стенда исполняют одни и те же поля; тест сверяет их предсказания на общем наборе вариантов.
+
+```json
+{
+  "schema": 1,
+  "models": [
+    {
+      "id": "sni-first-record",
+      "level": "record",
+      "match": { "on": "sni", "where": "first-record", "name": "exact-ci" },
+      "action": "rst",
+      "params": {}
+    },
+    {
+      "id": "residual",
+      "level": "address",
+      "match": { "on": "after-trigger", "seconds": "param:t" },
+      "action": "drop",
+      "params": { "t": [10, 30, 60, 120] }
+    }
+  ]
+}
+```
+
+| Поле | Значения |
+| --- | --- |
+| `level` | `packet` (один TCP-сегмент, сырые байты), `record` (одна TLS-запись, сегменты собраны), `stream` (поток и записи собраны), `address`, `dns`, `udp`, `http`, `server`, `network` |
+| `match.on` | `none`, `address`, `sni`, `sni-suffix`, `dns-name`, `quic-sni`, `http-host`, `after-trigger`, `volume` |
+| `match.where` | `first-segment`, `first-record`, `any` |
+| `match.name` | `exact`, `exact-ci` (без учёта регистра), `suffix:<уровень>` |
+| `action` | `pass`, `rst`, `drop`, `stub-http`, `stub-tls` (чужой сертификат), `dns-spoof`, `stop-after-bytes`, `reply-451` |
+| `params` | Имя → список допустимых значений; параметрические пробы выбирают значение из этого списка |
+| Шум | Не поле модели: задаётся сценарием стенда и `ModelProbePort` (`p`) |
+
+Модель `unknown` в файл не входит: её предсказание - все исходы, это свойство интерпретатора. Новая модель добавляется только вместе с тестом стенда.
+
 ### Критерии приёмки движка анализа
 
 Это критерии того, что движок действительно анализирует, а не перебирает.
