@@ -139,6 +139,23 @@ class DiagnosticCenterTest {
     }
 
     @Test
+    fun recordWrittenBeforeCodeCleanupWithRetainedValuesIsStillReadable() {
+        // Строка в формате журнала до очистки 1.2: значения EngineHung и EngineMonitor сохранены ради неё.
+        val id = UUID.randomUUID()
+        val cleanup = "-;4100;true;true;-;0;0;-;EngineMonitor:IOException,EngineTunnel:Other"
+        File(temporary.root, "journal").writeText(listOf(
+            "1", id, System.currentTimeMillis(), "EngineHung", "0.1.0", 34, "14", "Stopping", "Yes", "No",
+            "IOException", false, true, "", cleanup,
+        ).joinToString("\t") + "\n")
+
+        val read = DiagnosticJournal(temporary.root).read().single()
+        assertEquals(id, read.id)
+        assertEquals(DiagnosticCode.EngineHung, read.code)
+        assertEquals(listOf(CleanupStep.EngineMonitor, CleanupStep.EngineTunnel), read.cleanup?.issues?.map { it.step })
+        assertTrue(read.report().contains("EngineMonitor"))
+    }
+
+    @Test
     fun rotatesByCountAndPreservesTheMostRecentItems() {
         val journal = DiagnosticJournal(temporary.root, maxEntries = 3)
         val center = center(journal)
