@@ -507,6 +507,12 @@ class HevLoopbackRelay internal constructor(
 
     fun socketClosures(): SocketCloseSummary = closures.snapshot() + transport.socketClosures()
 
+    /** Повтор закрытия сокетов релея и исходящего транспорта, освобождение которых не подтвердилось. */
+    fun retryUnconfirmedClosures() {
+        closures.retryUnconfirmed { failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP) }
+        transport.retryUnconfirmedClosures()
+    }
+
     /** Владелец ждёт фактического освобождения на фоновом потоке. */
     fun awaitDrained() {
         val owner = Thread.currentThread()

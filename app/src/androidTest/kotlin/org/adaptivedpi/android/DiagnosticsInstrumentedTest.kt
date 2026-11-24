@@ -43,6 +43,23 @@ class DiagnosticsInstrumentedTest {
     private val notifications = checkNotNull(context.getSystemService(NotificationManager::class.java))
 
     @Test
+    fun pendingCombinedReportSnapshotIsAPrivateFileUntilDeleted() {
+        val report = "Снимок отчёта\nстрока 2 ✓"
+        val name = DiagnosticExports.storePending(context, report)
+        val file = File(File(context.noBackupFilesDir, "pending-export"), name)
+        try {
+            assertTrue(file.isFile)
+            assertEquals(report, DiagnosticExports.readPending(context, name))
+            assertEquals(null, DiagnosticExports.readPending(context, "../$name"))
+            DiagnosticExports.deletePending(context, name)
+            assertFalse(file.exists())
+            assertEquals(null, DiagnosticExports.readPending(context, name))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
     fun sharesOnlyAReadableDiagnosticCacheFileAndUsesTheDocumentPickerForSaving() {
         val event = record(DiagnosticCode.ConsentFailed)
         val outside = File.createTempFile("private-", ".txt", context.cacheDir)

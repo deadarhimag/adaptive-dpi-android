@@ -51,6 +51,48 @@ class OutboundTransportTest {
     }
 
     @Test(timeout = 15_000)
+    fun pendingUdpPreparationStaysUnconnectedWhenStopIsAcceptedDuringPreparation() {
+        val preparing = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val pendingSocket = AtomicReference<DatagramSocket>()
+        val policy = object : OutboundSocketPolicy by localPolicy {
+            override fun prepare(socket: DatagramSocket) {
+                localPolicy.prepare(socket)
+                pendingSocket.set(socket)
+                preparing.countDown()
+                check(resume.await(TIMEOUT.toLong(), TimeUnit.MILLISECONDS))
+            }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            udpServer().use { peer ->
+                transport().use { transport ->
+                    transport.updateNetwork(policy)
+                    val request = executor.submit<TransportSocketException> {
+                        assertThrows(TransportSocketException::class.java) { transport.connectUdp(loopback, peer.localPort) }
+                    }
+                    assertTrue("Подготовка сокета должна начаться до Stop", preparing.await(3, TimeUnit.SECONDS))
+                    val socket = checkNotNull(pendingSocket.get())
+                    transport.stopAcceptingNewConnections()
+                    resume.countDown()
+
+                    val error = request.get(TIMEOUT.toLong(), TimeUnit.MILLISECONDS)
+                    assertEquals(TransportCode.SESSION_CANCELLED, error.code)
+                    assertEquals(TransportCategory.CANCELLED, error.category)
+                    assertFalse("Сокет не должен подключиться после принятого Stop", socket.isConnected)
+                    assertTrue(socket.isClosed)
+                    assertEquals(0, transport.statistics().pending)
+                    assertEquals(0L, transport.statistics().openedUdp)
+                }
+            }
+        } finally {
+            resume.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test(timeout = 15_000)
     fun pendingTcpPreparationCannotConnectAfterStopEvenBeforeBackgroundCleanup() =
         verifyStopDuringTcpPreparation(closeDuringPreparation = false)
 

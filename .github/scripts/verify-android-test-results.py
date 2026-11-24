@@ -9,11 +9,28 @@ from xml.etree import ElementTree
 PACKAGE = "org.adaptivedpi.android."
 CONSENT_CLASS = PACKAGE + "VpnConsentInstrumentedTest"
 CONSENT_METHOD = "grantsVpnThroughAndroidConfirmationDialog"
+# Точные имена: замена одного теста другим при том же количестве должна обнаруживаться.
+# При намеренном изменении набора список обновляется вместе с тестами.
 CLASSES = {
-    PACKAGE + "BuildAndDiagnosticsUiTest": 7,
-    PACKAGE + "VpnLifecycleInstrumentedTest": 6,
-    PACKAGE + "TunTransportInstrumentedTest": 1,
-    PACKAGE + "ApplicationTransportInstrumentedTest": 1,
+    PACKAGE + "BuildAndDiagnosticsUiTest": (
+        "uiTracksTheRunningServiceAndReturnsToIdleAfterStop",
+        "diagnosticsShowsExportAndVpnHistoryWithoutScrollingPastTheStatus",
+        "individualErrorUsesTheSameExportActionsAndReturnsToItsReportOnCancel",
+        "transportExportOffersSaveShareAndCancelFromOneButton",
+        "aboutShowsBuildNumberAndPackagedCommit",
+        "anotherVpnDialogOffersThreeIndependentActions",
+        "configurationRestrictionOffersSettingsWithoutSwitching",
+    ),
+    PACKAGE + "VpnLifecycleInstrumentedTest": (
+        "recreatingTheActivityDoesNotStartVpn",
+        "oneHundredAndroidServiceSessionsRejectDuplicateStartsAndReachIdle",
+        "immediateStopWhileStartingReleasesServiceAndAllowsNewSession",
+        "androidServiceDestructionCleansUpBeforeRestart",
+        "missingTargetPackageFailsStartupAndAllowsAnotherSession",
+        "activeSessionSurvivesRecreationAndOldNotificationCannotStopItsSuccessor",
+    ),
+    PACKAGE + "TunTransportInstrumentedTest": ("tcpUdpAndDnsTraverseTunAcrossTwoSessions",),
+    PACKAGE + "ApplicationTransportInstrumentedTest": ("separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions",),
 }
 DIAGNOSTICS_CLASS = PACKAGE + "DiagnosticsInstrumentedTest"
 DIAGNOSTICS_METHODS = (
@@ -22,6 +39,7 @@ DIAGNOSTICS_METHODS = (
     "savesAndSharesIdenticalTransportTextAndKeepsRecentAttachmentsReadable",
     "parallelLargeTxtAttachmentsKeepIndependentUrisNamesAndBytes",
     "criticalErrorPostsOneNotificationAndOpensItsDiagnosticEvent",
+    "pendingCombinedReportSnapshotIsAPrivateFileUntilDeleted",
 )
 
 
@@ -52,12 +70,12 @@ def verify(results, consent_log):
                 raise ValueError(f"Тест повторён, пропущен или завершился ошибкой: {key}")
             cases.add(key)
 
+    expected = {(klass, method) for klass, methods in {**CLASSES, DIAGNOSTICS_CLASS: DIAGNOSTICS_METHODS}.items()
+                for method in methods}
+    missing, unexpected = sorted(expected - cases), sorted(cases - expected)
+    if missing or unexpected:
+        raise ValueError(f"Набор Android-тестов не совпадает с ожидаемым: не выполнены {missing}, лишние {unexpected}")
     counts = Counter(klass for klass, _ in cases)
-    if counts != Counter({**CLASSES, DIAGNOSTICS_CLASS: len(DIAGNOSTICS_METHODS)}):
-        raise ValueError(f"Фактический набор Android-тестов не совпадает с ожидаемым: {dict(counts)}")
-    for method in DIAGNOSTICS_METHODS:
-        if (DIAGNOSTICS_CLASS, method) not in cases:
-            raise ValueError(f"Не выполнен обязательный тест диагностики {method}")
 
     return {"executed": len(cases) + 1, "failed": 0, "skipped": 0, "mainSuite": len(cases),
             "systemVpnConsent": 1, "classes": dict(sorted({**counts, CONSENT_CLASS: 1}.items()))}

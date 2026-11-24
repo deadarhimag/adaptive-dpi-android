@@ -40,6 +40,9 @@ internal fun VpnEventJournal(history: VpnEventHistoryState, onClear: () -> Unit)
         if (history.droppedInformational > 0 || history.droppedCritical > 0) {
             Text(stringResource(R.string.vpn_journal_drops, history.droppedInformational, history.droppedCritical))
         }
+        if (history.unreadableRecords > 0) {
+            Text(stringResource(R.string.vpn_journal_unreadable, history.unreadableRecords), color = MaterialTheme.colorScheme.error)
+        }
         if (!history.loaded) {
             Text(stringResource(R.string.vpn_journal_loading))
         } else if (history.entries.isEmpty()) {

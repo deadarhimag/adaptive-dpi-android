@@ -199,7 +199,7 @@ internal class ExperimentalTransport(
             diagnostics.id, elapsedMillis, tunClosed, nativeReleased, null, relayNow,
             stats?.let { it.activeTcp + it.activeUdp }, stats?.pending,
             serviceIssues + cleanupIssues.map { (step, error) -> CleanupIssue(step, error) },
-            sockets = relay.socketClosures(),
+            sockets = relay.also { it.retryUnconfirmedClosures() }.socketClosures(),
         )
     }
 

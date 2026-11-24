@@ -24,6 +24,8 @@ internal enum class ProbeStage { DNS, TCP, TLS, HTTP, CONTENT }
 internal enum class ProbeStatus {
     OK, DNS_ERROR, NETWORK_ERROR, TLS_ERROR, HTTP_RESTRICTION, HTTP_ERROR,
     CONTENT_MISMATCH, TIMEOUT, INDETERMINATE, BUSY, REDIRECT,
+    /** Незашифрованный HTTP запрещён политикой Android на устройстве: сеть и сервер не участвовали. */
+    CLEARTEXT_BLOCKED,
 }
 
 internal data class ProbeResult(
@@ -80,7 +82,7 @@ internal class ResourceProbe(
         val host = requireNotNull(uri.host)
         val https = uri.scheme == "https"
         if (!https && !cleartextAllowed(host)) {
-            results.add(ProbeResult(ProbeStage.HTTP, ProbeStatus.HTTP_RESTRICTION, 0, hop = hop))
+            results.add(ProbeResult(ProbeStage.HTTP, ProbeStatus.CLEARTEXT_BLOCKED, 0, hop = hop))
             return null
         }
         val port = effectivePort(uri)

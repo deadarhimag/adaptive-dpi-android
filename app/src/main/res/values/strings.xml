@@ -89,6 +89,7 @@
     <string name="vpn_journal_title">Журнал событий VPN</string>
     <string name="vpn_journal_empty">В журнале пока нет событий VPN</string>
     <string name="vpn_journal_loading">Загрузка журнала событий</string>
+    <string name="vpn_journal_unreadable">Повреждённых записей на диске: %1$d. История неполная.</string>
     <string name="vpn_journal_drops">Пропущено событий. Обычные: %1$d, критические: %2$d.</string>
     <string name="vpn_journal_storage_error">Не удалось прочитать или записать журнал. Часть событий может быть недоступна после перезапуска.</string>
     <string name="vpn_journal_clear">Очистить журнал</string>

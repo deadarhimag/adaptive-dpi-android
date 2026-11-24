@@ -19,10 +19,9 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
@@ -32,6 +31,7 @@ import org.adaptivedpi.android.ui.VpnSwitchDialog
 import org.adaptivedpi.android.vpn.VpnAvailability
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
+import org.adaptivedpi.android.vpn.diagnostics.BuildIdentity
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticCode
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
@@ -49,7 +49,6 @@ class MainActivity : ComponentActivity() {
     private var pendingTransportTarget: String? = null
     private var pendingTransportApplication: String? = null
     private var pendingReportId: String? = null
-    private val pendingExport by lazy { ViewModelProvider(this)[PendingDiagnosticExport::class.java] }
     private val diagnosticRequest = mutableStateOf<UUID?>(null)
 
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -67,19 +66,20 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
             val id = pendingReportId
             pendingReportId = null
-            val snapshot = if (id == COMBINED_REPORT_ID) pendingExport.report.also { pendingExport.report = null } else null
-            if (uri == null || id == null) return@registerForActivityResult
-            val report = when (id) {
-                COMBINED_REPORT_ID -> snapshot
-                TRANSPORT_REPORT_ID -> null
-                else -> VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
-            }
-            if (report == null && id != TRANSPORT_REPORT_ID) {
-                Toast.makeText(this, R.string.diagnostic_missing, Toast.LENGTH_SHORT).show()
-                return@registerForActivityResult
-            }
+            if (id == null) return@registerForActivityResult
+            val pending = id.takeIf { it.startsWith(COMBINED_REPORT_PREFIX) }?.removePrefix(COMBINED_REPORT_PREFIX)
             lifecycleScope.launch {
                 try {
+                    if (uri == null) return@launch
+                    val report = when {
+                        pending != null -> withContext(Dispatchers.IO) { DiagnosticExports.readPending(applicationContext, pending) }
+                        id == TRANSPORT_REPORT_ID -> null
+                        else -> VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
+                    }
+                    if (report == null && id != TRANSPORT_REPORT_ID) {
+                        Toast.makeText(this@MainActivity, R.string.diagnostic_missing, Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
                     withContext(Dispatchers.IO) {
                         if (id == TRANSPORT_REPORT_ID) {
                             DiagnosticExports.saveTransportJournal(applicationContext, uri)
@@ -92,6 +92,10 @@ class MainActivity : ComponentActivity() {
                     throw error
                 } catch (error: Exception) {
                     reportExportError(DiagnosticCode.SaveFailed, error)
+                } finally {
+                    if (pending != null) withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { DiagnosticExports.deletePending(applicationContext, pending) }
+                    }
                 }
             }
         }
@@ -104,7 +108,8 @@ class MainActivity : ComponentActivity() {
         savedInstanceState?.getBundle(PENDING_VPN_SWITCH)?.let {
             pendingVpnSwitch.value = VpnSelection(it.getString(SWITCH_TARGET), it.getString(SWITCH_APPLICATION))
         }
-        pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)
+        // Пустой префикс - снимок ещё не был записан, системный диалог не открывался.
+        pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)?.takeUnless { it == COMBINED_REPORT_PREFIX }
         savedInstanceState?.getString(PREVIOUS_PROCESS)?.let(VpnController::activityRestored)
         diagnosticRequest.value = if (savedInstanceState == null) {
             VpnDiagnostics.eventId(intent)
@@ -256,22 +261,45 @@ class MainActivity : ComponentActivity() {
         settings.edit().putString("theme", mode.name).apply()
     }
 
-    private fun saveDiagnostic(event: DiagnosticEvent) = requestSave(event.id.toString(), DiagnosticExports.fileName(event))
+    private fun saveDiagnostic(event: DiagnosticEvent) {
+        requestSave(event.id.toString(), DiagnosticExports.fileName(event))
+    }
 
-    private fun saveCombinedReport(report: String) = requestSave(COMBINED_REPORT_ID, DiagnosticExports.COMBINED_FILE_NAME, report)
-
-    private fun requestSaveTransportJournal() = requestSave(TRANSPORT_REPORT_ID, DiagnosticExports.TRANSPORT_FILE_NAME)
-
-    private fun requestSave(id: String, fileName: String, report: String? = null) {
+    private fun saveCombinedReport(report: String) {
         if (pendingReportId != null) return
+        pendingReportId = COMBINED_REPORT_PREFIX
+        lifecycleScope.launch {
+            val name = try {
+                withContext(Dispatchers.IO) { DiagnosticExports.storePending(applicationContext, report) }
+            } catch (error: CancellationException) {
+                pendingReportId = null
+                throw error
+            } catch (error: Exception) {
+                pendingReportId = null
+                reportExportError(DiagnosticCode.SaveFailed, error)
+                return@launch
+            }
+            pendingReportId = null
+            if (!requestSave(COMBINED_REPORT_PREFIX + name, DiagnosticExports.COMBINED_FILE_NAME)) {
+                withContext(Dispatchers.IO) { runCatching { DiagnosticExports.deletePending(applicationContext, name) } }
+            }
+        }
+    }
+
+    private fun requestSaveTransportJournal() {
+        requestSave(TRANSPORT_REPORT_ID, DiagnosticExports.TRANSPORT_FILE_NAME)
+    }
+
+    private fun requestSave(id: String, fileName: String): Boolean {
+        if (pendingReportId != null) return false
         pendingReportId = id
-        if (id == COMBINED_REPORT_ID) pendingExport.report = report
-        try {
+        return try {
             createDiagnosticDocument.launch(fileName)
+            true
         } catch (exception: RuntimeException) {
             pendingReportId = null
-            if (id == COMBINED_REPORT_ID) pendingExport.report = null
             reportExportError(DiagnosticCode.SaveFailed, exception)
+            false
         }
     }
 
@@ -307,15 +335,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildCombinedReport(): String {
-        val version = runCatching {
+        val info = runCatching {
             @Suppress("DEPRECATION")
-            packageManager.getPackageInfo(packageName, 0).versionName
+            packageManager.getPackageInfo(packageName, 0)
         }.getOrNull()
+        // Тот же источник, что у экрана «О приложении»: ресурсы, которые задаёт app/build.gradle.kts.
+        val build = BuildIdentity(
+            info?.longVersionCode,
+            getString(R.string.build_number),
+            getString(R.string.build_git_revision).takeUnless { it == "unknown" }?.take(12),
+            getString(R.string.build_git_modified) == "true",
+        )
         return combinedDiagnosticReport(
-            version, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL,
+            info?.versionName, Build.VERSION.RELEASE, Build.VERSION.SDK_INT, Build.MODEL,
             VpnController.state.value, VpnEventHistory.state.value, VpnDiagnostics.events.value,
             VpnController.transport.value,
             TransportDiagnostics.state.value,
+            build,
         )
     }
 
@@ -357,15 +393,11 @@ class MainActivity : ComponentActivity() {
         private const val SWITCH_APPLICATION = "application"
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
-        private const val COMBINED_REPORT_ID = "combined"
+        private const val COMBINED_REPORT_PREFIX = "combined:"
         private const val TRANSPORT_REPORT_ID = "transport"
         private const val PREVIOUS_PROCESS = "previous_process"
         private const val PENDING_DIAGNOSTIC_REQUEST = "pending_diagnostic_request"
     }
 
     private data class VpnSelection(val target: String?, val application: String?)
-}
-
-internal class PendingDiagnosticExport : ViewModel() {
-    var report: String? = null
 }

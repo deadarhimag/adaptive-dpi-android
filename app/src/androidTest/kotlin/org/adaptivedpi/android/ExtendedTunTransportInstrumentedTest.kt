@@ -43,6 +43,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class ExtendedTunTransportInstrumentedTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -286,6 +287,7 @@ class ExtendedTunTransportInstrumentedTest {
         try {
             val (outbound, worker) = prepared.get(6, TimeUnit.SECONDS)
             if (!holdPreparation) {
+                val inode = socketInode(outbound)
                 awaitCondition(3_000) {
                     !outbound.isConnected && worker.stackTrace.any {
                         it.className == "java.net.Socket" && it.methodName == "connect"
@@ -293,7 +295,7 @@ class ExtendedTunTransportInstrumentedTest {
                 }
                 // Кадр Socket.connect появляется раньше системного вызова. SYN_SENT в ядре
                 // гарантирует, что SYN ушёл и стенд на хосте его посчитает.
-                awaitSynSent(port)
+                awaitSynSent(inode)
             }
             assertFalse(outbound.isConnected)
             requestStop()
@@ -402,25 +404,37 @@ class ExtendedTunTransportInstrumentedTest {
         }
     }
 
-    private fun awaitSynSent(port: Int) {
-        val remotePort = ":%04X".format(port)
+    /** Номер inode сокета: по нему строка /proc/net/tcp относится именно к этому сокету, а не к любому с тем же портом. */
+    private fun socketInode(socket: Socket): String =
+        ParcelFileDescriptor.fromSocket(socket).use { Os.readlink("/proc/self/fd/${it.fd}") }
+            .removePrefix("socket:[").removeSuffix("]").also { check(it.isNotEmpty() && it.all(Char::isDigit)) }
+
+    private fun awaitSynSent(inode: String) {
         awaitCondition(3_000) {
             listOf("/proc/net/tcp", "/proc/net/tcp6").any { path ->
                 shell("cat $path").lineSequence().drop(1).any { line ->
                     val fields = line.trim().split(WHITESPACE)
-                    // Сокет теста в TUN имеет адрес 192.0.2.1 и тот же удалённый порт: исключаем его,
-                    // чтобы засчитать только исходящий сокет релея в физической сети.
-                    fields.size > 3 && fields[2].endsWith(remotePort) && fields[3] == TCP_SYN_SENT &&
-                        !fields[1].substringBefore(':').endsWith(TUN_ADDRESS_HEX)
+                    // Поля: sl, local, rem, st, tx:rx, tr:when, retrnsmt, uid, timeout, inode.
+                    fields.size > 9 && fields[9] == inode && fields[3] == TCP_SYN_SENT
                 }
             }
         }
     }
 
-    /** /proc/net недоступен приложению, читаем его от имени shell через UiAutomation. */
-    private fun shell(command: String): String =
-        ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command))
-            .bufferedReader().use { it.readText() }
+    /**
+     * /proc/net недоступен приложению, читаем его от имени shell через UiAutomation.
+     * Срок у каждого чтения свой: withTimeout не прерывает блокирующее чтение канала.
+     */
+    private fun shell(command: String, timeoutMillis: Long = 2_000): String {
+        val output = ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command))
+        val read = CompletableFuture.supplyAsync { output.bufferedReader().use { it.readText() } }
+        return try {
+            read.get(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (error: TimeoutException) {
+            output.close()
+            throw AssertionError("shell не ответил за $timeoutMillis мс: $command", error)
+        }
+    }
 
     private fun awaitCondition(timeoutMillis: Long, condition: () -> Boolean) = runBlocking {
         withTimeout(timeoutMillis) { while (!condition()) delay(25) }
@@ -448,8 +462,6 @@ class ExtendedTunTransportInstrumentedTest {
         const val LONG_TCP = 39_055
         const val BLOCKED_TCP = 39_056
         const val TCP_SYN_SENT = "02"
-        /** 192.0.2.1 в формате /proc/net/tcp: байты адреса в порядке хоста. */
-        const val TUN_ADDRESS_HEX = "010200C0"
         val WHITESPACE = Regex("\\s+")
         const val COUNTER = 39_057
         const val SAMPLES = 281

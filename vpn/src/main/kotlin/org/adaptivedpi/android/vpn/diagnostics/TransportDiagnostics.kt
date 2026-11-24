@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.adaptivedpi.android.engine.TransportCategory
+import org.adaptivedpi.android.engine.TransportDisposition
 import org.adaptivedpi.android.engine.TransportFailure
 import org.adaptivedpi.android.vpn.VpnState
 import java.io.File
@@ -55,12 +56,15 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     private val countsLock = Any()
     private val counts = AtomicLongArray(TransportCategory.entries.size)
     private val operations = AtomicLong()
+    // Неожиданные и неизвестные отказы: штатные тайм-ауты и отмены в предупреждение о проблеме не идут.
+    private val problemOperations = AtomicLong()
     private val merged = AtomicLong()
     private val dropped = AtomicLongArray(TransportDropSource.entries.size)
     private val last = AtomicLong(Long.MIN_VALUE)
     private val finished = AtomicBoolean()
     private val vpnState = AtomicReference(VpnState.Starting)
     val total get() = operations.get()
+    val problems get() = problemOperations.get()
     val state get() = vpnState.get()
 
     fun stateChanged(state: VpnState) { vpnState.set(state) }
@@ -86,6 +90,7 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     private fun incrementCounts(category: TransportCategory, end: Long, count: Long) = synchronized(countsLock) {
         counts.addAndGet(category.ordinal, count)
         operations.addAndGet(count)
+        if (category.disposition != TransportDisposition.EXPECTED) problemOperations.addAndGet(count)
         last.accumulateAndGet(end, ::maxOf)
     }
 

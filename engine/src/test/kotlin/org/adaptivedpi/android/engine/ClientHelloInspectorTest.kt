@@ -32,6 +32,12 @@ class ClientHelloInspectorTest {
         }
         assertEquals(expected, ClientHelloInspector.inspect(fragmented))
         assertEquals(expected, ClientHelloInspector.inspect(record(message + byteArrayOf(2, 0, 0, 0))))
+
+        // Сообщение целиком, но объявленная запись длиннее: ждать её конца, а не возвращать Hello.
+        val longer = record(message + byteArrayOf(2, 0, 0, 0))
+        val withoutTail = longer.copyOf(longer.size - 4)
+        assertEquals(ClientHelloInspector.Result.NeedMore, ClientHelloInspector.inspect(withoutTail))
+        assertEquals(expected, ClientHelloInspector.inspect(longer))
     }
 
     @Test

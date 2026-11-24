@@ -213,8 +213,22 @@ grep -Fxq 'OK (1 test)' "$log_dir/consent.log" || fail 'Системный ди�
 consent_in_progress=false
 # Диалоги ANR скрыты, поэтому ANR приложения проверяется по журналу событий отдельно от лаунчера.
 check_app_anr() {
-  if timeout 10s "$adb" -s "$serial" logcat -d -b events -s am_anr 2>/dev/null \
-      | grep -F 'org.adaptivedpi.android' > "$log_dir/app-anr.txt"; then
+  # Сначала подтверждённое чтение журнала: ошибка ADB не должна выглядеть как "ANR не было".
+  local status=0
+  timeout 10s "$adb" -s "$serial" logcat -d -b events -s am_anr \
+    > "$log_dir/am-anr-events.txt" 2> "$log_dir/am-anr-adb.txt" || status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "Журнал событий ANR на $serial не прочитан (код $status), вывод ADB в am-anr-adb.txt."
+  fi
+  # am_anr: (User),(pid),(Package Name),(Flags),(reason) - сравнивается третье поле, а не вся строка.
+  awk -v package='org.adaptivedpi.android' '
+    / am_anr *: \[/ {
+      fields = substr($0, index($0, "[") + 1)
+      split(fields, part, ",")
+      name = part[3]
+      if (name == package || index(name, package ":") == 1) print
+    }' "$log_dir/am-anr-events.txt" > "$log_dir/app-anr.txt"
+  if [ -s "$log_dir/app-anr.txt" ]; then
     fail "ANR приложения на $serial, подробности в app-anr.txt."
   fi
 }

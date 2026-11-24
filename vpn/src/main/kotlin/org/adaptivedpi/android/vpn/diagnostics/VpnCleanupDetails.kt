@@ -51,7 +51,7 @@ internal data class VpnCleanupDetails(
             appendLine("Задачи релея (активные/в очереди): запросы ${it.requestsActive}/${it.requestsQueued}, ответы ${it.responsesActive}/${it.responsesQueued}.")
         }
         sockets?.let {
-            appendLine("Сокеты: закрыты ${it.closed}, ранее закрыты ${it.alreadyClosed}, ошибки закрытия ${it.failed}, неизвестно ${it.unknown}.")
+            appendLine("Сокеты: закрыты ${it.closed}, ранее закрыты ${it.alreadyClosed}, ошибки закрытия ${it.failed}, неизвестно ${it.unknown}, не подтверждено сейчас ${it.unconfirmed}.")
         }
         issues.forEach { appendLine("Этап ${it.step}: EXCEPTION (${it.exception}).") }
     }.trimEnd()
@@ -60,7 +60,7 @@ internal data class VpnCleanupDetails(
         session, elapsedMillis, tunClosed, nativeReleased, relayAtDeadline, activeConnections, pendingConnections,
         relay?.let { listOf(it.pendingMask, it.requestsActive, it.requestsQueued, it.responsesActive, it.responsesQueued).joinToString(",") },
         issues.joinToString(",") { "${it.step}:${it.exception}" },
-        sockets?.let { listOf(it.closed, it.alreadyClosed, it.failed, it.unknown).joinToString(",") }, waitingFor, stepMillis,
+        sockets?.let { listOf(it.closed, it.alreadyClosed, it.failed, it.unknown, it.unconfirmed).joinToString(",") }, waitingFor, stepMillis,
         slowSteps.entries.joinToString(",") { "${it.key}:${it.value}" },
     ).joinToString(";") { it?.toString() ?: "-" }
 
@@ -83,8 +83,9 @@ internal data class VpnCleanupDetails(
                 CleanupIssue(CleanupStep.valueOf(it.substringBefore(':')), ExceptionKind.valueOf(it.substringAfter(':')))
             }
             val sockets = parts.getOrNull(9)?.split(',')?.map(String::toLong)?.let {
-                require(it.size == 4 && it.all { count -> count >= 0 })
-                SocketCloseSummary(it[0], it[1], it[2], it[3])
+                require(it.size in 4..5 && it.all { count -> count >= 0 })
+                // Записи до появления пятого поля: всё, что не закрылось с первой попытки, считалось неподтверждённым.
+                SocketCloseSummary(it[0], it[1], it[2], it[3], it.getOrElse(4) { _ -> it[2] + it[3] })
             }
             return VpnCleanupDetails(
                 parts[0]?.let(UUID::fromString), checkNotNull(parts[1]).toLong(), parts[2]?.toBooleanStrict(),

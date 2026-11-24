@@ -4,6 +4,18 @@ import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.TransportSnapshot
 import java.time.format.DateTimeFormatter
 
+/** Сведения, однозначно определяющие сборку: у нескольких CI APK может быть одна `versionName`. */
+data class BuildIdentity(
+    val versionCode: Long?,
+    val buildNumber: String?,
+    val gitRevision: String?,
+    val localChanges: Boolean,
+)
+
+private val buildTokenPattern = Regex("[A-Za-z0-9._-]{1,40}")
+
+private fun safeBuildToken(value: String?) = value?.takeIf(buildTokenPattern::matches) ?: "неизвестен"
+
 fun combinedDiagnosticReport(
     appVersion: String?,
     androidVersion: String?,
@@ -14,9 +26,15 @@ fun combinedDiagnosticReport(
     errors: List<DiagnosticEvent>,
     transport: TransportSnapshot? = null,
     transportJournal: TransportJournalView? = null,
+    build: BuildIdentity? = null,
 ): String = buildString {
     appendLine("Диагностика adaptive-dpi-android")
     appendLine("Версия приложения: ${DiagnosticEvent.safeVersion(appVersion)}")
+    if (build != null) {
+        val run = if (build.buildNumber == "local") "локальная сборка" else "запуск CI ${safeBuildToken(build.buildNumber)}"
+        val changes = if (build.localChanges) ", есть локальные изменения" else ""
+        appendLine("Сборка: код версии ${build.versionCode ?: "неизвестен"}, $run, коммит ${safeBuildToken(build.gitRevision)}$changes")
+    }
     appendLine("Версия Android: ${DiagnosticEvent.safeVersion(androidVersion)} (API $androidApi)")
     val model = deviceModel.orEmpty().filterNot { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() }
         .take(100).trim().ifEmpty { "неизвестна" }
@@ -59,6 +77,9 @@ fun combinedDiagnosticReport(
     if (vpnHistory.storageError) appendLine("Хранилище журнала недоступно. Список может быть неполным.")
     if (vpnHistory.droppedInformational > 0 || vpnHistory.droppedCritical > 0) {
         appendLine("Пропуски истории: обычные ${vpnHistory.droppedInformational}, критические ${vpnHistory.droppedCritical}.")
+    }
+    if (vpnHistory.unreadableRecords > 0) {
+        appendLine("Повреждённые записи на диске: ${vpnHistory.unreadableRecords}. История неполная.")
     }
     if (vpnHistory.entries.isEmpty()) appendLine("Записей нет.")
     for (event in vpnHistory.entries) {

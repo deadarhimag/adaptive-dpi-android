@@ -14,6 +14,8 @@ class DiagnosticFileProvider : FileProvider()
 
 internal object DiagnosticExports {
     private const val CACHE_DIR = "diagnostic-reports"
+    private const val PENDING_DIR = "pending-export"
+    private val pendingName = Regex("[0-9a-f-]{36}\\.txt")
     private const val MAX_CACHE_AGE_MILLIS = 24 * 60 * 60 * 1000L
     const val COMBINED_FILE_NAME = "adaptive-dpi-diagnostics.txt"
     const val TRANSPORT_FILE_NAME = "adaptive-dpi-transport.txt"
@@ -49,6 +51,39 @@ internal object DiagnosticExports {
         File(context.cacheDir, CACHE_DIR).listFiles().orEmpty().forEach { file ->
             if (file.isFile && file.lastModified() < cutoff) file.delete()
         }
+        File(context.noBackupFilesDir, PENDING_DIR).listFiles().orEmpty().forEach { file ->
+            if (file.isFile && file.lastModified() < cutoff) file.delete()
+        }
+    }
+
+    /**
+     * Показанный пользователю снимок общего отчёта на время системного диалога сохранения.
+     * Файл приватный и переживает гибель процесса; в сохранённом состоянии Activity хранится только имя.
+     */
+    fun storePending(context: Context, report: String): String {
+        val directory = File(context.noBackupFilesDir, PENDING_DIR)
+        directory.mkdirs()
+        check(directory.isDirectory)
+        val name = "${java.util.UUID.randomUUID()}.txt"
+        // Запись через временный файл: после сбоя не остаётся оборванного снимка под рабочим именем.
+        val temporary = File(directory, "$name.tmp")
+        try {
+            temporary.writeText(report, Charsets.UTF_8)
+            check(temporary.renameTo(File(directory, name)))
+        } finally {
+            temporary.delete()
+        }
+        return name
+    }
+
+    fun readPending(context: Context, name: String): String? {
+        if (!pendingName.matches(name)) return null
+        val file = File(File(context.noBackupFilesDir, PENDING_DIR), name)
+        return if (file.isFile) file.readText(Charsets.UTF_8) else null
+    }
+
+    fun deletePending(context: Context, name: String) {
+        if (pendingName.matches(name)) File(File(context.noBackupFilesDir, PENDING_DIR), name).delete()
     }
 
     private inline fun shareIntent(context: Context, fileName: String, write: (Writer) -> Unit): Intent {
