@@ -21,6 +21,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLContext
 
 class HevLoopbackRelayTest {
     private val ip = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -769,16 +770,97 @@ class HevLoopbackRelayTest {
         assertFalse(failures.any { it.code == TransportCode.RELAY_STOP })
     }
 
+    @Test(timeout = 10_000)
+    fun experimentalClientHelloWritePreservesActualTlsBytesAcrossTheRelay() {
+        val tls = SSLContext.getDefault().createSSLEngine("localhost", 443).apply {
+            useClientMode = true
+            beginHandshake()
+        }
+        val initial = ByteBuffer.allocate(tls.session.packetBufferSize)
+        assertTrue(tls.wrap(ByteBuffer.allocate(0), initial).bytesProduced() > 6)
+        val hello = initial.array().copyOf(initial.position())
+        ServerSocket(0, 1, ip).use { server ->
+            server.soTimeout = 3_000
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val received = executor.submit<ByteArray> {
+                    server.accept().use { peer ->
+                        peer.soTimeout = 3_000
+                        val bytes = peer.getInputStream().readNBytes(hello.size)
+                        assertEquals(-1, peer.getInputStream().read())
+                        peer.getOutputStream().write(42)
+                        bytes
+                    }
+                }
+                relay(splitClientHelloForTest = true) { relay, _ ->
+                    client(relay).use { client ->
+                        val input = DataInputStream(client.getInputStream())
+                        val output = DataOutputStream(client.getOutputStream())
+                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                        command(output, 1, server.localPort)
+                        assertEquals(0, reply(input))
+                        output.write(hello, 0, 2)
+                        output.write(hello, 2, hello.size - 2)
+                        client.shutdownOutput()
+                        assertEquals(42, input.readUnsignedByte())
+                    }
+                }
+                assertArrayEquals(hello, received.get(3, TimeUnit.SECONDS))
+            } finally {
+                executor.shutdownNow()
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun stoppingTheSplitExperimentClosesTheConnectionWithAnIncompletePrefix() {
+        ServerSocket(0, 1, ip).use { server ->
+            server.soTimeout = 3_000
+            val accepted = CountDownLatch(1)
+            val executor = Executors.newSingleThreadExecutor()
+            try {
+                val eof = executor.submit<Int> {
+                    server.accept().use { peer ->
+                        peer.soTimeout = 3_000
+                        accepted.countDown()
+                        peer.getInputStream().read()
+                    }
+                }
+                relay(splitClientHelloForTest = true) { relay, transport ->
+                    client(relay).use { client ->
+                        val input = DataInputStream(client.getInputStream())
+                        val output = DataOutputStream(client.getOutputStream())
+                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                        command(output, 1, server.localPort)
+                        assertEquals(0, reply(input))
+                        assertTrue(accepted.await(3, TimeUnit.SECONDS))
+                        output.write(byteArrayOf(22, 3))
+                        relay.close()
+                        assertTrue(relay.awaitShutdown())
+                        assertEquals(0, transport.statistics().activeTcp)
+                        assertEquals(-1, eof.get(3, TimeUnit.SECONDS))
+                    }
+                }
+            } finally {
+                executor.shutdownNow()
+            }
+        }
+    }
+
     private fun relay(
         destination: InetAddress? = ip,
         maxSessions: Int = 16,
         failures: TransportFailureReporter = TransportFailureReporter(),
         tcpIdleTimeoutMillis: Long = 60_000,
         readTimeoutMillis: Int = 15_000,
+        splitClientHelloForTest: Boolean = false,
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
         val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
-        val relay = HevLoopbackRelay(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, tcpIdleTimeoutMillis) {
+        val relay = HevLoopbackRelay(
+            transport, destination, maxSessions, failures, { _, thread -> thread.start() },
+            tcpIdleTimeoutMillis, splitClientHelloForTest,
+        ) {
             error("Неожиданная остановка релея")
         }
         relay.use { test(it, transport) }
