@@ -8,6 +8,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
+import java.nio.channels.DatagramChannel
 import java.util.concurrent.atomic.AtomicLong
 
 /** Подготавливает ещё не подключённый сокет. Любой отказ должен завершаться исключением. */
@@ -83,7 +84,9 @@ class OutboundTransport(
         val endpoint = endpoint(address, port)
         val site = TransportSite(if (port == 53) TransportSubsystem.DNS else TransportSubsystem.UDP, TransportOperation.CONNECT,
             TransportProtocol.UDP, TransportDirection.OUTBOUND)
-        val socket = open(site, { DatagramSocket(null) }, OutboundSocketPolicy::prepare) { candidate ->
+        // PlainDatagramSocket на Android может остаться в poll() после close().
+        // Адаптер канала сохраняет пакетный API и read timeout, а закрытие канала будит I/O.
+        val socket = open(site, { DatagramChannel.open().socket() }, OutboundSocketPolicy::prepare) { candidate ->
             candidate.connect(endpoint)
         }
         return UdpConnection(socket, site)
@@ -274,10 +277,17 @@ class OutboundTransport(
         lease.cancellation = reason
         val socket = lease.socket
         val protocol = if (socket is Socket) TransportProtocol.TCP else TransportProtocol.UDP
-        closures.close(socket) { error ->
+        val reportCloseError: (Exception) -> Unit = { error ->
             failedOperations.incrementAndGet()
             failures.recordError(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE, protocol), error,
                 fallback = TransportCategory.CLEANUP)
+        }
+        val channel = (socket as? DatagramSocket)?.channel
+        if (channel != null) {
+            // Закрываем тот же FD через канал, чтобы обработать IOException напрямую.
+            closures.close(channel::close, { !channel.isOpen }, reportCloseError)
+        } else {
+            closures.close(socket, reportCloseError)
         }
     }
 

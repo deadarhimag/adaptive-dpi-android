@@ -30,6 +30,8 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
@@ -58,6 +60,7 @@ class ExtendedTunTransportInstrumentedTest {
             repeat(SAMPLES) { assertEquals("Порядок данных загрузки", it, input.readInt()) }
             val elapsed = SystemClock.elapsedRealtime() - started
             assertTrue("Данные должны продолжаться после 60 с, получено за $elapsed мс", elapsed >= 65_000)
+            Log.i(TAG, "Загрузка TCP: $elapsed мс, сверены $SAMPLES контрольных чисел")
         }
         verifyCounters(before, 1, SAMPLES * 4)
     }
@@ -76,7 +79,9 @@ class ExtendedTunTransportInstrumentedTest {
                     output.writeInt(sample)
                 }
             }
-            assertTrue(SystemClock.elapsedRealtime() - started >= 65_000)
+            val elapsed = SystemClock.elapsedRealtime() - started
+            assertTrue(elapsed >= 65_000)
+            Log.i(TAG, "Отправка TCP: $elapsed мс, переданы $SAMPLES контрольных чисел")
             val response = ByteArray(2).also { DataInputStream(socket.getInputStream()).readFully(it) }
             assertEquals("Сервер сверил все данные отправки", "OK", response.decodeToString())
         }
@@ -167,6 +172,7 @@ class ExtendedTunTransportInstrumentedTest {
         withActivity { activity ->
             val pool = Executors.newFixedThreadPool(4)
             try {
+                stopWhileUdpResponseIsWaiting(activity)
                 repeat(2) { exerciseSession(activity, pool, exchangesPerWorker = 1) }
                 val baseline = resources()
                 assertEquals(0, baseline.transportThreads)
@@ -184,6 +190,31 @@ class ExtendedTunTransportInstrumentedTest {
                 assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
             }
         }
+    }
+
+    private fun stopWhileUdpResponseIsWaiting(activity: ActivityScenario<TransportTestActivity>) {
+        val session = start(activity)
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 5_000
+            val payload = byteArrayOf(42)
+            socket.send(DatagramPacket(payload, payload.size, ip, UDP_ECHO))
+            val reply = DatagramPacket(ByteArray(8), 8)
+            socket.receive(reply)
+            assertEquals(1, reply.length)
+            assertEquals(payload.single(), reply.data[reply.offset])
+
+            // Оставляем клиентский сокет открытым и ждём фактического входа релея в poll().
+            awaitCondition(5_000) {
+                Thread.getAllStackTraces().any { (thread, stack) ->
+                    thread.name.startsWith("HEV response ") &&
+                        stack.any { it.methodName.startsWith("poll") } &&
+                        stack.any { it.className.endsWith("OutboundTransport\$UdpConnection") && it.methodName == "receive" }
+                }
+            }
+            stop()
+        }
+        assertTrue(awaitTransportJournal(session).any { it.contains("RECEIVE") && it.contains("SESSION_CANCELLED") })
+        Log.i(TAG, "UDP: Stop завершил активное ожидание ответа, соединения освобождены")
     }
 
     private fun exerciseSession(
@@ -365,6 +396,7 @@ class ExtendedTunTransportInstrumentedTest {
 
     private companion object {
         const val TAG = "ExtendedTunTest"
+        const val UDP_ECHO = 39_052
         const val LONG_TCP = 39_055
         const val BLOCKED_TCP = 39_056
         const val COUNTER = 39_057
