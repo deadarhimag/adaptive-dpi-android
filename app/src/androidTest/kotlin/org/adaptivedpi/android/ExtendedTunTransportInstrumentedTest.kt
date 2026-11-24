@@ -2,6 +2,7 @@ package org.adaptivedpi.android
 
 import android.net.ConnectivityManager
 import android.net.VpnService
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
@@ -255,7 +256,22 @@ class ExtendedTunTransportInstrumentedTest {
         val resume = CountDownLatch(1)
         TransportTestHooks.afterTcpPrepare = { socket ->
             if (prepared.complete(socket to Thread.currentThread()) && holdPreparation) {
-                check(resume.await(12, TimeUnit.SECONDS))
+                // Stop прерывает рабочие потоки релея. Удержание переживает interrupt,
+                // иначе поток выходит сразу и проверка состояния Stopping становится гонкой.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
+                var interrupted = false
+                try {
+                    while (true) {
+                        try {
+                            check(resume.await(deadline - System.nanoTime(), TimeUnit.NANOSECONDS))
+                            break
+                        } catch (_: InterruptedException) {
+                            interrupted = true
+                        }
+                    }
+                } finally {
+                    if (interrupted) Thread.currentThread().interrupt()
+                }
             }
         }
         val executor = Executors.newSingleThreadExecutor()
@@ -275,6 +291,9 @@ class ExtendedTunTransportInstrumentedTest {
                         it.className == "java.net.Socket" && it.methodName == "connect"
                     }
                 }
+                // Кадр Socket.connect появляется раньше системного вызова. SYN_SENT в ядре
+                // гарантирует, что SYN ушёл и стенд на хосте его посчитает.
+                awaitSynSent(port)
             }
             assertFalse(outbound.isConnected)
             requestStop()
@@ -383,6 +402,23 @@ class ExtendedTunTransportInstrumentedTest {
         }
     }
 
+    private fun awaitSynSent(port: Int) {
+        val remotePort = ":%04X".format(port)
+        awaitCondition(3_000) {
+            listOf("/proc/net/tcp", "/proc/net/tcp6").any { path ->
+                shell("cat $path").lineSequence().drop(1).any { line ->
+                    val fields = line.trim().split(WHITESPACE)
+                    fields.size > 3 && fields[2].endsWith(remotePort) && fields[3] == TCP_SYN_SENT
+                }
+            }
+        }
+    }
+
+    /** /proc/net недоступен приложению, читаем его от имени shell через UiAutomation. */
+    private fun shell(command: String): String =
+        ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command))
+            .bufferedReader().use { it.readText() }
+
     private fun awaitCondition(timeoutMillis: Long, condition: () -> Boolean) = runBlocking {
         withTimeout(timeoutMillis) { while (!condition()) delay(25) }
     }
@@ -408,6 +444,8 @@ class ExtendedTunTransportInstrumentedTest {
         const val UDP_ECHO = 39_052
         const val LONG_TCP = 39_055
         const val BLOCKED_TCP = 39_056
+        const val TCP_SYN_SENT = "02"
+        val WHITESPACE = Regex("\\s+")
         const val COUNTER = 39_057
         const val SAMPLES = 281
     }
