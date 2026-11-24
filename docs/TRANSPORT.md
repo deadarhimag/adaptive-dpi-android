@@ -16,8 +16,8 @@ TUN → HEV/lwIP (`libadaptive-hev.so`) → Kotlin-релей SOCKS5 на `127.0
 | Параметр | Значение | Где |
 | --- | --- | --- |
 | Сеансы HEV / слоты релея / исходящие сокеты | 32 в режиме приложения, 16 в режиме стенда | `ExperimentalTransport.kt`, `sessionLimit` |
-| Рабочие потоки релея | Пул запросов `maxSessions + maxSessions/2` и пул ответов `maxSessions`: до 80 потоков при 32 слотах | `HevLoopbackRelay.kt`, `RelayPool` |
-| Неаутентифицированные подключения | Не больше `maxSessions/2` (минимум 2); при превышении закрывается самое старое. Слот не занимают | `HevLoopbackRelay.accept`, `preAuthLimit` |
+| Рабочие потоки релея | Пул запросов `2 × maxSessions` и пул ответов `maxSessions`: до 96 потоков при 32 слотах | `HevLoopbackRelay.kt`, `RelayPool` |
+| Неаутентифицированные подключения | Не больше `maxSessions`; при превышении закрывается самое старое. Слот не занимают | `HevLoopbackRelay.accept`, `preAuthLimit` |
 | Простой TCP | 60 с без данных в обе стороны; отдельный таймер, чтение с `soTimeout = 0` | `HevLoopbackRelay.kt`, `tcpIdleTimeoutMillis` |
 | Тайм-аут TCP и UDP в HEV | 60 с | конфигурация HEV, `tcp-read-write-timeout`, `udp-read-write-timeout` |
 | UDP-чтение исходящего сокета | Тайм-аут ядра `SO_RCVTIMEO` | `VpnOutboundSocketPolicy.configureUdpReadTimeout` |

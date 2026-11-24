@@ -326,8 +326,8 @@ class HevLoopbackRelayTest {
 
     @Test(timeout = 10_000)
     fun unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes() {
-        // При maxSessions = 4 одновременно допускаются два неаутентифицированных подключения.
-        relay(maxSessions = 4) { relay, _ ->
+        // При maxSessions = 2 одновременно допускаются два неаутентифицированных подключения.
+        relay(maxSessions = 2) { relay, _ ->
             val silent = (0 until 3).map { client(relay) }
             try {
                 assertEquals(-1, silent[0].getInputStream().read())

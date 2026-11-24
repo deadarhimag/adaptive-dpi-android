@@ -110,7 +110,7 @@ Always-on VPN и автозапуск (`SUPPORTS_ALWAYS_ON = true`, измене
 ### Этап 1
 
 **1.1 Квота релея до аутентификации** - сделано в `feat/stage1` (`8de3f1d`), ждёт CI.
-Шаги, уже выполненные: приём без слота; лимит неаутентифицированных `maxSessions/2` (минимум 2) с вытеснением старейшего; слот после аутентификации, ожидание до 5 с; пул запросов `maxSessions + preAuthLimit`. Файлы: `HevLoopbackRelay.kt`, `HevLoopbackRelayTest.kt`, [TRANSPORT.md](TRANSPORT.md). Осталось: зелёный CI (JVM, базовый и расширенный AVD). Влияние: число потоков до 80 при 32 слотах; ответ на CONNECT приходит только после получения слота.
+Шаги, уже выполненные: приём без слота; лимит неаутентифицированных `maxSessions` (меньший лимит вытеснял честных клиентов при пачке подключений от HEV) с вытеснением старейшего; слот после аутентификации, ожидание до 5 с; пул запросов `2 × maxSessions`. Файлы: `HevLoopbackRelay.kt`, `HevLoopbackRelayTest.kt`, [TRANSPORT.md](TRANSPORT.md). Осталось: зелёный CI (JVM, базовый и расширенный AVD). Влияние: число потоков до 96 при 32 слотах (было 64); ответ на CONNECT приходит только после получения слота.
 
 **1.3 Проба ресурса различает причины.**
 1. Прочитать `vpn/.../diagnostics/ResourceProbe.kt`, `ResourceProbeTest.kt`, `engine/.../TransportFailure.kt` и [TRANSPORT.md](TRANSPORT.md) (RelayWait).

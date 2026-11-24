@@ -71,7 +71,9 @@ class HevLoopbackRelay internal constructor(
     private val permits = Semaphore(maxSessions)
     // Неаутентифицированных подключений не больше preAuthLimit: молчащие клиенты не занимают слоты,
     // а при переполнении закрывается самое старое, поэтому новый клиент не ждёт их тайм-аута.
-    private val preAuthLimit = (maxSessions / 2).coerceAtLeast(2)
+    // Лимит равен maxSessions: пачка из maxSessions честных клиентов (HEV открывает их одновременно)
+    // не вытесняет друг друга, а молчащие клиенты как самые старые вытесняются первыми.
+    private val preAuthLimit = maxSessions
     private val unauthenticated = ArrayDeque<Peer>()
     private val clients = mutableSetOf<Peer>()
     private val openClients = AtomicInteger()
