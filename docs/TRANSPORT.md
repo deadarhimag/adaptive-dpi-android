@@ -1,6 +1,6 @@
 # Транспорт, жизненный цикл VPN и диагностика
 
-Этот документ фиксирует то, что **уже реализовано** в `main` (`6b869fb`, сборка 0.1.1 (34)), и решения, проверенные на практике. Пометкой **[эксперимент]** отмечено то, что есть только в ветке `stage3-experimental`. Он заменяет отчёты по версиям 0.1.1-2.4.6: их полные тексты остаются в истории git. Целевая архитектура - в [ARCHITECTURE.md](ARCHITECTURE.md).
+Этот документ фиксирует то, что **уже реализовано** (`main` и ветка этапа 1 `feat/stage1`, `versionName` 0.1.1), и решения, проверенные на практике. Он заменяет отчёты по версиям 0.1.1-2.4.6: их полные тексты остаются в истории git. Целевая архитектура - в [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Тракт
 
@@ -16,12 +16,13 @@ TUN → HEV/lwIP (`libadaptive-hev.so`) → Kotlin-релей SOCKS5 на `127.0
 | Параметр | Значение | Где |
 | --- | --- | --- |
 | Сеансы HEV / слоты релея / исходящие сокеты | 32 в режиме приложения, 16 в режиме стенда | `ExperimentalTransport.kt`, `sessionLimit` |
-| Рабочие потоки релея | Два пула размером с число слотов: до 64 потоков | `HevLoopbackRelay.kt`, `RelayPool` |
+| Рабочие потоки релея | Пул запросов `2 × maxSessions` и пул ответов `maxSessions`: до 96 потоков при 32 слотах | `HevLoopbackRelay.kt`, `RelayPool` |
+| Неаутентифицированные подключения | Не больше `maxSessions`; при превышении закрывается самое старое. Слот не занимают | `HevLoopbackRelay.accept`, `preAuthLimit` |
 | Простой TCP | 60 с без данных в обе стороны; отдельный таймер, чтение с `soTimeout = 0` | `HevLoopbackRelay.kt`, `tcpIdleTimeoutMillis` |
 | Тайм-аут TCP и UDP в HEV | 60 с | конфигурация HEV, `tcp-read-write-timeout`, `udp-read-write-timeout` |
 | UDP-чтение исходящего сокета | Тайм-аут ядра `SO_RCVTIMEO` | `VpnOutboundSocketPolicy.configureUdpReadTimeout` |
 | Подключение | 5 с | `OutboundTransport`, HEV `connect-timeout` |
-| Аутентификация на релее | 5 с на аутентификацию SOCKS5 от момента `accept()` **[эксперимент]**, в `main` - 5 с на каждое чтение; запрос CONNECT/FWD_UDP - 5 с на каждое чтение | `RelayHandshakeInput`, `HevLoopbackRelay.handle` |
+| Аутентификация на релее | 5 с на аутентификацию SOCKS5 от момента `accept()` без слота; слот берётся после аутентификации, ожидание слота до 5 с (иначе `SESSION_LIMIT`); запрос CONNECT/FWD_UDP - 5 с на каждое чтение | `RelayHandshakeInput`, `HevLoopbackRelay.handle`, `SLOT_WAIT_MILLIS` |
 | Буфер копирования TCP | 8 КБ на направление | `HevLoopbackRelay.kt`, `TCP_BUFFER` |
 | UDP-датаграмма | До 1500 байт тела; больше - отбрасывается с записью, ассоциация сохраняется | релей |
 | MTU TUN | 1280 | `AdaptiveVpnService`, конфигурация HEV |
@@ -84,10 +85,10 @@ TUN → HEV/lwIP (`libadaptive-hev.so`) → Kotlin-релей SOCKS5 на `127.0
 
 | Уровень | Результат | Где |
 | --- | --- | --- |
-| JVM | 116 тестов для `6b869fb`; 133 теста для `stage3-experimental` (`4efb757`) **[эксперимент]** | Локальные прогоны Codex; Android CI для `stage3-experimental` не запускалась |
-| Android 14 AVD | 21 базовый и 7 расширенных тестов без ошибок и пропусков на `6b869fb` | GitHub Actions, запуск 33.1 |
+| JVM | `testDebugUnitTest`, `:engine:test` и lint без ошибок на `42b3e3d` | GitHub Actions, PR #3 |
+| Android 14 AVD | 21 базовый и 7 расширенных тестов без ошибок и пропусков на `42b3e3d` | GitHub Actions, PR #3 |
 | Android 14 AVD, подробности | TCP в обе стороны (≈70 с загрузки и отправки), закрытие полного простоя через 59,5 с, TCP/UDP/DNS/HTTPS из отдельного приложения со сверкой содержимого, Stop во время `prepare` и `connect`, задержка JNI mutex и восстановление, 10 циклов по 120 TCP, 120 UDP и 120 DNS обменов без утечек FD, сокетов и потоков | расширенный набор |
-| Реальное устройство | Pixel 7 проверялся на ранних сборках; сборка 0.1.1 (34) - **не проверена** | [PIXEL7_TESTING_RU.md](PIXEL7_TESTING_RU.md) |
+| Реальное устройство | Pixel 7 проверялся на ранних сборках; текущая сборка - **не проверена** | [PIXEL7_TESTING_RU.md](PIXEL7_TESTING_RU.md) |
 | Реальная сеть, обход DPI | Не проверено | - |
 
 ## Известные ограничения
@@ -95,5 +96,4 @@ TUN → HEV/lwIP (`libadaptive-hev.so`) → Kotlin-релей SOCKS5 на `127.0
 - Смена или потеря физической сети останавливает сеанс (целевая модель - в [ARCHITECTURE.md](ARCHITECTURE.md)).
 - DNS берутся один раз при создании TUN.
 - IPv6 для выбранного приложения заблокирован.
-- Слот релея берётся до аутентификации: постороннее приложение может занять все слоты и остановить приём новых соединений (задача в [ROADMAP.md](ROADMAP.md)).
-- Ветка `stage3-experimental` не проходит Android CI автоматически: workflow запускается на `push` в `main`, на pull request и вручную.
+- Android CI запускается на `push` в `main`, на pull request и вручную; ветки этапов проверяются через черновой pull request.

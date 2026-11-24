@@ -21,6 +21,19 @@
 | --- | --- | --- |
 | `org.jetbrains.kotlinx:kotlinx-serialization-json` 1.11.0, тег `v1.11.0` (`6956af2`), плагин `org.jetbrains.kotlin.plugin.serialization` | Apache 2.0 (`LICENSE.txt` в теге) | JSON хранения анализа и экспорта ([ARCHITECTURE.md](ARCHITECTURE.md), «Реализация модулей»). Выпуск 1.11.0 собран на Kotlin 2.3.20; 1.12.0 собран на Kotlin 2.4.10 и с Kotlin проекта 2.3.21 не берётся |
 
+## Запланированные зависимости
+
+Проверено 24 ноября 2026 года по файлам лицензий в репозиториях. Подключаются в задаче, указанной в таблице; другие новые зависимости - только с согласия пользователя (п. 26 AGENTS.md).
+
+| Компонент | Лицензия, чем проверено | Где | Задача | Согласовано |
+| --- | --- | --- | --- | --- |
+| Public Suffix List, `public_suffix_list.dat` | MPL 2.0 - заголовок файла | Ресурс `:analysis` (в APK) | 2.1 | Да |
+| Material Symbols Outlined, `google/material-design-icons` (только нужные SVG, переведённые в векторные ресурсы) | Apache 2.0 - `LICENSE` | `:designsystem` (в APK) | 2.4g | Нет |
+| `kotlinx-coroutines-test` той же версии, что `kotlinx-coroutines-core` (1.10.2) | Apache 2.0 - репозиторий `Kotlin/kotlinx.coroutines` (тот же, что у уже подключённой `coroutines-core`) | Только тесты `:analysis` | 2.1 | Нет |
+| `NetfilterQueue`, `oremanj/python-netfilterqueue` | MIT - `LICENSE.txt` | Только DPI-стенд в CI, не в APK | 2.3 | Нет |
+
+Отвергнуто: scapy (GPLv2 - `LICENSE`) для стенда - разбор пакетов пишется своим кодом; библиотеки DoH и HTTP-клиенты - [ARCHITECTURE.md](ARCHITECTURE.md), Т2.
+
 ## Вложенные компоненты hev-socks5-tunnel
 
 Список получен из [Git-подмодулей](https://github.com/heiher/hev-socks5-tunnel/blob/fc3f90040b8d4b537341c96538669a9b2e35d514/.gitmodules), зафиксированных в дереве указанной ревизии. Для четырёх подмодулей проверены корневые тексты лицензий.

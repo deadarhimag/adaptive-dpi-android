@@ -7,8 +7,8 @@
 | Уровень | Что подтверждает | Чего не подтверждает | Где |
 | --- | --- | --- | --- |
 | JVM `:engine`, `:vpn`, `:analysis` | Логику, гонки, отмену, лимиты, разбор данных, решения движка на моделях DPI с виртуальным временем | Android API, ядро, реальную сеть | `./gradlew testDebugUnitTest :engine:test` |
-| Нативные host-тесты **[эксперимент]** | Логику C, ASan/UBSan, поведение Linux-сокетов | Android-ядро, seccomp, JNI | `.github/workflows/transport-host.yml`, только ручной запуск, ветка `stage3-experimental` |
-| Стенд целостности localhost **[эксперимент]** | Работоспособность тестовых фикстур TCP/UDP/HTTPS | **Код приложения в нём не участвует** | `scripts/transport-host-lab.py`, ветка `stage3-experimental` |
+| Нативные host-тесты **[план]** | Логику C, ASan/UBSan, поведение Linux-сокетов | Android-ядро, seccomp, JNI | Появятся вместе с `adaptive_ops.c` (задача 1.6) |
+| Стенд целостности localhost **[есть]** | Работоспособность тестовых фикстур TCP/UDP/HTTPS | **Код приложения в нём не участвует** | `scripts/transport-host-lab.py`, `.github/workflows/transport-host.yml`, ручной запуск |
 | DPI-стенд Linux **[план]** | Фактическую сегментацию по PCAP, работу операций и движка против управляемых моделей DPI | Поведение реального DPI оператора | Отдельный workflow |
 | Android AVD | VpnService, жизненный цикл, TUN, HEV, JNI, протокол релея на Android | Реальное ядро устройства и сеть оператора | `.github/scripts/test-diagnostics-on-emulator.sh` (API 34) |
 | Реальное устройство | Android 17 на Pixel 7, батарея, Doze, смена сети, реальное ядро | Другие устройства и сети | [PIXEL7_TESTING_RU.md](PIXEL7_TESTING_RU.md) |
@@ -60,6 +60,44 @@
 | `server-region` | Без DPI; сервер отвечает 451 или отказом по региону |
 | шум p | Параметр любой модели: срабатывание с вероятностью p |
 | `loss` | Без DPI, но с потерями пакетов (netem) |
+
+### Схема каталога моделей [план]
+
+Файл `analysis/src/main/resources/catalog/models.json` - единственный источник моделей для `:analysis` и стенда. Интерпретатор один на обоих сторонах: Kotlin `MechanismModel.predict(v)` и Python-обработчик стенда исполняют одни и те же поля; тест сверяет их предсказания на общем наборе вариантов.
+
+```json
+{
+  "schema": 1,
+  "models": [
+    {
+      "id": "sni-first-record",
+      "level": "record",
+      "match": { "on": "sni", "where": "first-record", "name": "exact-ci" },
+      "action": "rst",
+      "params": {}
+    },
+    {
+      "id": "residual",
+      "level": "address",
+      "match": { "on": "after-trigger", "seconds": "param:t" },
+      "action": "drop",
+      "params": { "t": [10, 30, 60, 120] }
+    }
+  ]
+}
+```
+
+| Поле | Значения |
+| --- | --- |
+| `level` | `packet` (один TCP-сегмент, сырые байты), `record` (одна TLS-запись, сегменты собраны), `stream` (поток и записи собраны), `address`, `dns`, `udp`, `http`, `server`, `network` |
+| `match.on` | `none`, `address`, `sni`, `sni-suffix`, `dns-name`, `quic-sni`, `http-host`, `after-trigger`, `volume` |
+| `match.where` | `first-segment`, `first-record`, `any` |
+| `match.name` | `exact`, `exact-ci` (без учёта регистра), `suffix:<уровень>` |
+| `action` | `pass`, `rst`, `drop`, `stub-http`, `stub-tls` (чужой сертификат), `dns-spoof`, `stop-after-bytes`, `reply-451` |
+| `params` | Имя → список допустимых значений; параметрические пробы выбирают значение из этого списка |
+| Шум | Не поле модели: задаётся сценарием стенда и `ModelProbePort` (`p`) |
+
+Модель `unknown` в файл не входит: её предсказание - все исходы, это свойство интерпретатора. Новая модель добавляется только вместе с тестом стенда.
 
 ### Критерии приёмки движка анализа
 
@@ -155,7 +193,7 @@ python -B scripts/transport-host-lab.py --certificate <cert.pem> --key <key.pem>
 | Сборка | `./gradlew assembleDebug assembleDebugAndroidTest assembleRelease` | Всегда |
 | Lint | `./gradlew lintDebug lintRelease` | При изменении Android-кода |
 | Проверка workflow и скриптов | `actionlint`, `bash -n`, синтаксис Python | При изменении CI |
-| Нативные host-тесты | `cc ... -fsanitize=address,undefined` (как в `transport-host.yml`) | При изменении C, если окружение Linux |
+| Нативные host-тесты (с задачи 1.6) | `cc ... -fsanitize=address,undefined` в `transport-host.yml` | При изменении C, если окружение Linux |
 
 Если в окружении агента нет эмулятора с аппаратным ускорением или Linux с правами на сетевые пространства имён, агент не подменяет эти проверки локальными суррогатами, а запускает CI (через черновой pull request или `workflow_dispatch`) и разбирает его артефакты. Отчёт агента всегда разделяет: прошло локально, прошло в CI, не проверялось.
 
@@ -164,7 +202,7 @@ python -B scripts/transport-host-lab.py --certificate <cert.pem> --key <key.pem>
 | Workflow | Когда | Что |
 | --- | --- | --- |
 | `android-build.yml` **[есть]** | push в `main`, pull request, вручную | JVM, lint, APK, AVD API 34 базовый и расширенный наборы, проверка APK, артефакты для Pixel 7 |
-| `transport-host.yml` **[эксперимент]** | Вручную | Нативные host-тесты с санитайзерами, стенд целостности |
+| `transport-host.yml` **[есть]** | Вручную | Стенд целостности localhost; нативные host-тесты с санитайзерами добавляются в задаче 1.6 |
 | DPI-стенд **[план]** | Вручную и для pull request, меняющих `:engine` или `:analysis` | Сетевые пространства имён, nftables, NFQUEUE, `tcpdump`; модели DPI из каталога; критерии приёмки движка; PCAP в артефакте. На размещённых GitHub раннерах Linux доступен `sudo` без пароля, этого достаточно для пространств имён и захвата |
 | Матрица AVD **[план]** | По расписанию | API 29, 36, 37 (при наличии образа) |
 

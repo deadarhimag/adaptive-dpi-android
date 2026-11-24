@@ -277,23 +277,67 @@ class HevLoopbackRelayTest {
         }
     }
 
-    @Test
-    fun saturatedRelayWaitsForSlotWithoutRejectingQueuedConnection() {
+    @Test(timeout = 10_000)
+    fun saturatedRelayAuthenticatesQueuedConnectionAndWaitsForSlotBeforeCommand() {
         val failures = ConcurrentLinkedQueue<TransportFailure>()
-        relay(maxSessions = 1, failures = TransportFailureReporter(sink = failures::add)) { relay, _ ->
-            client(relay).use { first ->
-                first.getOutputStream().write(byteArrayOf(5, 1, 2))
-                assertArrayEquals(byteArrayOf(5, 2), DataInputStream(first.getInputStream()).readExact(2))
-                client(relay).use { second ->
-                    second.getOutputStream().write(byteArrayOf(5, 1, 2))
-                    second.soTimeout = 150
-                    assertThrows(SocketTimeoutException::class.java) { second.getInputStream().read() }
-                    first.close()
-                    second.soTimeout = 3_000
-                    assertArrayEquals(byteArrayOf(5, 2), DataInputStream(second.getInputStream()).readExact(2))
+        ServerSocket(0, 2, ip).use { target ->
+            relay(maxSessions = 1, failures = TransportFailureReporter(sink = failures::add)) { relay, _ ->
+                client(relay).use { first ->
+                    val firstInput = DataInputStream(first.getInputStream())
+                    val firstOutput = DataOutputStream(first.getOutputStream())
+                    // Первый клиент после аутентификации держит единственный слот.
+                    assertEquals(0, authenticate(relay.configSecret, firstInput, firstOutput))
+                    client(relay).use { second ->
+                        val input = DataInputStream(second.getInputStream())
+                        val output = DataOutputStream(second.getOutputStream())
+                        // Аутентификация не требует слота и проходит при занятом слоте.
+                        assertEquals(0, authenticate(relay.configSecret, input, output))
+                        command(output, 1, target.localPort)
+                        second.soTimeout = 150
+                        assertThrows(SocketTimeoutException::class.java) { reply(input) }
+                        first.close()
+                        second.soTimeout = 3_000
+                        assertEquals(0, reply(input))
+                    }
                 }
+                assertFalse(failures.any { it.code == TransportCode.WORKER_REJECTED || it.code == TransportCode.SESSION_LIMIT })
             }
-            assertFalse(failures.any { it.code == TransportCode.WORKER_REJECTED || it.code == TransportCode.SESSION_LIMIT })
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun silentClientsDoNotBlockAuthenticationOfLegitimateClient() {
+        relay(maxSessions = 32) { relay, _ ->
+            val silent = (0 until 32).map { client(relay) }
+            try {
+                client(relay).use { legit ->
+                    legit.soTimeout = 1_000
+                    val input = DataInputStream(legit.getInputStream())
+                    val output = DataOutputStream(legit.getOutputStream())
+                    val started = System.nanoTime()
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(1))
+                }
+            } finally {
+                silent.forEach { it.close() }
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes() {
+        // При maxSessions = 2 одновременно допускаются два неаутентифицированных подключения.
+        relay(maxSessions = 2) { relay, _ ->
+            val silent = (0 until 3).map { client(relay) }
+            try {
+                assertEquals(-1, silent[0].getInputStream().read())
+                silent[1].soTimeout = 150
+                assertThrows(SocketTimeoutException::class.java) { silent[1].getInputStream().read() }
+                silent[2].soTimeout = 150
+                assertThrows(SocketTimeoutException::class.java) { silent[2].getInputStream().read() }
+            } finally {
+                silent.forEach { it.close() }
+            }
         }
     }
 
