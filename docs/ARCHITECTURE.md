@@ -53,7 +53,7 @@
 | Модуль, пакет | Классы | Что делают | Опора на существующее |
 | --- | --- | --- | --- |
 | `:engine`, `org.adaptivedpi.android.engine` | `HevLoopbackRelay` (есть) | Точка встраивания конвейера - функция `tcp()`: после `reply(output, 0)` первое чтение клиента идёт в `FlowPipeline` (сейчас там обычное копирование) | Релей, `OutboundTransport`, `TransportFailure` |
-| `:engine`, `...engine.flow` | `FlowPipeline`, `FlowClassifier`, `MeasureExecutor`, `FlowOutcomeRecorder` | Захват префикса, ключ DPI, применение меры, сбор исхода | `ClientHelloInspector` (расширить результат: смещение и длина SNI, число записей, размер, ALPN) |
+| `:engine`, `...engine.flow` | `FlowPipeline`, `FlowClassifier`, `MeasureExecutor`, `FlowOutcomeRecorder` | Захват префикса, ключ DPI, применение меры, сбор исхода | `ClientHelloInspector` (расширить результат: участки имени в потоке, число записей, размер, ALPN) |
 | `:engine`, `...engine.ops` | `SocketOps` (интерфейс), операции Kotlin | Операции каталога; всё платформенное - через `SocketOps` | Шаблон `OutboundSocketPolicy`: интерфейс в `:engine`, реализация в `:vpn` |
 | `:analysis` (новый JVM-модуль), `org.adaptivedpi.android.analysis` | `AnalysisActor`, `HypothesisSpace`, `ProbePlanner`, `MeasureSynthesizer`, `KeyLifecycle`, `Budgets`, `ProfileStore`, `ReasoningJournal` | Всё из [ENGINE.md](ENGINE.md); раздел 28 - алгоритмы | Только `kotlinx-coroutines-core` (уже в проекте) |
 | `:vpn`, `...vpn.analysis` | `AndroidSocketOps`, `ProbeTransport`, `NetworkStateMonitor`, `CapabilitySelfTest`, `UidResolver` | Android-реализации интерфейсов `:analysis` и `:engine` | `VpnOutboundSocketPolicy` (`protect`, `bindSocket`, `ParcelFileDescriptor` + `Os`), `ResourceProbe` (стадии DNS-TCP-TLS-HTTP-CONTENT для П3) |
@@ -489,7 +489,7 @@ DNS, который выдаёт сеть оператора, - один из и
 | **Приложения** | Список приложений с поиском, у каждого `StatusBadge` по худшему эндпоинту. Карточка приложения: приоритет подбора, «В VPN / вне VPN», список эндпоинтов со статусом, «Сбросить для эндпоинта», «Сбросить все правила приложения», «Вернуть» ([ENGINE.md](ENGINE.md), раздел 26) |
 | **Ресурсы** | Список ключей, где движок что-то сделал или выяснил. Карточка ресурса: диагноз простыми словами, уровень доказанности и эксперименты ([ENGINE.md](ENGINE.md), раздел 27), мера, «Сбросить меру», «Не трогать», «Проверить ресурс». Сверху - кнопка «Проверить ресурс» с полем ввода адреса |
 | **Журналы** | Существующие журналы (VPN, ошибки вместе со сбоями, транспорт), журнал рассуждения; у каждого `SendButton` |
-| **Настройки** | Тема, профиль качества, режим захвата, резолверы DoH и согласие на них, Always-on (переход в системные настройки), экспорт и импорт («Резервная копия», «Знания о сети»), «О приложении», раздел разработчика |
+| **Настройки** | Тема, профиль качества (по умолчанию «Сбалансированный», задача 2.4g, п. 4a), режим захвата, резолверы DoH и согласие на них, Always-on (переход в системные настройки), экспорт и импорт («Резервная копия», «Знания о сети»), «О приложении», раздел разработчика |
 | **Раздел разработчика** | Профиль DPI сети, лаборатория, экспорт протокола, проверочный TUN, бюджеты проб (`UsageBar`) |
 
 ### Отправка журналов и файлов
