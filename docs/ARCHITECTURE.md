@@ -605,7 +605,8 @@ Material Symbols Outlined из `google/material-design-icons` (Apache 2.0, пр�
 
 - Release-ключ: `keystore` в секрете GitHub (base64) и пароли в секретах; workflow восстанавливает файл во временный каталог и удаляет после сборки (как уже делается с временным CI debug keystore в `android-build.yml`).
 - Workflow `release.yml`: только `workflow_dispatch` с тегом; сборка `assembleRelease`, `apksigner verify`, SHA-256, список изменений `git log <пред. тег>..<тег> --format`; черновик релиза через `gh release create --draft`; публикацию черновика выполняет пользователь (п. 15).
-- Лицензия проекта - выбирается до первого релиза после сводки лицензий всех компонентов (HEV и подмодули MIT/BSD, перенесённый код byedpi и zapret2 - MIT, PSL - MPL 2.0, значки - Apache 2.0, kotlinx - Apache 2.0); решение принимает пользователь.
+- Лицензия проекта - **MIT** (решение пользователя, 24 ноября 2026). Состав: HEV и подмодули MIT/BSD, перенесённый код byedpi и zapret2 - MIT, PSL - MPL 2.0 (файл данных), значки - Apache 2.0, kotlinx - Apache 2.0; перед релизом сводка и уведомления - задача 5.6.
+- `versionCode` release-сборки: монотонно растёт, не меньше 25 и уникален для каждого опубликованного APK; иначе Android не обновит приложение. Схему (по номеру запуска `release.yml` или иначе) выбирает исполнитель 5.7 и записывает здесь; правка `app/build.gradle.kts` - отдельным пунктом отчёта (п. 27 AGENTS.md).
 
 ## Технологии
 
