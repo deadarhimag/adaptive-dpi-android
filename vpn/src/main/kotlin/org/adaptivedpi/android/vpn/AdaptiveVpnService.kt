@@ -478,7 +478,41 @@ class AdaptiveVpnService : VpnService() {
             ?.copy(elapsedMillis = SystemClock.elapsedRealtime() - stopStartedAt) ?: pendingCleanup()
         details.waitingFor?.let { VpnController.cleanupDelayed(id, it.title) }
         reportCleanup(DiagnosticCode.VpnCleanupDelayed, id, diagnosticSnapshot(), details, recordHistory = false)
+        val relayTransport = closingTransport
+        val step = details.waitingFor
+        if (relayTransport != null && step != null) {
+            val startedAt = stopStartedAt
+            serviceScope.launch(Dispatchers.Default) {
+                logRelayShutdown(relayTransport, id, startedAt, "cleanup-delayed", step, includeStacks = step == CleanupStep.RelayWait)
+            }
+        }
     }
+
+    private fun logRelayShutdown(
+        relayTransport: ExperimentalTransport,
+        id: String,
+        startedAt: Long,
+        checkpoint: String,
+        step: CleanupStep,
+        includeStacks: Boolean,
+    ) {
+        val elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0)
+        val prefix = "sessionId=$id elapsedMs=$elapsed step=$step checkpoint=$checkpoint"
+        try {
+            relayTransport.relayShutdownDiagnostics(includeStacks).forEach { Log.i(RELAY_WAIT_TAG, "$prefix $it") }
+        } catch (error: Exception) {
+            Log.w(RELAY_WAIT_TAG, "$prefix diagnosticError=${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun observeRelayWait(relayTransport: ExperimentalTransport, id: String, startedAt: Long): Job =
+        serviceScope.launch(Dispatchers.Default) {
+            for ((checkpoint, atMillis) in RELAY_WAIT_CHECKPOINTS) {
+                delay((startedAt + atMillis - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+                if (cleanupStep.first != CleanupStep.RelayWait) return@launch
+                logRelayShutdown(relayTransport, id, startedAt, checkpoint, CleanupStep.RelayWait, includeStacks = true)
+            }
+        }
 
     private fun onCleanupComplete(result: Result<Released>) {
         val completed = result.getOrElse {
@@ -578,7 +612,9 @@ class AdaptiveVpnService : VpnService() {
         val descriptor = tunnel
         tunnel = null
         val last = VpnController.transport.value?.takeIf { it.sessionId == transportDiagnostics?.id }
-        val id = sessionId?.toSessionUuid()
+        val stopSession = sessionId
+        val startedAt = stopStartedAt
+        val id = stopSession?.toSessionUuid()
         val started = transportStarted
         val removeForeground = foregroundRequested
         foregroundRequested = false
@@ -589,6 +625,9 @@ class AdaptiveVpnService : VpnService() {
                     if (started) runningTransport.stop(::cleanupStage) else {
                         cleanupStage(CleanupStep.NativeExit)
                         runningTransport.abortBeforeStart()
+                    }
+                    if (stopSession != null) {
+                        logRelayShutdown(runningTransport, stopSession, startedAt, "after-close", cleanupStep.first, includeStacks = false)
                     }
                 }
             }
@@ -624,7 +663,12 @@ class AdaptiveVpnService : VpnService() {
             withContext(SESSION_IO) {
                 runningTransport.awaitWorkerExit()
                 cleanupStage(CleanupStep.RelayWait)
-                runningTransport.awaitRelayRelease()
+                val observer = stopSession?.let { observeRelayWait(runningTransport, it, startedAt) }
+                try {
+                    runningTransport.awaitRelayRelease()
+                } finally {
+                    observer?.cancel()
+                }
             }
         }
         val resources = withContext(SESSION_IO) {
@@ -702,6 +746,9 @@ class AdaptiveVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val STOP_DELAY_MILLIS = 4_000L
         private const val SLOW_STEP_MILLIS = 1_000L
+        private const val RELAY_WAIT_TAG = "RelayWaitDiag"
+        // Последний снимок должен появиться до 20-секундного watchdog инструментального теста.
+        private val RELAY_WAIT_CHECKPOINTS = listOf("still-waiting" to 10_000L, "before-test-watchdog" to 19_000L)
         private val SESSION_IO = Dispatchers.IO.limitedParallelism(1)
         private val TRANSPORT_POLL_IO = Dispatchers.IO.limitedParallelism(1)
         private val HEV_INIT = TransportSite(TransportSubsystem.HEV, TransportOperation.INIT)

@@ -174,6 +174,8 @@ internal class ExperimentalTransport(
 
     fun awaitRelayRelease() = relay.awaitDrained()
 
+    fun relayShutdownDiagnostics(includeStacks: Boolean) = relay.shutdownDiagnosticLines(includeStacks, worker)
+
     fun snapshot(): TransportSnapshot {
         drainFaults()
         val counters = HevBridge.counters(token)

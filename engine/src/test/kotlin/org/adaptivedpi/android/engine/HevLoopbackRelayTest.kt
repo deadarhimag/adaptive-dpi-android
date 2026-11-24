@@ -718,6 +718,7 @@ class HevLoopbackRelayTest {
             override fun prepare(socket: DatagramSocket) = Unit
         })
         val relay = HevLoopbackRelay(transport, ip, maxSessions = 1, failures = reporter) { error("Unexpected listener failure") }
+        val drain = Thread(relay::awaitDrained, "Test relay wait").apply { isDaemon = true }
         try {
             client(relay).use { socket ->
                 val input = DataInputStream(socket.getInputStream())
@@ -734,10 +735,32 @@ class HevLoopbackRelayTest {
                 assertFalse(relay.isTerminated)
                 assertFalse(relay.awaitShutdown(100))
                 assertEquals(2, atDeadline.pendingMask)
+                val afterClose = relay.shutdownDiagnosticLines(includeStacks = false).single()
+                assertTrue(afterClose.contains("requests=SHUTDOWN"))
+                assertTrue(afterClose.contains("openClients=0"))
+                assertTrue(afterClose.contains("idleQueued=0"))
+
+                drain.start()
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                var wait = relay.shutdownDiagnosticLines(includeStacks = false).single()
+                while (!wait.contains("wait=requests.awaitTermination") && System.nanoTime() < deadline) {
+                    Thread.yield()
+                    wait = relay.shutdownDiagnosticLines(includeStacks = false).single()
+                }
+                assertTrue(wait, wait.contains("wait=requests.awaitTermination waitThreadId=${drain.id}"))
+                val snapshot = relay.shutdownDiagnosticLines(includeStacks = true)
+                val request = snapshot.single { it.startsWith("thread=HEV request #") }
+                assertTrue(request, request.contains("daemon=") && request.contains("interrupted="))
+                assertTrue(request, request.substringAfter(" stack=").split(" <- ").size <= 20)
+                assertTrue(request, request.contains(".prepare:"))
+                assertTrue(snapshot.any { it.startsWith("thread=RelayWait (Test relay wait) id=${drain.id} ") })
+                assertTrue(snapshot.none { it.contains(relay.configSecret) })
                 assertFalse(failures.any { it.code == TransportCode.RELAY_STOP })
             }
         } finally {
             leave.countDown()
+            drain.join(3_000)
+            assertFalse(drain.isAlive)
             relay.close()
             assertTrue(relay.awaitShutdown())
             assertTrue(relay.isTerminated)

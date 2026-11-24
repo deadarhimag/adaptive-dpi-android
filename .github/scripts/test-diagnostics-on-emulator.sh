@@ -125,6 +125,8 @@ cleanup() {
       timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v threadtime \
         TunTransportTest:I AppTransportTest:I ExtendedTunTest:I VpnLifecycleTest:I AdaptiveHev:I AdaptiveTun:I Vpn:I AndroidRuntime:E TestRunner:I '*:S' \
         > "$log_dir/android.log" 2>&1 || true
+      timeout 10s "$adb" -s "$serial" logcat -b main -d -v threadtime RelayWaitDiag:I '*:S' \
+        > "$log_dir/relay-wait.log" 2>&1 || true
       capture_vpn_journal > "$log_dir/vpn-journal-status.txt" 2>&1 || true
       echo 'Последние строки журнала эмулятора:' >&2
       sed -i '/Sending adb public key/d; /androidboot\.qemu\.adb\.pubkey=/d' "$emulator_log" || true
@@ -193,6 +195,8 @@ until [[ "$boot_completed" == 1 ]]; do
   if [[ "$boot_completed" != 1 ]]; then sleep 2; fi
 done
 
+# Сохраняем несколько снимков стеков даже при шумном выводе инструментальных тестов.
+timeout 10s "$adb" -s "$serial" logcat -b main -G 2M || echo '::warning::Не удалось увеличить буфер logcat.' >&2
 "$adb" -s "$serial" shell input keyevent 82 || fail "ADB не смог разблокировать экран $serial."
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 "$adb" -s "$serial" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk

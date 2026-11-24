@@ -24,6 +24,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 data class RelayShutdownStatus(
@@ -57,23 +58,29 @@ class HevLoopbackRelay internal constructor(
     init { require(maxSessions > 0 && tcpIdleTimeoutMillis > 0) }
 
     private val lock = Any()
+    private val relayId = relayIds.incrementAndGet()
+    private val idleThreadName = "HEV TCP idle #$relayId"
+    private val requestThreadName = "HEV request #$relayId"
+    private val responseThreadName = "HEV response #$relayId"
     private val tcpIdleNanos = TimeUnit.MILLISECONDS.toNanos(tcpIdleTimeoutMillis)
-    private val idleTimers = ScheduledThreadPoolExecutor(1) { task -> Thread(task, "HEV TCP idle") }.apply {
+    private val idleTimers = ScheduledThreadPoolExecutor(1) { task -> Thread(task, idleThreadName) }.apply {
         removeOnCancelPolicy = true
         executeExistingDelayedTasksAfterShutdownPolicy = false
     }
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     private val permits = Semaphore(maxSessions)
     private val clients = mutableSetOf<Peer>()
+    private val openClients = AtomicInteger()
     // Слот соединения резервирует место в обоих пулах. Очереди покрывают возврат потока
     // из предыдущей задачи в пул, а подключений в работе остаётся не больше maxSessions.
-    private val requests = RelayPool(maxSessions, "HEV request")
-    private val responses = RelayPool(maxSessions, "HEV response")
+    private val requests = RelayPool(maxSessions, requestThreadName)
+    private val responses = RelayPool(maxSessions, responseThreadName)
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val closures = SocketClosures()
     private val closeCompleted = CountDownLatch(1)
     @Volatile private var closing = false
-    private val acceptThread = Thread(::accept, "HEV accept")
+    @Volatile private var drainWait: Pair<Thread, String>? = null
+    private val acceptThread = Thread(::accept, "HEV accept #$relayId")
     private val listener = ServerSocket(0, maxSessions, loopback)
 
     val port: Int = listener.localPort
@@ -105,6 +112,7 @@ class HevLoopbackRelay internal constructor(
                     // в ограниченном backlog сокета и ограничено тайм-аутом HEV.
                     if (closing) return
                     val peer = Peer(listener.accept())
+                    openClients.incrementAndGet()
                     synchronized(lock) {
                         if (!closing) {
                             clients.add(peer)
@@ -424,7 +432,13 @@ class HevLoopbackRelay internal constructor(
 
     private fun closePeer(peer: Peer) {
         val reason = if (closing) TransportCancellation.SESSION else TransportCancellation.FLOW
-        if (peer.cancellation.compareAndSet(null, reason)) closeRelay(peer.socket)
+        if (peer.cancellation.compareAndSet(null, reason)) {
+            try {
+                closeRelay(peer.socket)
+            } finally {
+                if (peer.socket.isClosed) openClients.decrementAndGet()
+            }
+        }
     }
 
     private fun closeRelay(socket: Closeable) {
@@ -477,11 +491,56 @@ class HevLoopbackRelay internal constructor(
 
     /** Владелец ждёт фактического освобождения на фоновом потоке. */
     fun awaitDrained() {
-        closeCompleted.await()
-        acceptThread.join()
-        requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-        responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-        idleTimers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+        val owner = Thread.currentThread()
+        try {
+            drainWait = owner to "closeCompleted.await"
+            closeCompleted.await()
+            drainWait = owner to "acceptThread.join"
+            acceptThread.join()
+            drainWait = owner to "requests.awaitTermination"
+            requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            drainWait = owner to "responses.awaitTermination"
+            responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            drainWait = owner to "idleTimers.awaitTermination"
+            idleTimers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+        } finally {
+            drainWait = null
+        }
+    }
+
+    /** Диагностический снимок без блокировки клиентов или ожидания сетевого ввода-вывода. */
+    fun shutdownDiagnosticLines(includeStacks: Boolean, hevThread: Thread? = null): List<String> = buildList {
+        val wait = drainWait
+        val status = shutdownStatus()
+        add("relay=$relayId wait=${wait?.second ?: "none"} waitThreadId=${wait?.first?.id ?: "none"} " +
+            "pendingMask=${status.pendingMask} requestsActive=${status.requestsActive} requestsQueued=${status.requestsQueued} " +
+            "responsesActive=${status.responsesActive} responsesQueued=${status.responsesQueued} " +
+            "acceptThread=${acceptThread.state} requests=${requests.shutdownState()} responses=${responses.shutdownState()} " +
+            "idleTimers=${idleTimers.shutdownState()} idleActive=${idleTimers.activeCount} idleQueued=${idleTimers.queue.size} " +
+            "openClients=${openClients.get()}")
+        if (includeStacks) {
+            val names = setOf(requestThreadName, responseThreadName, idleThreadName)
+            Thread.getAllStackTraces().entries.asSequence()
+                .filter { (thread, _) ->
+                    thread === acceptThread || thread === wait?.first || thread === hevThread || thread.name in names
+                }
+                .sortedBy { it.key.id }
+                .forEach { (thread, stack) ->
+                    val name = if (thread === wait?.first) "RelayWait (${thread.name})" else thread.name
+                    // Только код и номера строк, без Throwable, аргументов или имён сокетов.
+                    val frames = stack.take(20).joinToString(" <- ") {
+                        "${it.className}.${it.methodName}:${it.lineNumber}".take(140)
+                    }
+                    add("thread=$name id=${thread.id} state=${thread.state} daemon=${thread.isDaemon} " +
+                        "interrupted=${thread.isInterrupted} stack=$frames")
+                }
+        }
+    }
+
+    private fun ThreadPoolExecutor.shutdownState() = when {
+        isTerminated -> "TERMINATED"
+        isShutdown -> "SHUTDOWN"
+        else -> "RUNNING"
     }
 
     private fun pendingShutdownSteps(): Int {
@@ -528,6 +587,7 @@ class HevLoopbackRelay internal constructor(
     private data class Frame(val endpoint: Endpoint, val length: Int)
 
     private companion object {
+        val relayIds = AtomicInteger()
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
         const val TCP_BUFFER = 8 * 1_024
         // UDP_BUF_SIZE закреплённой версии HEV. lwIP может фрагментировать IPv4 при MTU 1280.
