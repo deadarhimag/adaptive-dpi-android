@@ -69,11 +69,16 @@ class HevLoopbackRelay internal constructor(
     }
     private val loopback = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
     private val permits = Semaphore(maxSessions)
+    // Неаутентифицированных подключений не больше preAuthLimit: молчащие клиенты не занимают слоты,
+    // а при переполнении закрывается самое старое, поэтому новый клиент не ждёт их тайм-аута.
+    private val preAuthLimit = (maxSessions / 2).coerceAtLeast(2)
+    private val unauthenticated = ArrayDeque<Peer>()
     private val clients = mutableSetOf<Peer>()
     private val openClients = AtomicInteger()
-    // Слот соединения резервирует место в обоих пулах. Очереди покрывают возврат потока
+    // Слот соединения резервирует место в обоих пулах и выдаётся после аутентификации. Пул запросов
+    // дополнительно вмещает неаутентифицированные подключения. Очереди покрывают возврат потока
     // из предыдущей задачи в пул, а подключений в работе остаётся не больше maxSessions.
-    private val requests = RelayPool(maxSessions, requestThreadName)
+    private val requests = RelayPool(maxSessions + preAuthLimit, requestThreadName)
     private val responses = RelayPool(maxSessions, responseThreadName)
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val closures = SocketClosures()
@@ -105,30 +110,28 @@ class HevLoopbackRelay internal constructor(
     private fun accept() {
         try {
             while (!closing) {
-                permits.acquire()
+                // Приём не зависит от слотов: слот нужен только после аутентификации.
+                val peer = Peer(listener.accept())
+                openClients.incrementAndGet()
                 var scheduled = false
-                try {
-                    // При занятых слотах accept приостанавливается. Ожидание остаётся
-                    // в ограниченном backlog сокета и ограничено тайм-аутом HEV.
-                    if (closing) return
-                    val peer = Peer(listener.accept())
-                    openClients.incrementAndGet()
-                    synchronized(lock) {
-                        if (!closing) {
-                            clients.add(peer)
-                            try {
-                                requests.execute { handle(peer) }
-                                scheduled = true
-                            } catch (_: RejectedExecutionException) {
-                                reportRejected(ACCEPT)
-                                clients.remove(peer)
-                            }
+                var evicted: Peer? = null
+                synchronized(lock) {
+                    if (!closing) {
+                        clients.add(peer)
+                        unauthenticated.addLast(peer)
+                        if (unauthenticated.size > preAuthLimit) evicted = unauthenticated.removeFirst()
+                        try {
+                            requests.execute { handle(peer) }
+                            scheduled = true
+                        } catch (_: RejectedExecutionException) {
+                            reportRejected(ACCEPT)
+                            clients.remove(peer)
+                            unauthenticated.remove(peer)
                         }
                     }
-                    if (!scheduled) closePeer(peer)
-                } finally {
-                    if (!scheduled) permits.release()
                 }
+                evicted?.let(::closePeer)
+                if (!scheduled) closePeer(peer)
             }
         } catch (error: Exception) {
             failures.recordError(ACCEPT, error, if (closing) TransportCancellation.SESSION else null)
@@ -149,6 +152,14 @@ class HevLoopbackRelay internal constructor(
                 authenticate(handshake, output)
                 socket.soTimeout = 5_000
             }
+            synchronized(lock) { unauthenticated.remove(peer) }
+            // Слот выдаётся только аутентифицированному клиенту. Ожидание ограничено временем,
+            // после которого HEV уже прекратил ждать ответ на CONNECT.
+            if (!permits.tryAcquire(SLOT_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
+                failures.record(TransportFailure(ACCEPT, TransportCategory.LIMIT, TransportCode.SESSION_LIMIT))
+                return
+            }
+            peer.holdsPermit = true
             val (command, endpoint) = observe(CONTROL_READ, peer) {
                 requireProtocol(input.readUnsignedByte() == 5)
                 val command = input.readUnsignedByte()
@@ -166,8 +177,11 @@ class HevLoopbackRelay internal constructor(
             // Отказ регистрирует владелец операции. Ошибки внешних сокетов уже учтены в OutboundTransport.
         } finally {
             closePeer(peer)
-            synchronized(lock) { clients.remove(peer) }
-            permits.release()
+            synchronized(lock) {
+                clients.remove(peer)
+                unauthenticated.remove(peer)
+            }
+            if (peer.holdsPermit) permits.release()
         }
     }
 
@@ -559,6 +573,7 @@ class HevLoopbackRelay internal constructor(
         val acceptedAt = System.nanoTime()
         val cancellation = AtomicReference<TransportCancellation?>()
         @Volatile var eof = false
+        @Volatile var holdsPermit = false
     }
 
     private class RelayPool(size: Int, name: String) : ThreadPoolExecutor(
@@ -593,6 +608,7 @@ class HevLoopbackRelay internal constructor(
         val relayIds = AtomicInteger()
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
         const val TCP_BUFFER = 8 * 1_024
+        const val SLOT_WAIT_MILLIS = 5_000L
         // UDP_BUF_SIZE закреплённой версии HEV. lwIP может фрагментировать IPv4 при MTU 1280.
         const val MAX_DATAGRAM = 1_500
         val ACCEPT = TransportSite(TransportSubsystem.HEV, TransportOperation.ACCEPT)
