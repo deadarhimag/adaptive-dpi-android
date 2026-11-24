@@ -55,7 +55,9 @@ class SocketClosuresTest {
     fun retryClosesARealSocketThatWasNotClosed() {
         val closures = SocketClosures()
         val socket = Socket()
-        closures.close({ throw IOException("сбой") }, socket::isClosed) {}
+        var first = true
+        // Первая попытка закрытия даёт сбой, повтор той же операции освобождает сокет.
+        closures.close({ if (first) { first = false; throw IOException("сбой") }; socket.close() }, socket::isClosed) {}
         assertFalse(closures.snapshot().confirmed)
         closures.retryUnconfirmed { throw AssertionError(it) }
         assertTrue(socket.isClosed)
