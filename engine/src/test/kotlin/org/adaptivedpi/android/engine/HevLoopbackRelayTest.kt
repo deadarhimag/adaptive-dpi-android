@@ -21,6 +21,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLContext
 
 class HevLoopbackRelayTest {
     private val ip = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
@@ -778,7 +779,10 @@ class HevLoopbackRelayTest {
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
         val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
-        val relay = HevLoopbackRelay(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, tcpIdleTimeoutMillis) {
+        val relay = HevLoopbackRelay(
+            transport, destination, maxSessions, failures, { _, thread -> thread.start() },
+            tcpIdleTimeoutMillis,
+        ) {
             error("Неожиданная остановка релея")
         }
         relay.use { test(it, transport) }

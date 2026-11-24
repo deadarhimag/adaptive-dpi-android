@@ -1,0 +1,32 @@
+name: Контрольный транспортный стенд
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Проверить содержимое TCP, UDP и HTTPS на localhost
+        run: |
+          fixture="$(mktemp -d)"
+          trap 'rm -f -- "$fixture/key.pem" "$fixture/cert.pem"; rmdir -- "$fixture"' EXIT
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost' -keyout "$fixture/key.pem" -out "$fixture/cert.pem"
+          timeout 40s python3 -B scripts/transport-host-lab.py \
+            --certificate "$fixture/cert.pem" --key "$fixture/key.pem" --report "$RUNNER_TEMP/transport-host.json"
+
+      - name: Сохранить результаты стенда
+        uses: actions/upload-artifact@v7
+        with:
+          name: transport-host
+          path: ${{ runner.temp }}/transport-host.json
+          if-no-files-found: error

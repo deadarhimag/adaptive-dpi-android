@@ -30,9 +30,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.adaptivedpi.android.engine.EngineEmergencyStop
-import org.adaptivedpi.android.engine.EngineHealthSource
-import org.adaptivedpi.android.engine.EngineNetwork
 import org.adaptivedpi.android.engine.TransportCategory
 import org.adaptivedpi.android.engine.TransportCode
 import org.adaptivedpi.android.engine.TransportFailure
@@ -83,8 +80,6 @@ class AdaptiveVpnService : VpnService() {
     private var sessionStart: Job? = null
     private var transportPoll: Job? = null
     private var transportStarted = false
-    private var engineMonitor: Job? = null
-    private var engineEmergencyStop: EngineEmergencyStop? = null
     private var activeMarker: UUID? = null
     private var transport: ExperimentalTransport? = null
     private var transportDiagnostics: TransportSessionDiagnostics? = null
@@ -419,26 +414,6 @@ class AdaptiveVpnService : VpnService() {
         VpnEventHistory.record(type, sessionId?.toSessionUuid(), state = VpnController.state.value)
     }
 
-    /** Точка подключения будущего движка после создания проверяемого сеанса. Вызывается в главном потоке. */
-    internal fun superviseEngine(
-        source: EngineHealthSource,
-        emergencyStop: EngineEmergencyStop,
-        network: () -> EngineNetwork,
-    ) {
-        val id = checkNotNull(sessionId)
-        check(!shutdown.started && engineMonitor == null)
-        engineEmergencyStop = emergencyStop
-        engineMonitor = monitorEngine(source, network, onConfirmed = {
-            mainExecutor.execute {
-                if (sessionId == id && !shutdown.started) VpnController.engineConfirmed(id)
-            }
-        }) { code, error ->
-            mainExecutor.execute {
-                if (sessionId == id && !shutdown.started) finishSession(VpnEvent.CriticalFailure, code, error)
-            }
-        }
-    }
-
     override fun onRevoke() {
         // Android может вызвать отзыв разрешения вне главного потока.
         mainExecutor.execute {
@@ -604,11 +579,6 @@ class AdaptiveVpnService : VpnService() {
         closingTransport = runningTransport
         val callbacks = networkCallbacks.toList()
         networkCallbacks.clear()
-        val watcher = engineMonitor
-        engineMonitor = null
-        watcher?.cancel()
-        val emergency = engineEmergencyStop
-        engineEmergencyStop = null
         val descriptor = tunnel
         tunnel = null
         val last = VpnController.transport.value?.takeIf { it.sessionId == transportDiagnostics?.id }
@@ -643,8 +613,6 @@ class AdaptiveVpnService : VpnService() {
                     }
                     Unit
                 },
-                CleanupStep.EngineTunnel to { emergency?.closeTunnel(); Unit },
-                CleanupStep.EngineStop to { emergency?.requestStop(); Unit },
             )
             releaseVpnResources(::recordCleanupFailure, *steps.map { (step, operation) ->
                 step to { cleanupStage(step); operation() }
@@ -655,8 +623,6 @@ class AdaptiveVpnService : VpnService() {
                     .onFailure { recordCleanupFailure(CleanupStep.NetworkCallback, it) }
             }
         }
-        cleanupStage(CleanupStep.EngineMonitor)
-        watcher?.join()
         if (runningTransport != null) {
             cleanupStage(CleanupStep.NativeExit)
             runningTransport.finished.await()
