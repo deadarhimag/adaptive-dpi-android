@@ -20,7 +20,7 @@
 
 | Когда | Состав |
 | --- | --- |
-| Каждый push в `main` и каждый pull request | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (21) и расширенный (7) наборы, проверка APK |
+| Каждый push в `main` и каждый pull request, кроме правок только документации (`*.md`, `docs/**`, `LICENSE`; исключение - `docs/PIXEL7_TESTING_RU.md`, он входит в артефакт сборки) | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (21) и расширенный (7) наборы, проверка APK |
 | Экспериментальные ветки | Черновой pull request в `main` ради Android CI без слияния |
 | Вручную или по расписанию **[план]** | AVD API 29 (нижняя граница) и 36; API 37 - при наличии официального образа; нативные host-тесты с санитайзерами; фаззинг разборщиков |
 | Лаборатория, вручную **[план]** | DPI-стенд Linux с PCAP |
@@ -209,7 +209,7 @@ python -B scripts/transport-host-lab.py --certificate <cert.pem> --key <key.pem>
 
 | Workflow | Когда | Что |
 | --- | --- | --- |
-| `android-build.yml` **[есть]** | push в `main`, pull request, вручную | JVM, lint, APK, AVD API 34 базовый и расширенный наборы, проверка APK, артефакты для Pixel 7 |
+| `android-build.yml` **[есть]** | push в `main`, pull request (кроме правок только документации), вручную | JVM, lint, APK, AVD API 34 базовый и расширенный наборы, проверка APK, артефакты для Pixel 7 |
 | `transport-host.yml` **[есть]** | Вручную | Стенд целостности localhost; нативные host-тесты с санитайзерами добавляются в задаче 1.6 |
 | DPI-стенд **[план]** | Вручную и для pull request, меняющих `:engine` или `:analysis` | Сетевые пространства имён, nftables, NFQUEUE, `tcpdump`; модели DPI из каталога; критерии приёмки движка; PCAP в артефакте. На размещённых GitHub раннерах Linux доступен `sudo` без пароля, этого достаточно для пространств имён и захвата |
 | Матрица AVD **[план]** | По расписанию | API 29, 36, 37 (при наличии образа) |
