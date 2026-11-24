@@ -198,6 +198,8 @@ done
 # Сохраняем несколько снимков стеков даже при шумном выводе инструментальных тестов.
 timeout 10s "$adb" -s "$serial" logcat -b main -G 2M || echo '::warning::Не удалось увеличить буфер logcat.' >&2
 "$adb" -s "$serial" shell input keyevent 82 || fail "ADB не смог разблокировать экран $serial."
+# Эмулятор после загрузки перегружен: системный диалог ANR лаунчера перекрывал окно согласия VPN.
+"$adb" -s "$serial" shell settings put global hide_error_dialogs 1 || fail "ADB не смог скрыть диалоги ошибок на $serial."
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 "$adb" -s "$serial" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 "$adb" -s "$serial" shell pm grant org.adaptivedpi.android android.permission.POST_NOTIFICATIONS
