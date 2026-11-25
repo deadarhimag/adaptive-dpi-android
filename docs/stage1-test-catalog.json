@@ -175,6 +175,31 @@
       "limitations": "Отказ JNI или TUN close может задержать исчезновение маршрута. JVM-исключение не моделирует не возвращающийся close."
     },
     {
+      "id": "S1-RELAY-CLOSE-COUNT-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "REV25-014"
+      ],
+      "mechanism": "Диагностический счётчик сокетов релея",
+      "preconditions": "Релей принял и аутентифицировал реальный TCP-клиент",
+      "inputs": "Исключение до или после закрытия, удержание повтора и операция без закрытия",
+      "events": "Остановить релей, дождаться первого close и повтора, вызвать второй Stop либо исчерпать повторы и подтвердить закрытие",
+      "expected": "До подтверждённого освобождения учитывается один сокет. После него счётчик равен нулю при любом количестве вызовов Stop",
+      "forbidden": "Обнулять счётчик по Stop, учитывать один сокет дважды либо допускать отрицательное значение",
+      "acceptance": "Сверить openClients, isClosed, EOF, число попыток и подтверждение завершения",
+      "environment": "JVM, TCP loopback",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#peerCountDropsAfterConfirmedCloseEvenWhenCloseThrowsAfterward",
+        "HevLoopbackRelayTest#peerCountDropsOnceWhenRetryClosesSocketDuringConcurrentStop",
+        "HevLoopbackRelayTest#peerCountKeepsExhaustedSocketUntilClosureIsConfirmed"
+      ],
+      "limitations": "Счётчик диагностический. Гарантии допуска Start проверяются по подтверждению очистки и состоянию транспорта."
+    },
+    {
       "id": "S1-STOP-TRAFFIC-01",
       "stage": 1,
       "requirements": [

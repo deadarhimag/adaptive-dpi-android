@@ -34,6 +34,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -575,18 +576,27 @@ class HevLoopbackRelay internal constructor(
     private fun closePeer(peer: Peer) {
         val reason = if (closing) TransportCancellation.SESSION else TransportCancellation.FLOW
         if (peer.cancellation.compareAndSet(null, reason)) {
+            // Эта проверка остаётся у SocketClosures и после ухода Peer из рабочих очередей.
+            fun confirmed(): Boolean {
+                if (!peer.socket.isClosed) return false
+                if (peer.closureCounted.compareAndSet(false, true)) openClients.decrementAndGet()
+                return true
+            }
             try {
-                closeRelay(peer.socket)
+                closures.close({ closeRelaySocket(peer.socket) }, ::confirmed, ::reportCloseFailure)
             } finally {
-                if (peer.socket.isClosed) openClients.decrementAndGet()
+                // close может выбросить исключение уже после освобождения сокета.
+                confirmed()
             }
         }
     }
 
     private fun closeRelay(socket: Closeable) {
-        closures.close(socket, closeRelaySocket) {
-            failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP)
-        }
+        closures.close(socket, closeRelaySocket, ::reportCloseFailure)
+    }
+
+    private fun reportCloseFailure(error: Exception) {
+        failures.recordError(CLOSE, error, fallback = TransportCategory.CLEANUP)
     }
 
     override fun close() {
@@ -633,7 +643,7 @@ class HevLoopbackRelay internal constructor(
 
     /** Повтор закрытия сокетов релея и исходящего транспорта, освобождение которых не подтвердилось. */
     private fun retryUnconfirmedClosures() {
-        closures.retryUnconfirmed { failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP) }
+        closures.retryUnconfirmed(::reportCloseFailure)
         transport.retryUnconfirmedClosures()
     }
 
@@ -723,6 +733,7 @@ class HevLoopbackRelay internal constructor(
     }
 
     private class Peer(val socket: Socket) {
+        val closureCounted = AtomicBoolean()
         val acceptedAt = System.nanoTime()
         val cancellation = AtomicReference<TransportCancellation?>()
         @Volatile var eof = false

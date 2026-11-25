@@ -30,7 +30,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
 
 class HevLoopbackRelayTest {
@@ -110,6 +112,113 @@ class HevLoopbackRelayTest {
                 listener.close()
                 relay.close()
                 executor.shutdownNow()
+            }
+        }
+    }
+
+    @Test
+    fun peerCountDropsAfterConfirmedCloseEvenWhenCloseThrowsAfterward() {
+        for (throwAfterClose in listOf(false, true)) {
+            val attempts = AtomicInteger()
+            relay(closeSocket = { socket ->
+                socket.close()
+                if (socket is Socket) {
+                    attempts.incrementAndGet()
+                    if (throwAfterClose) throw IOException("Отказ после закрытия")
+                }
+            }) { relay, _ ->
+                client(relay).use { client ->
+                    assertEquals(0, authenticate(relay.configSecret, client))
+                    assertEquals(1, relay.diagnosticOpenClients())
+                    relay.close()
+                    assertEquals(0, relay.diagnosticOpenClients())
+                    relay.awaitDrained()
+                    relay.close()
+                    assertEquals(0, relay.diagnosticOpenClients())
+                    assertEquals(1, attempts.get())
+                }
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun peerCountDropsOnceWhenRetryClosesSocketDuringConcurrentStop() {
+        val attempts = AtomicInteger()
+        val retryEntered = CountDownLatch(1)
+        val releaseRetry = CountDownLatch(1)
+        val accepted = AtomicReference<Socket>()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            relay(closeSocket = { socket ->
+                if (socket is Socket) {
+                    accepted.set(socket)
+                    if (attempts.incrementAndGet() == 1) throw IOException("Отказ до закрытия")
+                    retryEntered.countDown()
+                    check(releaseRetry.await(3, TimeUnit.SECONDS))
+                }
+                socket.close()
+            }) { relay, _ ->
+                client(relay).use { client ->
+                    try {
+                        assertEquals(0, authenticate(relay.configSecret, client))
+                        assertEquals(1, relay.diagnosticOpenClients())
+                        val stop = executor.submit { relay.close(); relay.awaitDrained() }
+                        assertTrue(retryEntered.await(3, TimeUnit.SECONDS))
+                        relay.close()
+                        assertFalse(accepted.get().isClosed)
+                        assertFalse(relay.socketClosures().confirmed)
+                        assertEquals(1, relay.diagnosticOpenClients())
+                        releaseRetry.countDown()
+                        stop.get(3, TimeUnit.SECONDS)
+                        assertTrue(accepted.get().isClosed)
+                        assertEquals(-1, client.getInputStream().read())
+                        assertTrue(relay.isTerminated)
+                        assertEquals(0, relay.diagnosticOpenClients())
+                        relay.close()
+                        relay.awaitDrained()
+                        assertEquals(0, relay.diagnosticOpenClients())
+                        assertEquals(2, attempts.get())
+                    } finally {
+                        releaseRetry.countDown()
+                        accepted.get()?.close()
+                    }
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun peerCountKeepsExhaustedSocketUntilClosureIsConfirmed() {
+        val accepted = AtomicReference<Socket>()
+        val attempts = AtomicInteger()
+        relay(closeSocket = { socket ->
+            if (socket is Socket) {
+                accepted.set(socket)
+                attempts.incrementAndGet()
+                return@relay
+            }
+            socket.close()
+        }) { relay, _ ->
+            client(relay).use { client ->
+                try {
+                    assertEquals(0, authenticate(relay.configSecret, client))
+                    relay.close()
+                    relay.awaitDrained()
+                    val peer = accepted.get()
+                    assertEquals(3, attempts.get())
+                    assertFalse(peer.isClosed)
+                    assertFalse(relay.isTerminated)
+                    assertEquals(1, relay.diagnosticOpenClients())
+                    peer.close()
+                    relay.awaitDrained()
+                    assertTrue(relay.isTerminated)
+                    assertEquals(0, relay.diagnosticOpenClients())
+                    assertEquals(3, attempts.get())
+                } finally {
+                    accepted.get()?.close()
+                }
             }
         }
     }
@@ -1079,13 +1188,14 @@ class HevLoopbackRelayTest {
         flows: FlowObserver = FlowObserver.None,
         startAccepting: (ServerSocket, Thread) -> Unit = { _, thread -> thread.start() },
         onPreAuthRegistered: ((SocketAddress) -> Unit)? = null,
+        closeSocket: (Closeable) -> Unit = Closeable::close,
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
         val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
         val relay = HevLoopbackRelay(
             transport, destination, maxSessions, failures, startAccepting,
             tcpIdleTimeoutMillis, flows = flows, udpIdleTimeoutMillis = udpIdleTimeoutMillis,
-            onPreAuthRegistered = onPreAuthRegistered,
+            onPreAuthRegistered = onPreAuthRegistered, closeRelaySocket = closeSocket,
         ) {
             error("Неожиданная остановка релея")
         }
@@ -1121,6 +1231,9 @@ class HevLoopbackRelayTest {
 
     private fun authenticate(secret: String, socket: Socket) =
         authenticate(secret, DataInputStream(socket.getInputStream()), DataOutputStream(socket.getOutputStream()))
+
+    private fun HevLoopbackRelay.diagnosticOpenClients() =
+        shutdownDiagnosticLines(includeStacks = false).single().substringAfterLast(" openClients=").toInt()
 
     private fun assertBeforeHandshakeTimeout(started: Long, finished: Long) {
         // Оставляем запас до пятисекундного дедлайна релея, включая округление тайм-аута чтения.
