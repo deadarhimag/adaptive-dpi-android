@@ -74,7 +74,7 @@ internal data class VpnCleanupDetails(
         if (mask and 2 != 0) add("пул запросов")
         if (mask and 4 != 0) add("пул ответов")
         if (mask and 8 != 0) add("закрытие сокетов и пулов")
-        if (mask and 16 != 0) add("завершение таймеров простоя TCP")
+        if (mask and 16 != 0) add("завершение таймеров простоя TCP и UDP")
     }.joinToString(", ")
 
     companion object {

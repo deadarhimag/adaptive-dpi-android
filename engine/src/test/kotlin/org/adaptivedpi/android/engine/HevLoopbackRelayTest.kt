@@ -1,5 +1,8 @@
 package org.adaptivedpi.android.engine
 
+import org.adaptivedpi.android.engine.flow.FlowObserver
+import org.adaptivedpi.android.engine.flow.UdpEnd
+import org.adaptivedpi.android.engine.flow.UdpRecord
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -88,6 +91,37 @@ class HevLoopbackRelayTest {
                         assertEquals(index, packet.data[0].toInt())
                         Thread.sleep(45)
                     }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun incomingUdpKeepsAssociationThenStopRecordsBothDirectionsOnce() {
+        val outcomes = ConcurrentLinkedQueue<UdpRecord>()
+        val observer = object : FlowObserver by FlowObserver.None {
+            override fun onUdp(association: UdpRecord) { outcomes.add(association) }
+        }
+        DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
+            server.soTimeout = 1_000
+            relay(readTimeoutMillis = 120, udpIdleTimeoutMillis = 220, flows = observer) { relay, _ ->
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    command(output, 5, 0)
+                    assertEquals(0, reply(input))
+                    frame(output, server.localPort, byteArrayOf(9))
+                    val peer = DatagramPacket(ByteArray(1), 1)
+                    server.receive(peer)
+                    repeat(8) { index ->
+                        Thread.sleep(45)
+                        server.send(DatagramPacket(byteArrayOf(index.toByte()), 1, peer.socketAddress))
+                        assertArrayEquals(byteArrayOf(index.toByte()), response(input))
+                    }
+                    relay.close()
+                    relay.awaitDrained()
+                    assertEquals(listOf(UdpRecord(server.localPort, 1, 8, UdpEnd.CANCELLED)), outcomes.toList())
                 }
             }
         }
@@ -883,12 +917,14 @@ class HevLoopbackRelayTest {
         failures: TransportFailureReporter = TransportFailureReporter(),
         tcpIdleTimeoutMillis: Long = 60_000,
         readTimeoutMillis: Int = 15_000,
+        udpIdleTimeoutMillis: Long = 60_000,
+        flows: FlowObserver = FlowObserver.None,
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
         val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
         val relay = HevLoopbackRelay(
             transport, destination, maxSessions, failures, { _, thread -> thread.start() },
-            tcpIdleTimeoutMillis,
+            tcpIdleTimeoutMillis, flows = flows, udpIdleTimeoutMillis = udpIdleTimeoutMillis,
         ) {
             error("Неожиданная остановка релея")
         }
