@@ -408,7 +408,9 @@ class DiagnosticCenterTest {
         center(journal).recordProcessExits(listOf(record))
         assertTrue(journal.read().isEmpty())
 
-        assertTrue(blocker.delete())
+        // Неудачная запись сама убирает пустой каталог-помеху (finally в writeDiagnosticFile): дальше путь свободен.
+        blocker.delete()
+        assertFalse(blocker.exists())
         val retry = center(DiagnosticJournal(temporary.root, clock = { now }))
         retry.recordProcessExits(listOf(record))
         center(DiagnosticJournal(temporary.root, clock = { now })).recordProcessExits(listOf(record))
