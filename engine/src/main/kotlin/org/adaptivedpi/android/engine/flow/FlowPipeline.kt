@@ -131,11 +131,22 @@ internal class FlowPipeline(
     private fun kindOf(bytes: ByteArray, size: Int): FlowKind {
         if (size == 0) return FlowKind.OTHER
         if (bytes[0].toInt() == 0x16) return FlowKind.TLS
-        return if (HTTP_METHODS.any { method -> (0 until minOf(size, method.size)).all { bytes[it] == method[it] } }) {
+        return if (HTTP_METHODS.any { method -> hasHttpPrefix(bytes, size, method) }) {
             FlowKind.HTTP
         } else {
             FlowKind.OTHER
         }
+    }
+
+    // Пассивный признак. Смотрим только доступную часть первой строки, не читаем дополнительные байты.
+    private fun hasHttpPrefix(bytes: ByteArray, size: Int, method: ByteArray): Boolean {
+        if (size < method.size || method.indices.any { bytes[it] != method[it] }) return false
+        for (index in method.size until size) {
+            val character = bytes[index].toInt()
+            if (character == 13 || character == 10) return index > method.size
+            if (character !in 32..126 || index == method.size && character == 32) return false
+        }
+        return true
     }
 
     companion object {

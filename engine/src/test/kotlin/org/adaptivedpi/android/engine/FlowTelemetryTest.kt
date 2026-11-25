@@ -110,6 +110,46 @@ class FlowTelemetryTest {
     }
 
     @Test
+    fun httpClassificationRequiresACompleteMethodInTheFirstRead() {
+        val outcomes = Outcomes()
+        val pipeline = FlowPipeline(outcomes, {})
+        val cases = listOf(
+            "G" to FlowKind.OTHER,
+            "P" to FlowKind.OTHER,
+            "POS" to FlowKind.OTHER,
+            "GET" to FlowKind.OTHER,
+            "GET " to FlowKind.HTTP,
+            "POST /resource HTTP/1.1\r\n" to FlowKind.HTTP,
+            "GE\u0000\u0017" to FlowKind.OTHER,
+            "GET \u0000\u0017" to FlowKind.OTHER,
+            "ordinary bytes" to FlowKind.OTHER,
+        )
+        for ((text, expected) in cases) {
+            val flow = pipeline.begin(FlowKey(ip, 80), 0)
+            val bytes = text.toByteArray()
+            val captured = pipeline.capture(flow, bytes, bytes.size) { _, _, _, _ -> error("Лишнее чтение") }
+            assertArrayEquals(bytes, captured.bytes.copyOf(captured.size))
+            flow.finish()
+            assertEquals(text, expected, outcomes.queue.remove().kind)
+        }
+    }
+
+    @Test
+    fun anIncompleteTlsPrefixKeepsTheExistingCaptureBehavior() {
+        val outcomes = Outcomes()
+        val pipeline = FlowPipeline(outcomes, {})
+        val flow = pipeline.begin(FlowKey(ip, 443), 0)
+        val prefix = byteArrayOf(0x16, 0x03)
+        var reads = 0
+        val captured = pipeline.capture(flow, prefix, prefix.size) { _, _, _, _ -> reads++; -1 }
+        flow.finish()
+        assertEquals(1, reads)
+        assertTrue(captured.eof)
+        assertArrayEquals(prefix, captured.bytes.copyOf(captured.size))
+        assertEquals(FlowKind.TLS, outcomes.queue.remove().kind)
+    }
+
+    @Test
     fun recorderCountsKindsStagesHelloSizesAndRatesWithoutNames() {
         val recorder = FlowOutcomeRecorder()
         recorder.onOutcome(record(hello = FlowHello(hasName = true, ech = false, length = 500, records = 1), rate = 1_000))
