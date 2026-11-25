@@ -3,6 +3,7 @@ package org.adaptivedpi.android.vpn.diagnostics
 import org.adaptivedpi.android.vpn.VpnOutboundSocketPolicy
 import org.adaptivedpi.android.vpn.analysis.IpFamily
 import org.adaptivedpi.android.vpn.analysis.SystemDns
+import java.io.IOException
 import java.net.InetAddress
 import java.net.Socket
 
@@ -23,7 +24,15 @@ internal class PhysicalProbeNetwork(
     private val dns: SystemDns,
     private val policy: VpnOutboundSocketPolicy,
 ) : ProbeNetwork {
-    override suspend fun resolve(host: String, family: IpFamily) = dns.resolve(host, family)
+    override suspend fun resolve(host: String, family: IpFamily): List<InetAddress> {
+        policy.requirePhysicalNetwork()
+        return try {
+            dns.resolve(host, family).also { policy.requirePhysicalNetwork() }
+        } catch (error: IOException) {
+            policy.requirePhysicalNetwork()
+            throw error
+        }
+    }
 
     override fun prepare(socket: Socket) = policy.prepare(socket)
 

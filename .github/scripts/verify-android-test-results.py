@@ -31,7 +31,10 @@ CLASSES = {
         "missingTargetPackageFailsStartupAndAllowsAnotherSession",
         "activeSessionSurvivesRecreationAndOldNotificationCannotStopItsSuccessor",
     ),
-    PACKAGE + "TunTransportInstrumentedTest": ("tcpUdpAndDnsTraverseTunAcrossTwoSessions",),
+    PACKAGE + "TunTransportInstrumentedTest": (
+        "tcpUdpAndDnsTraverseTunAcrossTwoSessions",
+        "protectedResourceProbeAvoidsTunAndVerifiesFixtureContent",
+    ),
     PACKAGE + "ApplicationTransportInstrumentedTest": ("separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions",),
     PACKAGE + "KernelCapabilitiesInstrumentedTest": ("everyOperationReportsOkOrErrnoOnALoopbackPair",),
 }

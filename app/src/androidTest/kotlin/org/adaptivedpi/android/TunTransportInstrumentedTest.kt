@@ -9,6 +9,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.Base64
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.delay
@@ -20,6 +21,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.vpn.ExperimentalTarget
 import org.adaptivedpi.android.vpn.TransportSnapshot
+import org.adaptivedpi.android.vpn.TransportTestHooks
 import org.adaptivedpi.android.vpn.VpnController
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistory
@@ -41,6 +43,49 @@ import java.net.Proxy
 import java.net.Socket
 
 class TunTransportInstrumentedTest {
+    @Test
+    fun protectedResourceProbeAvoidsTunAndVerifiesFixtureContent() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val args = InstrumentationRegistry.getArguments()
+        val targetArgument = args.getString("transportTarget")
+        if (args.getString("requireTransportFixture") == "true") assertNotNull("Нужен адрес стенда", targetArgument)
+        assumeTrue("Нужен локальный HTTPS-стенд", targetArgument != null)
+        val target = checkNotNull(targetArgument)
+        val address = checkNotNull(ExperimentalTarget.parse(target))
+        val cert = Base64.decode(checkNotNull(args.getString("transportCertificate")), Base64.DEFAULT)
+        val connectivity = checkNotNull(instrumentation.targetContext.getSystemService(ConnectivityManager::class.java))
+        ActivityScenario.launch(TransportTestActivity::class.java).use { scenario ->
+            prepareVpn(scenario, false)
+            val control = try {
+                scenario.onActivity { activity ->
+                    requireIdle()
+                    check(VpnController.requestStart(activity, target) == null)
+                }
+                assertEquals(VpnState.EngineRunning, awaitTransition("Проверка маршрута пробы", VpnState.Starting, VpnState.TransportStarting))
+                assertOnlyFixtureRoute(connectivity, address)
+                val before = snapshot()
+                runBlocking {
+                    assertTrue("Контрольный запрос должен подтвердить содержимое", TransportTestHooks.checkFixtureResource(address, cert, false))
+                    val control = withTimeout(TIMEOUT.toLong()) {
+                        VpnController.transport.first {
+                            it != null && it.openedTcp > before.openedTcp && it.tunReceivedPackets > before.tunReceivedPackets
+                        }!!
+                    }
+                    assertTrue("Штатная проба должна подтвердить то же содержимое", TransportTestHooks.checkFixtureResource(address, cert, true))
+                    control
+                }
+            } finally {
+                instrumentation.runOnMainSync { VpnController.stop() }
+                assertEquals(VpnState.Idle, awaitTransition("Stop после пробы", VpnState.Stopping))
+                awaitRouteRemoval(connectivity, address)
+            }
+            val after = snapshot()
+            assertEquals(control.sessionId, after.sessionId)
+            assertTrue("Для сравнения нужен окончательный снимок", after.finalized)
+            assertEquals("Штатная проба открыла соединение релея", control.openedTcp, after.openedTcp)
+        }
+    }
+
     @Test
     fun tcpUdpAndDnsTraverseTunAcrossTwoSessions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

@@ -76,7 +76,7 @@ internal class VpnOutboundSocketPolicy(
         throw TransportSocketException(TransportCode.PROTECT_REJECTED, TransportCategory.PROTECTION, TransportOperation.PROTECT)
     }
 
-    private fun requirePhysicalNetwork() {
+    internal fun requirePhysicalNetwork() {
         val capabilities = connectivity.getNetworkCapabilities(network)
         if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) != true) {
             throw TransportSocketException(TransportCode.NO_PHYSICAL_NETWORK, TransportCategory.UNREACHABLE, TransportOperation.BIND)

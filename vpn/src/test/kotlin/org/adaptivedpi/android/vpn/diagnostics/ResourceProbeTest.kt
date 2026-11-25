@@ -20,6 +20,7 @@ import org.junit.Test
 import java.io.File
 import java.net.ConnectException
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
 import java.net.ServerSocket
 import java.net.Socket
@@ -73,7 +74,8 @@ class ResourceProbeTest {
         tls: SSLSocketFactory = SSLSocketFactory.getDefault() as SSLSocketFactory,
         allowed: (InetAddress) -> Boolean = { true },
         cleartext: Boolean = true,
-    ) = ResourceProbe(network, tls, { cleartext }, allowed, minSilenceMillis = 300, errnoOf = jvmErrno)
+        connect: (Socket, InetSocketAddress, Int) -> Unit = Socket::connect,
+    ) = ResourceProbe(network, tls, { cleartext }, allowed, minSilenceMillis = 300, errnoOf = jvmErrno, connectSocket = connect)
 
     private fun dns(vararg addresses: InetAddress) = TestNetwork({ addresses.toList() })
 
@@ -202,7 +204,7 @@ class ResourceProbeTest {
             val result = probe.check(URI("https://localhost:$port"))
             val tls = result.last()
             assertEquals(ProbeStage.TLS, tls.stage)
-            assertEquals(ProbeStatus.TLS_SILENCE, tls.status)
+            assertEquals(ProbeStatus.TLS_TIMEOUT, tls.status)
             val rtt = checkNotNull(tls.rttMillis)
             assertTrue(rtt >= 1)
             assertEquals(Math.round(tls.elapsedMillis * 10.0 / rtt) / 10.0, tls.failureAfterRtt)
@@ -217,15 +219,19 @@ class ResourceProbeTest {
         assertEquals(ProbeStatus.TCP_RESET, refused.last().status)
         assertEquals(111, refused.last().errno)
 
-        for ((failure, expected) in listOf<Pair<Exception, ProbeStatus>>(
+        for ((failure, expected) in listOf(
             SocketTimeoutException() to ProbeStatus.TCP_TIMEOUT,
             NoRouteToHostException() to ProbeStatus.TCP_UNREACHABLE,
-            (TransportSocketException(TransportCode.PROTECT_REJECTED, TransportCategory.PROTECTION, TransportOperation.PROTECT)
-                to ProbeStatus.PROBE_UNAVAILABLE),
         )) {
-            val probe = newProbe(TestNetwork({ listOf(loopback) }, { throw failure }))
+            val probe = newProbe(dns(loopback), connect = { _, _, _ -> throw failure })
             assertEquals(expected, probe.check(URI("http://localhost/")).last().status)
         }
+        val protection = newProbe(TestNetwork({ listOf(loopback) }, {
+            throw TransportSocketException(TransportCode.PROTECT_REJECTED, TransportCategory.PROTECTION, TransportOperation.PROTECT)
+        }), connect = { _, _, _ -> error("После отказа protect не должно быть connect") })
+        assertEquals(ProbeStatus.PROBE_UNAVAILABLE, protection.check(URI("http://localhost/")).last().status)
+        val localTimeout = newProbe(TestNetwork({ listOf(loopback) }, { throw SocketTimeoutException() }))
+        assertEquals(ProbeStatus.PROBE_UNAVAILABLE, localTimeout.check(URI("http://localhost/")).last().status)
     }
 
     @Test
@@ -312,6 +318,27 @@ class ResourceProbeTest {
                 assertEquals(2, result.last().attempt)
             }
         }
+    }
+
+    @Test
+    fun mismatchedContentOnFirstAddressDoesNotHideAWorkingAddress() = runBlocking<Unit> {
+        val probe = newProbe(dns(loopback, loopback2))
+        serve(ServerSocket(0, 1, loopback), { respond(it, 200, "wrong") }) { port ->
+            serve(ServerSocket(port, 1, loopback2), { respond(it, 200, "expected") }) {
+                val result = probe.check(URI("http://localhost:$port/"), sha256("expected"))
+                assertEquals(listOf(ProbeStatus.CONTENT_MISMATCH, ProbeStatus.OK),
+                    result.filter { it.stage == ProbeStage.CONTENT }.map { it.status })
+            }
+        }
+    }
+
+    @Test
+    fun unavailableResolverIsNotADnsObservation() = runBlocking<Unit> {
+        val network = TestNetwork(resolver = {
+            throw TransportSocketException(TransportCode.NO_PHYSICAL_NETWORK, TransportCategory.UNREACHABLE)
+        })
+        val result = newProbe(network).check(URI("https://example.test/"))
+        assertEquals(ProbeStatus.PROBE_UNAVAILABLE, result.single().status)
     }
 
     @Test
