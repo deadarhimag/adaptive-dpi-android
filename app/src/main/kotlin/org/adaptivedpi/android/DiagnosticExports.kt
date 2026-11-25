@@ -118,6 +118,16 @@ internal object DiagnosticExports {
 
     fun hasPending(context: Context, name: String): Boolean = pendingFile(context, name) != null
 
+    fun hasInterruptedWrite(context: Context, name: String): Boolean =
+        pendingName.matches(name) && File(File(context.noBackupFilesDir, PENDING_DIR), "$name.writing").isFile
+
+    @Synchronized
+    fun cancelPending(context: Context, name: String): Boolean {
+        if (hasInterruptedWrite(context, name)) return false
+        deletePending(context, name)
+        return true
+    }
+
     private fun pendingFile(context: Context, name: String): File? {
         if (!pendingName.matches(name)) return null
         val directory = File(context.noBackupFilesDir, PENDING_DIR)

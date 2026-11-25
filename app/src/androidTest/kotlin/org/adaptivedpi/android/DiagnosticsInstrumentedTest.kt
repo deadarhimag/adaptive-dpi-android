@@ -237,6 +237,18 @@ class DiagnosticsInstrumentedTest {
     }
 
     @Test
+    fun queuedSafResultUsesItsRestoredSnapshotBeforeFallback() =
+        DiagnosticDocumentRecoveryChecks(context).acceptsQueuedResultBeforeRecovery()
+
+    @Test
+    fun lateSafResultCannotWriteOrCancelANewAttempt() =
+        DiagnosticDocumentRecoveryChecks(context).rejectsOldResultAfterRecoveryAndWhileRetryWaits()
+
+    @Test
+    fun restoredSafCancellationPreservesTheInterruptedWrite() =
+        DiagnosticDocumentRecoveryChecks(context).queuedCancellationPreservesAnAlreadyClaimedSnapshot()
+
+    @Test
     fun cancelSafClearsSnapshotAndAllowsAnotherSave() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val pending = File(context.noBackupFilesDir, "pending-export")

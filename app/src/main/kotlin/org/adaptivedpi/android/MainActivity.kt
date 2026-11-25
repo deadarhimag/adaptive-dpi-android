@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -68,11 +69,18 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
-    private val createDiagnosticDocument =
+    private val documentPicker by lazy { DiagnosticDocumentPicker(activityResultRegistry, ::onDiagnosticDocument) }
+
+    // Этот ключ AndroidX уже мог сохраниться в задачах предыдущей версии.
+    init {
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-            val id = snapshotPreparation.picker ?: return@registerForActivityResult
-            snapshotPreparation.finishPicker(applicationContext, uri, id, snapshotName(id), id == TRANSPORT_REPORT_ID)
+            onDiagnosticDocument(null, uri)
         }
+    }
+
+    private fun onDiagnosticDocument(key: String?, uri: Uri?) {
+        snapshotPreparation.finishPicker(applicationContext, uri, key, ::snapshotName, TRANSPORT_REPORT_ID)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,11 +93,13 @@ class MainActivity : ComponentActivity() {
         // Старое состояние могло сохранить пустой префикс до выделения имени файла.
         val restoredPicker = savedInstanceState?.getString(PENDING_REPORT_ID)
             ?.takeUnless { it == COMBINED_REPORT_PREFIX || it == SNAPSHOT_PREFIX }
+            ?.let { DiagnosticSnapshotPreparation.Picker(it, savedInstanceState.getString(PICKER_REPORT_KEY)) }
         if (snapshotPreparation.restore(restoredPicker, savedInstanceState?.getString(WRITING_REPORT_ID),
                 savedInstanceState?.getString(RETRY_REPORT_ID))) {
-            listOfNotNull(snapshotPreparation.picker, snapshotPreparation.retry.value)
+            listOfNotNull(snapshotPreparation.picker?.id, snapshotPreparation.retryOnSave)
                 .mapNotNull(::snapshotName).forEach(DiagnosticExports::retainPending)
         }
+        snapshotPreparation.picker?.key?.let(documentPicker::register)
         preparingReportId = savedInstanceState?.getString(PREPARING_REPORT_ID)?.takeIf { snapshotName(it) != null }
         preparingReportId?.let { id ->
             val name = checkNotNull(snapshotName(id))
@@ -193,10 +203,11 @@ class MainActivity : ComponentActivity() {
                 putString(SWITCH_APPLICATION, selection.application)
             })
         }
-        outState.putString(PENDING_REPORT_ID, snapshotPreparation.picker)
+        outState.putString(PENDING_REPORT_ID, snapshotPreparation.picker?.id)
+        outState.putString(PICKER_REPORT_KEY, snapshotPreparation.picker?.key)
         outState.putString(WRITING_REPORT_ID, snapshotPreparation.writing)
         outState.putString(PREPARING_REPORT_ID, preparingReportId)
-        outState.putString(RETRY_REPORT_ID, snapshotPreparation.retry.value)
+        outState.putString(RETRY_REPORT_ID, snapshotPreparation.retryOnSave)
         outState.putString(PREVIOUS_PROCESS, VpnController.processIdentity)
         outState.putString(PENDING_DIAGNOSTIC_REQUEST, diagnosticRequest.value?.toString())
         super.onSaveInstanceState(outState)
@@ -216,7 +227,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshVpnAvailability()
-        // Activity Result Registry подключает callback на ON_START.
+        // К этому моменту Registry уже мог доставить сохранённый результат.
         snapshotPreparation.recoverIfNeeded(applicationContext, ::snapshotName)
     }
 
@@ -237,10 +248,11 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (isFinishing) {
             pendingConsentId?.let(VpnController::abandonConsent)
-            listOfNotNull(preparingReportId, snapshotPreparation.picker, snapshotPreparation.writing,
-                snapshotPreparation.retry.value).mapNotNull(::snapshotName).distinct()
+            listOfNotNull(preparingReportId, snapshotPreparation.picker?.id, snapshotPreparation.writing,
+                snapshotPreparation.retryOnSave).mapNotNull(::snapshotName).distinct()
                 .forEach(snapshotPreparation::clearFinishedOwner)
         }
+        documentPicker.close()
         super.onDestroy()
     }
 
@@ -305,12 +317,16 @@ class MainActivity : ComponentActivity() {
 
     private fun openPreparedReport(id: String, name: String) {
         lifecycleScope.launch {
+            var interrupted = false
             val error = try {
                 val task = snapshotPreparation.taskFor(name)
                 if (task != null) {
                     task.await()
                 } else {
-                    check(withContext(Dispatchers.IO) { DiagnosticExports.readPending(applicationContext, name) } != null)
+                    interrupted = withContext(Dispatchers.IO) {
+                        check(DiagnosticExports.readPending(applicationContext, name) != null)
+                        DiagnosticExports.hasInterruptedWrite(applicationContext, name)
+                    }
                 }
                 null
             } catch (cancelled: CancellationException) {
@@ -323,7 +339,7 @@ class MainActivity : ComponentActivity() {
                 preparingReportId = null
                 snapshotPreparation.take(name)
                 if (error == null) {
-                    if (!requestSave(id, snapshotFileName(id))) snapshotPreparation.retry.value = id
+                    if (interrupted || !requestSave(id, snapshotFileName(id))) snapshotPreparation.retry.value = id
                 } else {
                     snapshotPreparation.discard(applicationContext, name)
                     reportExportError(DiagnosticCode.SaveFailed, error)
@@ -362,12 +378,13 @@ class MainActivity : ComponentActivity() {
 
     private fun requestSave(id: String, fileName: String): Boolean {
         if (snapshotPreparation.busy || preparingReportId != null) return false
-        snapshotPreparation.picker = id
+        val key = snapshotPreparation.startPicker(id)
         return try {
-            createDiagnosticDocument.launch(fileName)
+            documentPicker.register(key).launch(fileName)
             true
         } catch (exception: RuntimeException) {
-            snapshotPreparation.picker = null
+            snapshotPreparation.abandonPicker(key)
+            documentPicker.close()
             reportExportError(DiagnosticCode.SaveFailed, exception)
             false
         }
@@ -464,6 +481,7 @@ class MainActivity : ComponentActivity() {
         private const val SWITCH_APPLICATION = "application"
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
+        private const val PICKER_REPORT_KEY = "picker_report_key"
         private const val WRITING_REPORT_ID = "writing_report"
         private const val PREPARING_REPORT_ID = "preparing_report"
         private const val RETRY_REPORT_ID = "retry_report"
