@@ -14,6 +14,9 @@ import java.util.UUID
 data class VpnConsentRequest(val id: String, val intent: Intent)
 
 object VpnController {
+    /** Действие Intent из уведомления «VPN отключён системой»: `MainActivity` запускает обычный путь согласия. */
+    const val ACTION_RESTART = "org.adaptivedpi.android.VPN_RESTART"
+
     private val processId = UUID.randomUUID().toString()
     private val lifecycle = VpnLifecycle(VpnEventHistory::record)
     val state = lifecycle.state

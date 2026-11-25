@@ -247,6 +247,8 @@ Always-on VPN и автозапуск (`SUPPORTS_ALWAYS_ON = true`, измене
 
 #### 1.7 Журнал сбоев, другой VPN, плашка
 
+**Состояние (25.11.2026): реализовано, ожидает CI и проверки на AVD.** Сделано: `ExitReasonReader` и пять кодов `ProcessExit*` (`Native`, `Anr`, `LowMemory`, `Resources`, `Signaled`) в журнале ошибок; ключ дедупликации - идентификатор события, полученный из `pid`, времени, причины и имени процесса записи Android (`UUID.nameUUIDFromBytes`), отдельной метки времени нет; записи старше срока хранения журнала не читаются; `VpnRevokedNotice` в `onRevoke`; действие `VpnController.ACTION_RESTART` в `MainActivity`; плашка `CrashBanner` на главном экране вместо окна при запуске для `AppCrash`, `VpnInterrupted`, `ProcessExitNative`, `ProcessExitAnr`. Отличия от шага 5: состояние «закрыто» хранится не в `SharedPreferences`, а в уже существующем признаке `acknowledged` события журнала (новое хранилище не нужно); кнопка отправки открывает существующий диалог экспорта события. Шаг 6 проверен без изменений кода: на главном экране при `resourcesBlocked` показан текст `vpn_cleanup_pending` с путём «отключить VPN в настройках, принудительно остановить приложение». Не сделано: проверки на AVD (`am crash`, нативный сбой, второй VPN) - предел: в JVM проверены дедупликация, фильтр причин, срок хранения и повторная запись после сбоя записи.
+
 **Прочитать:** `DiagnosticCenter.kt` (`captureCrash`, `recover`), `VpnDiagnostics.kt` (`installCrashHandler`), `DiagnosticJournal.kt`, `DiagnosticEvent.kt`, `AdaptiveVpnService.kt` (`onRevoke`, уведомления), `MainActivity.kt`, `AdaptiveDpiApp.kt`; [ARCHITECTURE.md](ARCHITECTURE.md) «Журнал сбоев», «Автозапуск и постоянная работа».
 
 **Шаги.**

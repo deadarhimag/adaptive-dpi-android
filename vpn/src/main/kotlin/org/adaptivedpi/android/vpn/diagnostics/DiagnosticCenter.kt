@@ -2,6 +2,7 @@ package org.adaptivedpi.android.vpn.diagnostics
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.adaptivedpi.android.vpn.VpnState
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -29,6 +30,22 @@ internal class DiagnosticCenter(
         store(listOf(entry) + current.value)
         notifyOnce(entry.id)
         return entry
+    }
+
+    /**
+     * Причины прошлых завершений процесса. Идентификатор события получается из полей записи Android, поэтому
+     * повторное чтение тех же записей ничего не добавляет, а ключ "уже записано" хранится вместе с событием.
+     */
+    @Synchronized
+    fun recordProcessExits(records: List<ProcessExitRecord>) {
+        val known = current.value.mapTo(HashSet<UUID>()) { it.id }
+        val added = records.mapNotNull { record ->
+            val code = ExitReasonReader.codeOf(record.reason) ?: return@mapNotNull null
+            val id = ExitReasonReader.idOf(record)
+            if (!journal.retains(record.timestampMillis) || !known.add(id)) return@mapNotNull null
+            newEvent(code, VpnSnapshot(VpnState.Idle), id = id, timeMillis = record.timestampMillis)
+        }
+        if (added.isNotEmpty()) store(added + current.value)
     }
 
     @Synchronized
@@ -132,7 +149,8 @@ internal class DiagnosticCenter(
         error: Throwable? = null,
         id: UUID = UUID.randomUUID(),
         cleanup: VpnCleanupDetails? = null,
-    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, journal.now(), androidVersion, cleanup)
+        timeMillis: Long = journal.now(),
+    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, timeMillis, androidVersion, cleanup)
 
     private companion object {
         const val ALERT_INTERVAL_MILLIS = 60_000L

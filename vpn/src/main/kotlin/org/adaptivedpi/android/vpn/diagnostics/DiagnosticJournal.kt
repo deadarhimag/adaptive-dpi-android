@@ -52,8 +52,13 @@ internal class DiagnosticJournal(
 
     // Запись "из будущего" после перевода часов назад сохраняется: возраст по ней не определить,
     // а удалённую запись уже не вернуть. Размер журнала ограничивают maxEntries и maxBytes.
-    private fun isFresh(event: DiagnosticEvent, now: Long) =
-        event.timeMillis >= 0 && (event.timeMillis > now || now - event.timeMillis < maxAgeMillis)
+    private fun isFresh(event: DiagnosticEvent, now: Long) = isRetained(event.timeMillis, now)
+
+    /** Событие с таким временем журнал ещё хранит. Старше срока хранения событие не записывается вовсе. */
+    fun retains(timeMillis: Long) = isRetained(timeMillis, now())
+
+    private fun isRetained(timeMillis: Long, now: Long) =
+        timeMillis >= 0 && (timeMillis > now || now - timeMillis < maxAgeMillis)
 
     fun write(events: List<DiagnosticEvent>) = writeFile(journal, bounded(events))
     fun writeCrash(event: DiagnosticEvent) = writeFile(crash, listOf(event))
