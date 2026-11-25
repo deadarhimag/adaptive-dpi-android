@@ -16,6 +16,13 @@ TESTS = {
     "repeatedSessionsCarryTcpUdpAndDnsWithoutAccumulatingResources",
     "blockedSocketCleanupDoesNotHoldVpnRouteOrAdmitAnotherSession",
 }
+SAF_SUITE = "org.adaptivedpi.android.SafFixtureInstrumentedTest"
+SAF_TESTS = {
+    "startsInTestPackageAndReceivesExactBytesAfterRelease",
+    "requestedOpenAndWriteFailuresAreObservableWithoutFixtureError",
+    "prematureAndFaultedPipesFailWithoutPublishingADigest",
+    "resetRetiresBothReadingAndBlockedWorkersAndTimeoutIsAnError",
+}
 
 
 STATUS_FIELDS = {"id", "numtests", "current", "class", "test"}
@@ -116,7 +123,9 @@ def verify_junit(path, class_name=SUITE, tests=TESTS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--process-recovery", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--process-recovery", action="store_true")
+    mode.add_argument("--saf-fixture", action="store_true")
     parser.add_argument("instrumentation", type=Path)
     parser.add_argument("junit", type=Path)
     parser.add_argument("output", type=Path)
@@ -124,8 +133,13 @@ def main():
     if args.process_recovery:
         suite = "org.adaptivedpi.android.DiagnosticsInstrumentedTest"
         tests = {"anAbortedVpnProcessIsReportedAfterTheNextLaunch"}
+        label = "Восстановление процесса"
+    elif args.saf_fixture:
+        suite, tests = SAF_SUITE, SAF_TESTS
+        label = "Предварительная проверка SAF"
     else:
         suite, tests = SUITE, TESTS
+        label = "Расширенные Android-тесты"
     try:
         args.junit.unlink(missing_ok=True)
         args.output.unlink(missing_ok=True)
@@ -135,7 +149,6 @@ def main():
         args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, ET.ParseError) as error:
         parser.exit(1, f"Android-прогон не подтверждён: {error}\n")
-    label = "Восстановление процесса" if args.process_recovery else "Расширенные Android-тесты"
     print(f"{label}: выполнено {result['executed']}, ошибок 0, пропусков 0.")
 
 

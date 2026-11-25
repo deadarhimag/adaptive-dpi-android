@@ -128,39 +128,39 @@ class DiagnosticsInstrumentedTest {
 
     @Test
     fun recreatingDuringSafWriteKeepsOneWriteAndUnblocksAnotherExport() {
-        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val fixture = SafFixture(context)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val pending = File(context.noBackupFilesDir, "pending-export")
         val previous = pending.list().orEmpty().toSet()
         val report = "Проверка записи ✓\n".repeat(12_000)
-        val monitor = monitorSave(fixture)
+        val monitor = monitorSave(fixture.uri)
         try {
-            context.contentResolver.call(fixture, "reset", "success", null)
+            SafFixture.assertHealthy(checkNotNull(fixture.reset("success", report.toByteArray().size).getBundle("previous")))
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 scenario.onActivity { it.exportSnapshot(report) }
-                await { context.contentResolver.call(fixture, "state", null, null)?.getBoolean("writing") == true }
+                await { fixture.healthyState().getBoolean("writing") }
                 scenario.recreate()
                 assertEquals(1, monitor.hits)
-                context.contentResolver.call(fixture, "release", null, null)
+                fixture.release()
                 await {
-                    val result = context.contentResolver.call(fixture, "state", null, null)
-                    result?.getBoolean("finished") == true && result.getInt("bytes") == report.toByteArray().size &&
+                    val result = fixture.healthyState()
+                    result.getBoolean("finished") && result.getInt("bytes") == report.toByteArray().size &&
                         result.getString("digest") == digest(report.toByteArray()) &&
                         (pending.list().orEmpty().toSet() - previous).isEmpty()
                 }
-                assertEquals(1, context.contentResolver.call(fixture, "state", null, null)?.getInt("opened"))
-                context.contentResolver.call(fixture, "reset", "success", null)
-                context.contentResolver.call(fixture, "release", null, null)
+                assertEquals(1, fixture.healthyState().getInt("opened"))
                 val second = "Второй отчёт"
+                fixture.reset("success", second.toByteArray().size)
+                fixture.release()
                 scenario.onActivity { it.exportSnapshot(second) }
                 await { monitor.hits == 2 }
                 await {
-                    context.contentResolver.call(fixture, "state", null, null)?.getString("digest") ==
+                    fixture.healthyState().getString("digest") ==
                         digest(second.toByteArray()) && (pending.list().orEmpty().toSet() - previous).isEmpty()
                 }
             }
         } finally {
-            context.contentResolver.call(fixture, "release", null, null)
+            fixture.release()
             instrumentation.removeMonitor(monitor)
         }
     }
@@ -256,7 +256,7 @@ class DiagnosticsInstrumentedTest {
 
     @Test
     fun failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry() {
-        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val fixture = SafFixture(context)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val pending = File(context.noBackupFilesDir, "pending-export")
         val previous = pending.list().orEmpty().toSet()
@@ -265,15 +265,17 @@ class DiagnosticsInstrumentedTest {
         val goodUri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", saved)
         try {
             for (mode in listOf("open-error", "write-error")) {
-                val broken = monitorSave(fixture)
-                context.contentResolver.call(fixture, "reset", mode, null)
+                val broken = monitorSave(fixture.uri)
+                SafFixture.assertHealthy(checkNotNull(fixture.reset(mode).getBundle("previous")))
                 try {
                     ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                         val report = "Повтор записи: $mode ✓"
                         val errors = VpnDiagnostics.events.value.map { it.id }.toSet()
                         scenario.onActivity { it.exportSnapshot(report) }
                         await { VpnDiagnostics.events.value.any { it.id !in errors && it.code == DiagnosticCode.SaveFailed } }
-                        assertEquals(1, context.contentResolver.call(fixture, "state", null, null)?.getInt("opened"))
+                        val failure = fixture.healthyState()
+                        assertEquals(1, failure.getInt("opened"))
+                        assertEquals(mode, failure.getString("outcome"))
                         assertTrue((pending.listFiles().orEmpty().filter { it.name !in previous }).single().readText() == report)
                         scenario.recreate()
                         assertEquals(1, broken.hits)
@@ -349,12 +351,12 @@ class DiagnosticsInstrumentedTest {
     @Test
     fun finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val fixture = SafFixture(context)
         val directory = File(context.noBackupFilesDir, "pending-export")
         val previous = directory.list().orEmpty().toSet()
-        val monitor = monitorSave(fixture)
+        val monitor = monitorSave(fixture.uri)
         try {
-            context.contentResolver.call(fixture, "reset", "open-error", null)
+            SafFixture.assertHealthy(checkNotNull(fixture.reset("open-error").getBundle("previous")))
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 scenario.onActivity { it.exportSnapshot("Закрытая задача ✓") }
                 await {
@@ -364,6 +366,7 @@ class DiagnosticsInstrumentedTest {
                     }
                     retry
                 }
+                assertEquals("open-error", fixture.healthyState().getString("outcome"))
                 scenario.onActivity { it.finish() }
             }
             val file = directory.listFiles().orEmpty().single { it.name !in previous }

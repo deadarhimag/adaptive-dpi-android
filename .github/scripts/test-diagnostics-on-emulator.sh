@@ -202,6 +202,38 @@ timeout 10s "$adb" -s "$serial" logcat -b main -G 2M || echo '::warning::Не у
 "$adb" -s "$serial" shell settings put global hide_error_dialogs 1 || fail "ADB не смог скрыть диалоги ошибок на $serial."
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 "$adb" -s "$serial" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+run_saf_preflight() {
+  local directory="$log_dir/saf-fixture" process status=0
+  mkdir -p "$directory"
+  timeout -k 3s 25s "$adb" -s "$serial" shell am instrument -w -r \
+    -e class org.adaptivedpi.android.SafFixtureInstrumentedTest \
+    org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner \
+    > "$directory/instrumentation.log" 2>&1 &
+  process=$!
+  while kill -0 "$process" 2>/dev/null; do
+    if timeout 3s "$adb" -s "$serial" logcat -b crash -d -v brief AndroidRuntime:E '*:S' \
+        > "$directory/crash.log" 2>&1 &&
+        grep -Eq 'Process: org\.adaptivedpi\.android(\.test)?,' "$directory/crash.log"; then
+      kill "$process" 2>/dev/null || true
+      wait "$process" 2>/dev/null || true
+      fail 'Авария процесса при предварительной проверке SAF. См. saf-fixture/crash.log.'
+    fi
+    sleep 1
+  done
+  wait "$process" || status=$?
+  timeout 3s "$adb" -s "$serial" logcat -b crash -d -v brief AndroidRuntime:E '*:S' \
+    > "$directory/crash.log" 2>&1 || true
+  if grep -Eq 'Process: org\.adaptivedpi\.android(\.test)?,' "$directory/crash.log"; then
+    fail 'Авария процесса при предварительной проверке SAF. См. saf-fixture/crash.log.'
+  fi
+  if (( status != 0 )); then
+    fail "Не завершился запуск предварительной проверки SAF (код $status). См. saf-fixture/."
+  fi
+  python3 .github/scripts/verify-extended-transport-results.py --saf-fixture \
+    "$directory/instrumentation.log" "$directory/TEST-SafFixture.xml" "$directory/results.json" ||
+    fail 'Предварительная проверка SAF не пройдена. См. saf-fixture/.'
+}
+run_saf_preflight
 "$adb" -s "$serial" shell pm grant org.adaptivedpi.android android.permission.POST_NOTIFICATIONS
 consent_in_progress=true
 timeout 60s "$adb" -s "$serial" shell am instrument -w -r \
