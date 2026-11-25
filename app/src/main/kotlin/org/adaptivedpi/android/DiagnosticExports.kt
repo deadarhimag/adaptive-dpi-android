@@ -5,12 +5,32 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import java.io.File
 import java.io.Writer
 
 class DiagnosticFileProvider : FileProvider()
+
+/** Работа с диском переживает смену Activity. Право запускать SAF остаётся у Activity. */
+internal class DiagnosticSnapshotPreparation : ViewModel() {
+    private var snapshot: Pair<String, Deferred<String>>? = null
+
+    fun start(context: Context, name: String, report: String) {
+        check(snapshot == null)
+        val app = context.applicationContext
+        snapshot = name to viewModelScope.async(Dispatchers.IO) { DiagnosticExports.storePending(app, report, name) }
+    }
+
+    fun taskFor(name: String) = snapshot?.takeIf { it.first == name }?.second
+
+    fun take(name: String) = taskFor(name)?.also { snapshot = null }
+}
 
 internal object DiagnosticExports {
     private const val CACHE_DIR = "diagnostic-reports"
@@ -75,7 +95,8 @@ internal object DiagnosticExports {
      * Файл приватный и переживает гибель процесса; в сохранённом состоянии Activity хранится только имя.
      */
     @Synchronized
-    fun storePending(context: Context, report: String): String {
+    fun storePending(context: Context, report: String, name: String = "${java.util.UUID.randomUUID()}.txt"): String {
+        require(pendingName.matches(name))
         require(report.length <= MAX_PENDING_BYTES)
         val bytes = report.toByteArray(Charsets.UTF_8)
         require(bytes.size <= MAX_PENDING_BYTES)
@@ -83,7 +104,6 @@ internal object DiagnosticExports {
         val directory = File(context.noBackupFilesDir, PENDING_DIR)
         directory.mkdirs()
         check(directory.isDirectory && directory.listFiles().orEmpty().count(File::isFile) < MAX_PENDING_FILES)
-        val name = "${java.util.UUID.randomUUID()}.txt"
         // Запись через временный файл: после сбоя не остаётся оборванного снимка под рабочим именем.
         val temporary = File(directory, "$name.tmp")
         try {
@@ -105,7 +125,10 @@ internal object DiagnosticExports {
     @Synchronized
     fun deletePending(context: Context, name: String) {
         retained.remove(name)
-        if (pendingName.matches(name)) File(File(context.noBackupFilesDir, PENDING_DIR), name).delete()
+        if (!pendingName.matches(name)) return
+        val directory = File(context.noBackupFilesDir, PENDING_DIR)
+        File(directory, name).delete()
+        File(directory, "$name.tmp").delete()
     }
 
     private inline fun shareIntent(context: Context, fileName: String, write: (Writer) -> Unit): Intent {

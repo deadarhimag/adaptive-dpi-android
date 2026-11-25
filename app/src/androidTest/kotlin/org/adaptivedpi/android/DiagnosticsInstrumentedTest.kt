@@ -1,8 +1,11 @@
 package org.adaptivedpi.android
 
 import android.Manifest
+import android.app.Activity
+import android.app.Instrumentation
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -37,6 +40,10 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 import java.io.StringWriter
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 class DiagnosticsInstrumentedTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -59,6 +66,54 @@ class DiagnosticsInstrumentedTest {
             assertEquals(null, DiagnosticExports.readPending(context, name))
         } finally {
             file.delete()
+        }
+    }
+
+    @Test
+    fun recreatingDuringSnapshotPreparationLaunchesSafOnceAndSavesTheSameText() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val pending = File(context.noBackupFilesDir, "pending-export")
+        val previous = pending.list().orEmpty().toSet()
+        val directory = File(context.cacheDir, "diagnostic-reports").apply { mkdirs() }
+        val destination = File.createTempFile("snapshot-recreation-", ".txt", directory)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", destination)
+        val monitor = instrumentation.addMonitor(
+            IntentFilter(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addDataType("text/plain")
+                addCategory(Intent.CATEGORY_OPENABLE)
+            },
+            Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(uri)),
+            true,
+        )
+        val locked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val gateExpired = AtomicBoolean()
+        val writerGate = thread {
+            synchronized(DiagnosticExports) {
+                locked.countDown()
+                if (!release.await(15, TimeUnit.SECONDS)) gateExpired.set(true)
+            }
+        }
+        val report = "Снимок до пересоздания\nСтрока 2 ✓"
+        try {
+            assertTrue(locked.await(5, TimeUnit.SECONDS))
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    MainActivity::class.java.getDeclaredMethod("saveSnapshot", String::class.java, String::class.java)
+                        .apply { isAccessible = true }.invoke(activity, report, DiagnosticExports.COMBINED_FILE_NAME)
+                }
+                scenario.recreate()
+                release.countDown()
+                await { destination.readText() == report && (pending.list().orEmpty().toSet() - previous).isEmpty() }
+                assertFalse("Запись была разблокирована до пересоздания", gateExpired.get())
+                instrumentation.waitForIdleSync()
+                assertEquals(1, monitor.hits)
+            }
+        } finally {
+            release.countDown()
+            writerGate.join(5_000)
+            instrumentation.removeMonitor(monitor)
+            destination.delete()
         }
     }
 

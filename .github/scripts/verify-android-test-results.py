@@ -46,6 +46,7 @@ DIAGNOSTICS_METHODS = (
     "parallelLargeTxtAttachmentsKeepIndependentUrisNamesAndBytes",
     "criticalErrorPostsOneNotificationAndOpensItsDiagnosticEvent",
     "pendingCombinedReportSnapshotIsAPrivateFileUntilDeleted",
+    "recreatingDuringSnapshotPreparationLaunchesSafOnceAndSavesTheSameText",
 )
 
 
