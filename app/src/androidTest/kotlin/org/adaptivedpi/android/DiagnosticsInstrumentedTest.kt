@@ -49,6 +49,9 @@ class DiagnosticsInstrumentedTest {
         val file = File(File(context.noBackupFilesDir, "pending-export"), name)
         try {
             assertTrue(file.isFile)
+            check(file.setLastModified(1))
+            DiagnosticExports.pruneExpiredShares(context)
+            DiagnosticExports.prunePending(context)
             assertEquals(report, DiagnosticExports.readPending(context, name))
             assertEquals(null, DiagnosticExports.readPending(context, "../$name"))
             DiagnosticExports.deletePending(context, name)

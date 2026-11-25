@@ -22,19 +22,14 @@ internal class VpnEventStore(
     fun readStored(): StoredVpnEvents {
         if (!file.exists()) return StoredVpnEvents(emptyList(), 0)
         check(file.isFile && file.length() <= maxBytes)
-        var unreadable = 0
-        val entries = file.useLines(Charsets.UTF_8) { lines ->
-            lines.filter(String::isNotEmpty).mapNotNull { line ->
-                runCatching { decode(line) }.onFailure { unreadable++ }.getOrNull()
-            }.toList()
-        }
-        return StoredVpnEvents(entries.distinctBy(VpnJournalEvent::id).take(maxEntries), unreadable)
+        val (entries, unreadable) = readDiagnosticLines(file, ::decode)
+        return StoredVpnEvents(entries.distinctBy(VpnJournalEvent::id).take(maxEntries), unreadable.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
     }
 
-    fun bounded(events: List<VpnJournalEvent>): List<VpnJournalEvent> {
+    fun bounded(events: List<VpnJournalEvent>, unreadable: Long = 0): List<VpnJournalEvent> {
         val distinct = events.distinctBy(VpnJournalEvent::id)
         val selected = mutableSetOf<UUID>()
-        var size = 0
+        var size = diagnosticLossHeader(unreadable).length
         fun keep(event: VpnJournalEvent) {
             if (selected.size >= maxEntries || event.id in selected) return
             val bytes = encode(event).toByteArray(Charsets.UTF_8).size + 1
@@ -48,8 +43,12 @@ internal class VpnEventStore(
         return distinct.filter { it.id in selected }
     }
 
-    fun write(events: List<VpnJournalEvent>) {
-        val bytes = bounded(events).joinToString("") { encode(it) + "\n" }.toByteArray(Charsets.UTF_8)
+    fun write(events: List<VpnJournalEvent>, unreadable: Long = 0) {
+        val bytes = buildString {
+            append(diagnosticLossHeader(unreadable))
+            bounded(events, unreadable).forEach { appendLine(encode(it)) }
+        }.toByteArray(Charsets.UTF_8)
+        check(bytes.size <= maxBytes)
         writeDiagnosticFile(file, bytes)
     }
 

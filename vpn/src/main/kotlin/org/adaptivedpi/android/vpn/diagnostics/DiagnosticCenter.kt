@@ -15,6 +15,7 @@ internal class DiagnosticCenter(
     private val notify: (DiagnosticEvent) -> Boolean,
 ) {
     val events = current.asStateFlow()
+    val unreadableRecords get() = journal.unreadableRecords
     private val collectingCrash = AtomicBoolean()
     private var historyRead = false
 
@@ -111,7 +112,7 @@ internal class DiagnosticCenter(
         val recovered = buildList {
             if (crash != null) add(crash)
             if (interrupted != null && crash?.vpn?.mayHaveActiveVpn != true) {
-                add(interrupted.copy(timeMillis = journal.now()))
+                add(journal.stamp(interrupted.copy(timeMillis = journal.now())))
             }
         }
         // Уже прочитанные события сохраняют свои отметки, если удаление слота не удалось.
@@ -150,7 +151,7 @@ internal class DiagnosticCenter(
         id: UUID = UUID.randomUUID(),
         cleanup: VpnCleanupDetails? = null,
         timeMillis: Long = journal.now(),
-    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, timeMillis, androidVersion, cleanup)
+    ) = journal.stamp(DiagnosticEvent.create(code, version, api, vpn, error, id, timeMillis, androidVersion, cleanup))
 
     private companion object {
         const val ALERT_INTERVAL_MILLIS = 60_000L

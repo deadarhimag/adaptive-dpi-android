@@ -269,7 +269,9 @@ class DiagnosticCenterTest {
     @Test
     fun expiredRecordsAndCrashSlotAreDeletedFromTheDisk() {
         var now = 10_000L
-        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now })
+        fun sameBoot() = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now },
+            monotonicMillis = { now }, bootCount = 1)
+        val journal = sameBoot()
         val first = center(journal)
         val expired = first.record(DiagnosticCode.ConsentFailed, idle)
         first.captureCrash(idle, IllegalStateException())
@@ -277,7 +279,7 @@ class DiagnosticCenterTest {
         val fresh = first.record(DiagnosticCode.SaveFailed, idle)
         now += 100
 
-        val reloaded = center(DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now }))
+        val reloaded = center(sameBoot())
         assertEquals(listOf(fresh.id), reloaded.events.value.map(DiagnosticEvent::id))
         assertFalse(File(temporary.root, "last-crash").exists())
         assertFalse(File(temporary.root, "journal").readText().contains(expired.id.toString()))
@@ -289,9 +291,39 @@ class DiagnosticCenterTest {
     }
 
     @Test
+    fun clockJumpForwardAcrossProcessRestartKeepsCrashAndJournal() {
+        var clock = 10_000L
+        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { clock })
+        val first = center(journal)
+        val recent = first.record(DiagnosticCode.SaveFailed, idle)
+        first.captureCrash(idle, IllegalStateException())
+        clock += 10_000
+        val restarted = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { clock })
+        assertEquals(listOf(recent.id), restarted.read().map(DiagnosticEvent::id))
+        assertNotNull(restarted.readCrash())
+        clock -= 10_000
+        assertEquals(listOf(recent.id), journal.read().map(DiagnosticEvent::id))
+    }
+
+    @Test
+    fun unreadableErrorsRemainRecordedAfterRewriteAndRestart() {
+        val journal = DiagnosticJournal(temporary.root)
+        val first = center(journal).record(DiagnosticCode.SaveFailed, idle)
+        val file = File(temporary.root, "journal")
+        file.appendText("оборванная строка\n")
+        val restarted = center(DiagnosticJournal(temporary.root))
+        assertEquals(listOf(first.id), restarted.events.value.map(DiagnosticEvent::id))
+        restarted.record(DiagnosticCode.ShareFailed, idle)
+        assertTrue(file.readText().contains("loss\t1\n"))
+        center(DiagnosticJournal(temporary.root)).record(DiagnosticCode.SaveFailed, idle)
+        assertEquals(1, file.readLines().count { it == "loss\t1" })
+    }
+
+    @Test
     fun clockMovedBackwardsKeepsRecentRecordsAndCrashSlot() {
         var now = 10_000L
-        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now })
+        var elapsed = 0L
+        val journal = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now }, monotonicMillis = { elapsed })
         val first = center(journal)
         val recent = first.record(DiagnosticCode.SaveFailed, idle)
         first.captureCrash(idle, IllegalStateException())
@@ -302,7 +334,7 @@ class DiagnosticCenterTest {
         now += 1_000
         assertEquals(listOf(recent.id), journal.read().map(DiagnosticEvent::id))
 
-        now += 500
+        elapsed += 500
         assertTrue(journal.read().isEmpty())
     }
 

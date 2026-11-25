@@ -27,6 +27,7 @@ fun combinedDiagnosticReport(
     transport: TransportSnapshot? = null,
     transportJournal: TransportJournalView? = null,
     build: BuildIdentity? = null,
+    unreadableErrors: Long = 0,
 ): String = buildString {
     appendLine("Диагностика adaptive-dpi-android")
     appendLine("Версия приложения: ${DiagnosticEvent.safeVersion(appVersion)}")
@@ -90,6 +91,7 @@ fun combinedDiagnosticReport(
 
     appendLine()
     appendLine("Журнал ошибок")
+    if (unreadableErrors > 0) appendLine("Нечитаемые записи журнала ошибок: $unreadableErrors. Журнал неполон.")
     if (errors.isEmpty()) appendLine("Записей нет.")
     for (event in errors) {
         appendLine()

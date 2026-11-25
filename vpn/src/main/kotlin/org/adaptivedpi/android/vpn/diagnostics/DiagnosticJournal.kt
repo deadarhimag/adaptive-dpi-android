@@ -8,6 +8,7 @@ import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 internal class DiagnosticJournal(
     private val directory: File,
@@ -15,16 +16,23 @@ internal class DiagnosticJournal(
     private val maxBytes: Int = 32 * 1024,
     private val maxAgeMillis: Long = 7 * 24 * 60 * 60 * 1_000L,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val monotonicMillis: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
+    bootCount: Int? = null,
 ) {
     private val journal = File(directory, "journal")
     private val crash = File(directory, "last-crash")
     private val active = File(directory, "active-vpn")
+    private val bootMark = bootCount?.toString() ?: processBootMark
+    @Volatile var unreadableRecords: Long = 0
+        private set
 
     init {
         require(maxEntries > 0 && maxBytes > 0 && maxAgeMillis > 0)
     }
 
     fun now() = clock()
+
+    fun stamp(event: DiagnosticEvent) = event.copy(age = DiagnosticAge(bootMark, monotonicMillis()))
 
     fun read(): List<DiagnosticEvent> {
         val entries = readEvents(journal)
@@ -35,24 +43,28 @@ internal class DiagnosticJournal(
 
     fun readCrash(): DiagnosticEvent? {
         val entry = readEvents(crash).firstOrNull() ?: return null
-        if (isFresh(entry, now())) return entry
+        if (isFresh(entry, monotonicMillis())) return entry
         runCatching(::clearCrash)
         return null
     }
     fun readActive(): DiagnosticEvent? = readEvents(active).firstOrNull()
 
     fun bounded(events: List<DiagnosticEvent>): List<DiagnosticEvent> {
-        val now = now()
-        var size = 0
+        val now = monotonicMillis()
+        var size = diagnosticLossHeader(unreadableRecords).length
         return events.filter { isFresh(it, now) }.distinctBy(DiagnosticEvent::id).take(maxEntries).takeWhile {
             size += it.encode().toByteArray(Charsets.UTF_8).size + 1
             size <= maxBytes
         }
     }
 
-    // Запись "из будущего" после перевода часов назад сохраняется: возраст по ней не определить,
-    // а удалённую запись уже не вернуть. Размер журнала ограничивают maxEntries и maxBytes.
-    private fun isFresh(event: DiagnosticEvent, now: Long) = isRetained(event.timeMillis, now)
+    // Для прежних форматов и другой загрузки достоверного возраста нет. Их ограничивает квота.
+    private fun isFresh(event: DiagnosticEvent, now: Long): Boolean {
+        if (event.timeMillis < 0) return false
+        val age = event.age?.takeIf { it.boot == bootMark } ?: return true
+        val elapsed = now - age.elapsedMillis
+        return elapsed < maxAgeMillis
+    }
 
     /** Событие с таким временем журнал ещё хранит. Старше срока хранения событие не записывается вовсе. */
     fun retains(timeMillis: Long) = isRetained(timeMillis, now())
@@ -73,27 +85,41 @@ internal class DiagnosticJournal(
             return emptyList()
         }
         check(attributes.isRegularFile)
-        if (attributes.size() > maxBytes) return emptyList()
-        return file.useLines { lines ->
-            lines.take(maxEntries).mapNotNull { line -> runCatching { decode(line) }.getOrNull() }.toList()
+        if (attributes.size() > maxBytes) {
+            if (file == journal) unreadableRecords = maxOf(1L, unreadableRecords)
+            return emptyList()
         }
+        val (entries, damaged) = readDiagnosticLines(file, ::decode)
+        if (file == journal) unreadableRecords = damaged
+        return entries.take(maxEntries)
     }
 
     private fun writeFile(file: File, events: List<DiagnosticEvent>) {
-        val bytes = events.joinToString(separator = "") { it.encode() + "\n" }.toByteArray(Charsets.UTF_8)
+        val bytes = buildString {
+            if (file == journal) append(diagnosticLossHeader(unreadableRecords))
+            events.forEach { appendLine(it.encode()) }
+        }.toByteArray(Charsets.UTF_8)
         require(bytes.size <= maxBytes)
         writeDiagnosticFile(file, bytes)
     }
 
-    private fun DiagnosticEvent.encode(): String = listOf(
-        "1", id, timeMillis, code.name, appVersion, androidApi, androidVersion, vpn.state.name, vpn.alwaysOn.name, vpn.lockdown.name,
-        exceptionKind?.name ?: "-", acknowledged, notified,
-        frames.joinToString(",") { "${it.site.name}:${it.line}" }, cleanup?.encode(),
-    ).filterNotNull().joinToString("\t")
+    private fun DiagnosticEvent.encode(): String {
+        val base = listOf(
+            if (age == null) "1" else "2", id, timeMillis, code.name, appVersion, androidApi, androidVersion,
+            vpn.state.name, vpn.alwaysOn.name, vpn.lockdown.name, exceptionKind?.name ?: "-", acknowledged, notified,
+            frames.joinToString(",") { "${it.site.name}:${it.line}" },
+        )
+        val tail = age?.let { listOf(cleanup?.encode() ?: "-", it.boot, it.elapsedMillis) } ?: listOfNotNull(cleanup?.encode())
+        return (base + tail).joinToString("\t")
+    }
 
     private fun decode(line: String): DiagnosticEvent {
         val parts = line.split('\t')
-        require(parts.size in 14..15 && parts[0] == "1")
+        val age = when (parts[0]) {
+            "1" -> { require(parts.size in 14..15); null }
+            "2" -> { require(parts.size == 17); DiagnosticAge(parts[15], parts[16].toLong()) }
+            else -> error("Неизвестный формат записи")
+        }
         return DiagnosticEvent(
             UUID.fromString(parts[1]),
             parts[2].toLong(),
@@ -108,9 +134,38 @@ internal class DiagnosticJournal(
             }.toList(),
             parts[11].toBooleanStrict(),
             parts[12].toBooleanStrict(),
-            parts.getOrNull(14)?.let(VpnCleanupDetails::decode),
+            parts.getOrNull(14)?.takeUnless { it == "-" }?.let(VpnCleanupDetails::decode),
+            age,
         )
     }
+
+    private companion object {
+        val processBootMark = UUID.randomUUID().toString()
+    }
+}
+
+private const val LOSS_PREFIX = "loss\t"
+
+internal fun diagnosticLossHeader(count: Long) = if (count > 0) "$LOSS_PREFIX$count\n" else ""
+
+internal fun <T> readDiagnosticLines(file: File, decode: (String) -> T): Pair<List<T>, Long> {
+    var losses = 0L
+    val entries = file.useLines(Charsets.UTF_8) { lines ->
+        lines.mapIndexedNotNull { index, line ->
+            val marker = if (index == 0 && line.startsWith(LOSS_PREFIX)) {
+                line.removePrefix(LOSS_PREFIX).toLongOrNull()?.takeIf { it >= 0 }
+            } else null
+            if (marker != null) {
+                losses = marker
+                null
+            } else if (line.isEmpty()) {
+                null
+            } else {
+                runCatching { decode(line) }.onFailure { if (losses < Long.MAX_VALUE) losses++ }.getOrNull()
+            }
+        }.toList()
+    }
+    return entries to losses
 }
 
 internal fun writeDiagnosticFile(file: File, bytes: ByteArray) {

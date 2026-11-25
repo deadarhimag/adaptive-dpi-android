@@ -17,6 +17,10 @@ internal object DiagnosticExports {
     private const val PENDING_DIR = "pending-export"
     private val pendingName = Regex("[0-9a-f-]{36}\\.txt")
     private const val MAX_CACHE_AGE_MILLIS = 24 * 60 * 60 * 1000L
+    private const val MAX_PENDING_FILES = 8
+    private const val MAX_PENDING_BYTES = 1_048_576
+    private val retained = mutableSetOf<String>()
+
     const val COMBINED_FILE_NAME = "adaptive-dpi-diagnostics.txt"
     const val TRANSPORT_FILE_NAME = "adaptive-dpi-transport.txt"
 
@@ -51,8 +55,18 @@ internal object DiagnosticExports {
         File(context.cacheDir, CACHE_DIR).listFiles().orEmpty().forEach { file ->
             if (file.isFile && file.lastModified() < cutoff) file.delete()
         }
+    }
+
+    @Synchronized
+    fun retainPending(name: String) {
+        if (pendingName.matches(name)) retained.add(name)
+    }
+
+    @Synchronized
+    fun prunePending(context: Context) {
+        val cutoff = System.currentTimeMillis() - MAX_CACHE_AGE_MILLIS
         File(context.noBackupFilesDir, PENDING_DIR).listFiles().orEmpty().forEach { file ->
-            if (file.isFile && file.lastModified() < cutoff) file.delete()
+            if (file.isFile && file.name !in retained && file.lastModified() < cutoff) file.delete()
         }
     }
 
@@ -60,29 +74,37 @@ internal object DiagnosticExports {
      * Показанный пользователю снимок общего отчёта на время системного диалога сохранения.
      * Файл приватный и переживает гибель процесса; в сохранённом состоянии Activity хранится только имя.
      */
+    @Synchronized
     fun storePending(context: Context, report: String): String {
+        require(report.length <= MAX_PENDING_BYTES)
+        val bytes = report.toByteArray(Charsets.UTF_8)
+        require(bytes.size <= MAX_PENDING_BYTES)
+        prunePending(context)
         val directory = File(context.noBackupFilesDir, PENDING_DIR)
         directory.mkdirs()
-        check(directory.isDirectory)
+        check(directory.isDirectory && directory.listFiles().orEmpty().count(File::isFile) < MAX_PENDING_FILES)
         val name = "${java.util.UUID.randomUUID()}.txt"
         // Запись через временный файл: после сбоя не остаётся оборванного снимка под рабочим именем.
         val temporary = File(directory, "$name.tmp")
         try {
-            temporary.writeText(report, Charsets.UTF_8)
+            temporary.writeBytes(bytes)
             check(temporary.renameTo(File(directory, name)))
         } finally {
             temporary.delete()
         }
+        retained.add(name)
         return name
     }
 
     fun readPending(context: Context, name: String): String? {
         if (!pendingName.matches(name)) return null
         val file = File(File(context.noBackupFilesDir, PENDING_DIR), name)
-        return if (file.isFile) file.readText(Charsets.UTF_8) else null
+        return if (file.isFile && file.length() <= MAX_PENDING_BYTES) file.readText(Charsets.UTF_8) else null
     }
 
+    @Synchronized
     fun deletePending(context: Context, name: String) {
+        retained.remove(name)
         if (pendingName.matches(name)) File(File(context.noBackupFilesDir, PENDING_DIR), name).delete()
     }
 

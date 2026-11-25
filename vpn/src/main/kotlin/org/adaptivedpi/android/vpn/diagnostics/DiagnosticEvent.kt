@@ -115,6 +115,8 @@ internal enum class StackSite(val symbol: String) {
 
 internal data class SafeFrame(val site: StackSite, val line: Int)
 
+internal data class DiagnosticAge(val boot: String, val elapsedMillis: Long)
+
 @ConsistentCopyVisibility
 data class DiagnosticEvent internal constructor(
     val id: UUID,
@@ -129,6 +131,7 @@ data class DiagnosticEvent internal constructor(
     val acknowledged: Boolean = false,
     internal val notified: Boolean = false,
     internal val cleanup: VpnCleanupDetails? = null,
+    internal val age: DiagnosticAge? = null,
 ) {
     val time: Instant get() = Instant.ofEpochMilli(timeMillis)
     val vpnStopped: Boolean get() = code.stopsVpn || (code == DiagnosticCode.AppCrash && vpn.mayHaveActiveVpn)
