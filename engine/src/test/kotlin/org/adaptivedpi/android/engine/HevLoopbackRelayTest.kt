@@ -6,23 +6,29 @@ import org.adaptivedpi.android.engine.flow.UdpRecord
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.net.ConnectException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketAddress
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
@@ -439,19 +445,24 @@ class HevLoopbackRelayTest {
 
     @Test(timeout = 10_000)
     fun silentClientsDoNotBlockAuthenticationOfLegitimateClient() {
-        relay(maxSessions = 32) { relay, _ ->
-            val silent = (0 until 32).map { client(relay) }
-            try {
-                client(relay).use { legit ->
-                    legit.soTimeout = 1_000
-                    val input = DataInputStream(legit.getInputStream())
-                    val output = DataOutputStream(legit.getOutputStream())
-                    val started = System.nanoTime()
-                    assertEquals(0, authenticate(relay.configSecret, input, output))
-                    assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(1))
-                }
-            } finally {
-                silent.forEach { it.close() }
+        val registrations = PreAuthRegistrations()
+        relay(maxSessions = 32, onPreAuthRegistered = registrations::record) { relay, _ ->
+            val address = InetSocketAddress(ip, relay.port)
+            RelayClients().use { clients ->
+                val setupStarted = System.nanoTime()
+                val silent = Array(32) { clients.connect(address) }
+                registrations.await(*silent)
+                val (pending, availableSlots) = relay.preAuthState()
+                assertEquals(silent.map { it.localSocketAddress }.toSet(), pending)
+                assertEquals(32, availableSlots)
+
+                val started = System.nanoTime()
+                val legit = clients.connect(address)
+                legit.soTimeout = 1_000
+                assertEquals(0, authenticate(relay.configSecret, legit))
+                val authenticated = System.nanoTime()
+                assertTrue(authenticated - started < TimeUnit.SECONDS.toNanos(1))
+                assertBeforeHandshakeTimeout(setupStarted, authenticated)
             }
         }
     }
@@ -459,16 +470,130 @@ class HevLoopbackRelayTest {
     @Test(timeout = 10_000)
     fun unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes() {
         // При maxSessions = 2 одновременно допускаются два неаутентифицированных подключения.
-        relay(maxSessions = 2) { relay, _ ->
-            val silent = (0 until 3).map { client(relay) }
-            try {
-                assertEquals(-1, silent[0].getInputStream().read())
-                silent[1].soTimeout = 150
-                assertThrows(SocketTimeoutException::class.java) { silent[1].getInputStream().read() }
-                silent[2].soTimeout = 150
-                assertThrows(SocketTimeoutException::class.java) { silent[2].getInputStream().read() }
-            } finally {
-                silent.forEach { it.close() }
+        val registrations = PreAuthRegistrations()
+        lateinit var acceptThread: Thread
+        relay(
+            maxSessions = 2,
+            startAccepting = { _, thread -> acceptThread = thread },
+            onPreAuthRegistered = registrations::record,
+        ) { relay, _ ->
+            val address = InetSocketAddress(ip, relay.port)
+            RelayClients().use { clients ->
+                val setupStarted = System.nanoTime()
+                val first = clients.connect(address)
+                assertEquals(Thread.State.NEW, acceptThread.state)
+                acceptThread.start()
+                registrations.await(first)
+
+                val second = clients.connect(address)
+                registrations.await(second)
+                assertEquals(setOf(first.localSocketAddress, second.localSocketAddress), relay.preAuthState().first)
+
+                val third = clients.connect(address)
+                registrations.await(third)
+                assertEquals(-1, first.getInputStream().read())
+                assertBeforeHandshakeTimeout(setupStarted, System.nanoTime())
+                assertEquals(0, authenticate(relay.configSecret, second))
+                assertEquals(0, authenticate(relay.configSecret, third))
+            }
+        }
+    }
+
+    @Test
+    fun clientScopeClosesSocketsWhenAnyConnectionFails() {
+        for (failureIndex in 0..2) {
+            ServerSocket(0, 3, ip).use { listener ->
+                val address = InetSocketAddress(ip, listener.localPort)
+                val clients = mutableListOf<Socket>()
+                val refusal = ConnectException("Управляемый отказ подключения")
+                val owner = RelayClients {
+                    val index = clients.size
+                    object : Socket() {
+                        override fun connect(endpoint: SocketAddress) {
+                            if (index == failureIndex) throw refusal
+                            super.connect(endpoint)
+                        }
+                    }.also(clients::add)
+                }
+                val error = assertThrows(ConnectException::class.java) {
+                    owner.use { owned -> repeat(3) { owned.connect(address) } }
+                }
+                assertSame(refusal, error)
+                assertEquals(failureIndex + 1, clients.size)
+                assertEquals(failureIndex, clients.count(Socket::isConnected))
+                assertTrue(clients.all(Socket::isClosed))
+            }
+        }
+    }
+
+    @Test
+    fun clientScopeClosesConnectedSocketWhenConfigurationFails() {
+        ServerSocket(0, 1, ip).use { listener ->
+            val optionFailure = SocketException("Управляемый отказ настройки")
+            val socket = object : Socket() {
+                override fun setSoTimeout(timeout: Int) = throw optionFailure
+            }
+            val error = assertThrows(SocketException::class.java) {
+                RelayClients { socket }.use { it.connect(InetSocketAddress(ip, listener.localPort)) }
+            }
+            assertSame(optionFailure, error)
+            assertTrue(socket.isConnected)
+            assertTrue(socket.isClosed)
+        }
+    }
+
+    @Test
+    fun clientScopeClosesSocketsWhenRegistrationOrAssertionFails() {
+        ServerSocket(0, 2, ip).use { listener ->
+            val address = InetSocketAddress(ip, listener.localPort)
+            lateinit var waiting: Socket
+            val missing = assertThrows(IllegalStateException::class.java) {
+                RelayClients().use { clients ->
+                    waiting = clients.connect(address)
+                    PreAuthRegistrations().await(waiting, timeoutMillis = 0)
+                }
+            }
+            assertTrue(missing.message.orEmpty().startsWith("Нет регистрации"))
+            assertTrue(waiting.isClosed)
+
+            lateinit var checked: Socket
+            val assertion = assertThrows(AssertionError::class.java) {
+                RelayClients().use { clients ->
+                    checked = clients.connect(address)
+                    assertTrue("Управляемое падение проверки", checked.isClosed)
+                }
+            }
+            assertEquals("Управляемое падение проверки", assertion.message)
+            assertTrue(checked.isClosed)
+        }
+    }
+
+    @Test
+    fun clientScopeAttemptsAllClosesAndPreservesOriginalFailure() {
+        for (primary in listOf(null, AssertionError("Основное исключение"))) {
+            ServerSocket(0, 3, ip).use { listener ->
+                val address = InetSocketAddress(ip, listener.localPort)
+                val failures = listOf(null, IOException("Второй сокет"), IOException("Третий сокет"))
+                val sockets = failures.map { failure ->
+                    object : Socket() {
+                        override fun close() {
+                            super.close()
+                            if (failure != null) throw failure
+                        }
+                    }
+                }
+                val available = sockets.iterator()
+                val error = assertThrows(Throwable::class.java) {
+                    RelayClients(available::next).use { clients ->
+                        repeat(3) { clients.connect(address) }
+                        if (primary != null) throw primary
+                    }
+                }
+                assertSame(primary ?: failures[2], error)
+                val cleanup = if (primary != null) error.suppressed.single() else error
+                assertSame(failures[2], cleanup)
+                assertSame(failures[1], cleanup.suppressed.single())
+                assertTrue(sockets.all(Socket::isClosed))
             }
         }
     }
@@ -659,10 +784,10 @@ class HevLoopbackRelayTest {
             DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
                 server.soTimeout = 3_000
                 relay(maxSessions = 8, failures = TransportFailureReporter(sink = failures::add)) { relay, transport ->
-                    val sockets = mutableListOf<Socket>()
-                    try {
+                    val address = InetSocketAddress(ip, relay.port)
+                    RelayClients().use { clients ->
                         repeat(8) { index ->
-                            val socket = client(relay).also(sockets::add)
+                            val socket = clients.connect(address)
                             val input = DataInputStream(socket.getInputStream())
                             val output = DataOutputStream(socket.getOutputStream())
                             assertEquals(0, authenticate(relay.configSecret, input, output))
@@ -692,8 +817,6 @@ class HevLoopbackRelayTest {
                         stops.forEach { it.get(3, TimeUnit.SECONDS) }
                         assertEquals(RelayShutdownStatus(0, 0, 0, 0, 0), relay.awaitShutdownResult())
                         assertEquals(8L, transport.statistics().closedUdp)
-                    } finally {
-                        sockets.forEach(Socket::close)
                     }
                 }
             }
@@ -954,12 +1077,15 @@ class HevLoopbackRelayTest {
         readTimeoutMillis: Int = 15_000,
         udpIdleTimeoutMillis: Long = 60_000,
         flows: FlowObserver = FlowObserver.None,
+        startAccepting: (ServerSocket, Thread) -> Unit = { _, thread -> thread.start() },
+        onPreAuthRegistered: ((SocketAddress) -> Unit)? = null,
         test: (HevLoopbackRelay, OutboundTransport) -> Unit,
     ) {
         val transport = OutboundTransport(readTimeoutMillis = readTimeoutMillis, failures = failures).apply { updateNetwork(policy) }
         val relay = HevLoopbackRelay(
-            transport, destination, maxSessions, failures, { _, thread -> thread.start() },
+            transport, destination, maxSessions, failures, startAccepting,
             tcpIdleTimeoutMillis, flows = flows, udpIdleTimeoutMillis = udpIdleTimeoutMillis,
+            onPreAuthRegistered = onPreAuthRegistered,
         ) {
             error("Неожиданная остановка релея")
         }
@@ -983,7 +1109,23 @@ class HevLoopbackRelayTest {
         return input.readExact(length)
     }
 
-    private fun client(relay: HevLoopbackRelay) = Socket(ip, relay.port).apply { soTimeout = 3_000 }
+    private fun client(relay: HevLoopbackRelay): Socket {
+        val socket = Socket()
+        try {
+            socket.connectToRelay(InetSocketAddress(ip, relay.port))
+            return socket
+        } catch (failure: Throwable) {
+            socket.use { throw failure }
+        }
+    }
+
+    private fun authenticate(secret: String, socket: Socket) =
+        authenticate(secret, DataInputStream(socket.getInputStream()), DataOutputStream(socket.getOutputStream()))
+
+    private fun assertBeforeHandshakeTimeout(started: Long, finished: Long) {
+        // Оставляем запас до пятисекундного дедлайна релея, включая округление тайм-аута чтения.
+        assertTrue("Молчащие клиенты могли истечь по тайм-ауту", finished - started < TimeUnit.SECONDS.toNanos(4))
+    }
 
     private fun authenticate(secret: String, input: DataInputStream, output: DataOutputStream): Int {
         output.write(byteArrayOf(5, 1, 2))
@@ -1010,4 +1152,54 @@ class HevLoopbackRelayTest {
     private fun reply(input: DataInputStream) = input.readExact(10)[1].toInt()
 
     private fun DataInputStream.readExact(length: Int) = ByteArray(length).also(::readFully)
+
+    private class PreAuthRegistrations {
+        private val registered = LinkedBlockingQueue<SocketAddress>()
+
+        fun record(address: SocketAddress) {
+            registered.add(address)
+        }
+
+        fun await(vararg clients: Socket, timeoutMillis: Long = 3_000) {
+            val pending = clients.mapTo(mutableSetOf()) { it.localSocketAddress }
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+            repeat(clients.size) {
+                val remaining = (deadline - System.nanoTime()).coerceAtLeast(0)
+                val address = checkNotNull(registered.poll(remaining, TimeUnit.NANOSECONDS)) {
+                    "Нет регистрации клиентов: $pending"
+                }
+                check(pending.remove(address)) { "Неожиданная регистрация: $address" }
+            }
+        }
+    }
+
+    private class RelayClients(private val newSocket: () -> Socket = ::Socket) : Closeable {
+        private val sockets = mutableListOf<Socket>()
+
+        fun connect(address: InetSocketAddress): Socket = newSocket().also { socket ->
+            sockets.add(socket)
+            socket.connectToRelay(address)
+        }
+
+        override fun close() {
+            var failure: Throwable? = null
+            for (socket in sockets.asReversed()) {
+                try {
+                    socket.close()
+                } catch (error: Throwable) {
+                    val first = failure
+                    if (first == null) failure = error
+                    else if (first !== error) first.addSuppressed(error)
+                }
+            }
+            failure?.let { throw it }
+        }
+    }
+
+    private companion object {
+        fun Socket.connectToRelay(address: InetSocketAddress) {
+            connect(address)
+            soTimeout = 3_000
+        }
+    }
 }

@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.net.ProtocolException
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketAddress
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -60,6 +61,7 @@ class HevLoopbackRelay internal constructor(
     flowClassify: ((ByteArray, Int) -> ClientHelloInspector.Result)? = null,
     private val udpIdleTimeoutMillis: Long = 60_000,
     private val closeRelaySocket: (Closeable) -> Unit = Closeable::close,
+    private val onPreAuthRegistered: ((SocketAddress) -> Unit)? = null,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     constructor(
@@ -119,6 +121,12 @@ class HevLoopbackRelay internal constructor(
     val configSecret: String get() = secret
     val isTerminated: Boolean get() = pendingShutdownSteps() == 0
 
+    internal fun preAuthState(): Pair<Set<SocketAddress>, Int> = synchronized(lock) {
+        val pending = unauthenticated.filterNot { it.socket.isClosed }
+            .mapTo(mutableSetOf()) { it.socket.remoteSocketAddress }
+        pending to permits.availablePermits()
+    }
+
     init {
         try {
             startAccepting(listener, acceptThread)
@@ -158,7 +166,12 @@ class HevLoopbackRelay internal constructor(
                     }
                 }
                 evicted?.let(::closePeer)
-                if (!scheduled) closePeer(peer)
+                if (scheduled) {
+                    // Сигнал идентифицирует клиента после регистрации и обработки вытеснения.
+                    onPreAuthRegistered?.invoke(peer.socket.remoteSocketAddress)
+                } else {
+                    closePeer(peer)
+                }
             }
         } catch (error: Exception) {
             failures.recordError(ACCEPT, error, if (closing) TransportCancellation.SESSION else null)

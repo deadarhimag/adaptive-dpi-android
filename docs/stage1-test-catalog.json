@@ -5,23 +5,51 @@
       "id": "S1-RELAY-AUTH-01",
       "stage": 1,
       "requirements": [
-        "1.1"
+        "1.1",
+        "REV25-013"
       ],
       "mechanism": "Квота неаутентифицированных подключений",
-      "preconditions": "Релей готов, известны верные учётные данные",
-      "inputs": "Локальные SOCKS5-клиенты",
-      "events": "Заполнить очередь молчащими клиентами, начать легитимное соединение",
-      "expected": "Легитимный клиент получает ответ аутентификации",
-      "forbidden": "Молчащие клиенты занимают все слоты продуктивных соединений",
-      "acceptance": "Проверка подлинного обмена SOCKS5 и предела времени",
+      "preconditions": "Релей слушает loopback, известны верные учётные данные",
+      "inputs": "32 молчащих клиента и один легитимный при лимите 32, три молчащих клиента при лимите 2",
+      "events": "В первом сценарии дождаться регистрации всех 32 и проверить их присутствие в очереди. Во втором удержать запуск accept до первого connect, затем подтверждать регистрацию каждого клиента перед следующим подключением",
+      "expected": "При 32 молчащих клиентах все 32 прикладных слота свободны, легитимный клиент аутентифицируется менее чем за секунду. При лимите 2 вытесняется первый, второй и третий аутентифицируются",
+      "forbidden": "Начинать проверку с неполной очередью, считать успешный connect регистрацией или принимать истечение дедлайна за вытеснение",
+      "acceptance": "События регистрации совпадают с адресами и портами тестовых клиентов. На сокетах проверяются EOF первого и подлинный обмен SOCKS5. Решающий исход проверяется внутри бюджета аутентификации",
       "environment": "JVM",
       "suites": [
         "JVM"
       ],
       "implementation": [
-        "HevLoopbackRelayTest#silentClientsDoNotBlockAuthenticationOfLegitimateClient"
+        "HevLoopbackRelayTest#silentClientsDoNotBlockAuthenticationOfLegitimateClient",
+        "HevLoopbackRelayTest#unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes"
       ],
-      "limitations": "Планирование потоков Android проверяется интеграционными сценариями AVD."
+      "limitations": "Локальный loopback JVM. Размер системной очереди зависит от ОС. Windows-серия дополняет проверку порядка, планирование Android проверяется на AVD."
+    },
+    {
+      "id": "S1-RELAY-FIXTURE-01",
+      "stage": 1,
+      "requirements": [
+        "1.1",
+        "REV25-013"
+      ],
+      "mechanism": "Владение клиентскими сокетами JVM-фикстуры релея",
+      "preconditions": "Локальный TCP-слушатель, управляемые отказы создания подключения, настройки и закрытия",
+      "inputs": "До трёх клиентских сокетов и управляемый результат ожидания регистрации",
+      "events": "Поочерёдно отказать первому, второму и третьему connect, настройке после connect, ожиданию регистрации, проверке и закрытию двух сокетов",
+      "expected": "Уже созданные сокеты закрываются, при ошибке закрытия предпринимаются остальные попытки, исходное исключение сохраняется",
+      "forbidden": "Начинать владение после connect, прерывать очистку на первом отказе или подменять основное исключение",
+      "acceptance": "Проверяются isClosed каждого сокета, идентичность основного исключения и цепочка suppressed. Отрицательные контроли с поздним владением и прерыванием очистки должны упасть",
+      "environment": "JVM",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#clientScopeClosesSocketsWhenAnyConnectionFails",
+        "HevLoopbackRelayTest#clientScopeClosesConnectedSocketWhenConfigurationFails",
+        "HevLoopbackRelayTest#clientScopeClosesSocketsWhenRegistrationOrAssertionFails",
+        "HevLoopbackRelayTest#clientScopeAttemptsAllClosesAndPreservesOriginalFailure"
+      ],
+      "limitations": "Отказ close вводится после закрытия дескриптора. Проверяются обход остальных ресурсов и сохранение ошибок."
     },
     {
       "id": "S1-BUILD-01",
@@ -160,9 +188,10 @@
       "expected": "Сессия закрывается, повторный Start создаёт новый ID",
       "forbidden": "Потерянный контрольный ответ, преждевременный Idle, утечка FD",
       "acceptance": "Проверка активного syscall и фактического ответа, состояния Android и итоговых записей с верным ID",
-      "environment": "AVD API 34",
+      "environment": "AVD API 34 и JVM",
       "suites": [
-        "Android CI, расширенный"
+        "Android CI, расширенный",
+        "JVM"
       ],
       "implementation": [
         "ExtendedTunTransportInstrumentedTest#stopClosesTcpHeldInPrepareBeforeServerAccepts",
