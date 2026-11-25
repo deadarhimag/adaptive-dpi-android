@@ -7,6 +7,10 @@ import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
@@ -46,6 +50,62 @@ private val darkColors = darkColorScheme(
     outline = Color(0xFF8CA097),
 )
 
+/** Смысловые цвета состояния: «работает», «чиню», «не помочь». Ошибка - `colorScheme.error`. */
+@Immutable
+class StatusColors(
+    val working: Color,
+    val onWorking: Color,
+    val workingContainer: Color,
+    val onWorkingContainer: Color,
+    val fixing: Color,
+    val onFixing: Color,
+    val fixingContainer: Color,
+    val onFixingContainer: Color,
+    val unavailable: Color,
+    val onUnavailable: Color,
+    val unavailableContainer: Color,
+    val onUnavailableContainer: Color,
+)
+
+private val lightStatusColors = StatusColors(
+    working = Color(0xFF1E6B3A),
+    onWorking = Color.White,
+    workingContainer = Color(0xFFC6EFCF),
+    onWorkingContainer = Color(0xFF0A3A1B),
+    fixing = Color(0xFF7A5900),
+    onFixing = Color.White,
+    fixingContainer = Color(0xFFFFE08A),
+    onFixingContainer = Color(0xFF3F2E00),
+    unavailable = Color(0xFF5F6663),
+    onUnavailable = Color.White,
+    unavailableContainer = Color(0xFFE1E5E3),
+    onUnavailableContainer = Color(0xFF2B312F),
+)
+
+private val darkStatusColors = StatusColors(
+    working = Color(0xFF8FD9A3),
+    onWorking = Color(0xFF00391B),
+    workingContainer = Color(0xFF1F5130),
+    onWorkingContainer = Color(0xFFAEF2BF),
+    fixing = Color(0xFFEBC15B),
+    onFixing = Color(0xFF3F2E00),
+    fixingContainer = Color(0xFF5A4300),
+    onFixingContainer = Color(0xFFFFE08A),
+    unavailable = Color(0xFFB7BEBB),
+    onUnavailable = Color(0xFF2B312F),
+    unavailableContainer = Color(0xFF3A413E),
+    onUnavailableContainer = Color(0xFFDDE3E0),
+)
+
+private val LocalStatusColors = staticCompositionLocalOf { lightStatusColors }
+
+object AdaptiveDpiTheme {
+    val statusColors: StatusColors
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalStatusColors.current
+}
+
 private val shapes = Shapes(
     small = RoundedCornerShape(10.dp),
     medium = RoundedCornerShape(16.dp),
@@ -59,9 +119,11 @@ fun AdaptiveDpiTheme(mode: ThemeMode, content: @Composable () -> Unit) {
         ThemeMode.Light -> false
         ThemeMode.Dark -> true
     }
-    MaterialTheme(
-        colorScheme = if (darkTheme) darkColors else lightColors,
-        shapes = shapes,
-        content = content,
-    )
+    CompositionLocalProvider(LocalStatusColors provides if (darkTheme) darkStatusColors else lightStatusColors) {
+        MaterialTheme(
+            colorScheme = if (darkTheme) darkColors else lightColors,
+            shapes = shapes,
+            content = content,
+        )
+    }
 }
