@@ -385,10 +385,10 @@
       "mechanism": "Продолжение SAF после гибели процесса",
       "preconditions": "Сохранённое состояние системной задачи и отдельный поставщик",
       "inputs": "Состояние registry и два request code, готовый снимок и маркер .writing, URI с известным содержимым",
-      "events": "Восстановить новый ViewModel и registry, подать результат до регистрации и после перехода в retry, запустить повтор с новым ключом. В запланированном сквозном тесте хост убивает PID при открытом picker или начатой записи",
-      "expected": "Результат активного запуска завершает исходную попытку. Неясная запись требует явного повтора, снимок сохраняется",
-      "forbidden": "Применение старого URI к новой попытке, удаление .writing старой отменой, автоматическая перезапись частичного документа или открытие нового picker без действия пользователя",
-      "acceptance": "Базовые случаи сверяют состояние Registry, байты и файловые маркеры. Для сквозного случая поставщик сверяет количество открытий и байты, ADB подтверждает новый PID",
+      "events": "Восстановить ViewModel и Registry. Раздельно проверить очередь до регистрации, результат во время удержанного чтения, отсутствие результата, старый callback в retry и после нового запуска, отмену при .writing, отсутствующий снимок и два пересоздания Activity при удержанном чтении. В запланированном сквозном тесте хост убивает PID при открытом picker или начатой записи",
+      "expected": "Результат активного ключа до завершения восстановления на Main относится к исходной попытке. После завершения доступен явный повтор сохранённого снимка, при отсутствующем снимке доступен новый экспорт",
+      "forbidden": "Применение старого URI или отмены к новой попытке, удаление .writing старой отменой, возобновление retry устаревшим чтением, двойное восстановление и автоматическое открытие picker",
+      "acceptance": "Каждый порядок задан сигналами и имеет отдельную проверку состояния Registry, точных байтов, состояний ViewModel и дисковых маркеров. Для сквозного случая поставщик сверяет количество открытий и байты, ADB подтверждает новый PID",
       "environment": "AVD с AndroidX Registry; для системного прогона нужен реальный picker и внешний управляющий сценарий",
       "suites": [
         "Android CI, базовый контракт результата и файла",
@@ -397,8 +397,13 @@
       "implementation": [
         "DiagnosticsInstrumentedTest#consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry",
         "DiagnosticsInstrumentedTest#queuedSafResultUsesItsRestoredSnapshotBeforeFallback",
+        "DiagnosticsInstrumentedTest#registeredSafResultWinsOverInFlightRecovery",
+        "DiagnosticsInstrumentedTest#restoringSafWithoutResultOffersExplicitRetry",
+        "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelWhileRetryWaits",
         "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelANewAttempt",
-        "DiagnosticsInstrumentedTest#restoredSafCancellationPreservesTheInterruptedWrite"
+        "DiagnosticsInstrumentedTest#restoredSafCancellationPreservesTheInterruptedWrite",
+        "DiagnosticsInstrumentedTest#restoringSafWithoutSnapshotUnblocksFutureExport",
+        "DiagnosticsInstrumentedTest#recreatingActivityTwiceKeepsOneSafRecovery"
       ],
       "limitations": "Сквозная гибель процесса в обоих SAF-сценариях открыта. Обычный SAF не даёт атомарного подтверждения результата для стороннего документа."
     },

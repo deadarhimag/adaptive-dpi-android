@@ -241,12 +241,32 @@ class DiagnosticsInstrumentedTest {
         DiagnosticDocumentRecoveryChecks(context).acceptsQueuedResultBeforeRecovery()
 
     @Test
+    fun registeredSafResultWinsOverInFlightRecovery() =
+        DiagnosticDocumentRecoveryChecks(context).acceptsResultDuringRecovery()
+
+    @Test
+    fun restoringSafWithoutResultOffersExplicitRetry() =
+        DiagnosticDocumentRecoveryChecks(context).offersRetryWithoutResult()
+
+    @Test
+    fun lateSafResultCannotWriteOrCancelWhileRetryWaits() =
+        DiagnosticDocumentRecoveryChecks(context).rejectsOldResultWhileRetryWaits()
+
+    @Test
     fun lateSafResultCannotWriteOrCancelANewAttempt() =
-        DiagnosticDocumentRecoveryChecks(context).rejectsOldResultAfterRecoveryAndWhileRetryWaits()
+        DiagnosticDocumentRecoveryChecks(context).rejectsOldResultAfterNewLaunch()
 
     @Test
     fun restoredSafCancellationPreservesTheInterruptedWrite() =
         DiagnosticDocumentRecoveryChecks(context).queuedCancellationPreservesAnAlreadyClaimedSnapshot()
+
+    @Test
+    fun restoringSafWithoutSnapshotUnblocksFutureExport() =
+        DiagnosticDocumentRecoveryChecks(context).missingSnapshotUnblocksAnotherExport()
+
+    @Test
+    fun recreatingActivityTwiceKeepsOneSafRecovery() =
+        DiagnosticDocumentRecoveryChecks(context).activityRecreatedTwiceKeepsOneRecovery()
 
     @Test
     fun cancelSafClearsSnapshotAndAllowsAnotherSave() {

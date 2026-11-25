@@ -2,6 +2,7 @@ package org.adaptivedpi.android
 
 import android.content.Context
 import android.net.Uri
+import androidx.annotation.MainThread
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.ActivityResultRegistry
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,7 +42,11 @@ internal class DiagnosticDocumentPicker(
 }
 
 /** Владелец подготовки и записи, пока существует задача Activity, включая пересоздание. */
-internal class DiagnosticSnapshotPreparation : ViewModel() {
+internal class DiagnosticSnapshotPreparation(
+    private val snapshotExists: suspend (Context, String) -> Boolean = { context, name ->
+        withContext(Dispatchers.IO) { DiagnosticExports.hasPending(context, name) }
+    },
+) : ViewModel() {
     data class Picker(val id: String, val key: String?)
     private data class Recovery(val id: String, val picker: Picker?)
 
@@ -49,7 +54,7 @@ internal class DiagnosticSnapshotPreparation : ViewModel() {
     private var initialized = false
     private var write: Job? = null
     private var recovering: Recovery? = null
-    private var recoveryStarted = false
+    private var recoveryJob: Job? = null
     var picker: Picker? = null
         private set
     var writing: String? = null
@@ -67,23 +72,24 @@ internal class DiagnosticSnapshotPreparation : ViewModel() {
         return true
     }
 
-    fun recoverIfNeeded(context: Context, snapshotName: (String) -> String?) {
-        val saved = recovering ?: return
-        if (recoveryStarted) return
-        recoveryStarted = true
+    @MainThread
+    fun recoverIfNeeded(context: Context, snapshotName: (String) -> String?): Job? {
+        val saved = recovering ?: return null
+        recoveryJob?.let { return it }
         val name = snapshotName(saved.id)
         val app = context.applicationContext
-        viewModelScope.launch {
-            val exists = name != null && withContext(Dispatchers.IO) { DiagnosticExports.hasPending(app, name) }
-            // Результат мог поступить во время чтения диска и уже забрать запрос.
+        return viewModelScope.launch {
+            val exists = name != null && snapshotExists(app, name)
+            // Принятый callback уже передал запрос записи или отмене.
             if (recovering !== saved) return@launch
+            // Эта публикация на Main окончательно завершает прежний ключ.
             recovering = null
             if (saved.picker != null) {
                 picker = null
             }
             if (exists) retry.value = saved.id
             else if (name != null) DiagnosticExports.releasePending(name)
-        }
+        }.also { recoveryJob = it }
     }
 
     fun startPicker(id: String): String {
@@ -110,9 +116,10 @@ internal class DiagnosticSnapshotPreparation : ViewModel() {
 
     fun take(name: String) = taskFor(name)?.also { snapshot = null }
 
-    fun finishPicker(context: Context, uri: Uri?, key: String?, snapshotName: (String) -> String?, transportId: String) {
-        val request = picker?.takeIf { it.key == key } ?: return
-        if (writing != null) return
+    @MainThread
+    fun finishPicker(context: Context, uri: Uri?, key: String?, snapshotName: (String) -> String?, transportId: String): Job? {
+        val request = picker?.takeIf { it.key == key } ?: return null
+        if (writing != null) return null
         val id = request.id
         val name = snapshotName(id)
         picker = null
@@ -164,6 +171,7 @@ internal class DiagnosticSnapshotPreparation : ViewModel() {
                 writing = null
             }
         }
+        return write
     }
 
     fun clearFinishedOwner(name: String) {
