@@ -31,6 +31,7 @@ CLASSES = {
     ),
     PACKAGE + "TunTransportInstrumentedTest": ("tcpUdpAndDnsTraverseTunAcrossTwoSessions",),
     PACKAGE + "ApplicationTransportInstrumentedTest": ("separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions",),
+    PACKAGE + "KernelCapabilitiesInstrumentedTest": ("everyOperationReportsOkOrErrnoOnALoopbackPair",),
 }
 DIAGNOSTICS_CLASS = PACKAGE + "DiagnosticsInstrumentedTest"
 DIAGNOSTICS_METHODS = (
