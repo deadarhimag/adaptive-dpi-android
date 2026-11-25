@@ -11,8 +11,12 @@ import org.adaptivedpi.android.engine.TransportSite
 import org.adaptivedpi.android.engine.TransportSubsystem
 import org.adaptivedpi.android.vpn.diagnostics.TransportSessionDiagnostics
 
+/** `errno` первого `ErrnoException` в цепочке причин. */
+internal fun errnoOfCause(error: Throwable): Int? =
+    generateSequence(error, Throwable::cause).take(8).filterIsInstance<ErrnoException>().firstOrNull()?.errno
+
 internal fun TransportSessionDiagnostics.reporter() = TransportFailureReporter(
-    errnoOf = { error -> generateSequence(error, Throwable::cause).take(8).filterIsInstance<ErrnoException>().firstOrNull()?.errno },
+    errnoOf = ::errnoOfCause,
     sink = { failure -> record(state, failure) },
 )
 
