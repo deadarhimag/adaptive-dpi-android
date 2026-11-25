@@ -38,7 +38,7 @@ internal class DiagnosticCenter(
      */
     @Synchronized
     fun recordProcessExits(records: List<ProcessExitRecord>) {
-        val known = current.value.mapTo(HashSet(), DiagnosticEvent::id)
+        val known = current.value.mapTo(HashSet<UUID>()) { it.id }
         val added = records.mapNotNull { record ->
             val code = ExitReasonReader.codeOf(record.reason) ?: return@mapNotNull null
             val id = ExitReasonReader.idOf(record)
