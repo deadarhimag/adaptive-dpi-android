@@ -2,12 +2,14 @@ package org.adaptivedpi.android
 
 import android.app.Activity
 import android.app.Instrumentation
+import android.content.Context
 import android.content.Intent
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isEnabled
+import androidx.compose.ui.test.isSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -46,7 +48,8 @@ class BuildAndDiagnosticsUiTest {
 
     @Test
     fun diagnosticsShowsExportAndVpnHistoryWithoutScrollingPastTheStatus() {
-        compose.onNodeWithText(string(R.string.diagnostics)).performScrollTo().performClick()
+        // Нижняя панель навигации не прокручивается.
+        compose.onNodeWithText(string(R.string.diagnostics)).performClick()
         val export = string(R.string.diagnostic_export_all)
         val action = hasText(export) and isEnabled()
         compose.waitUntil(timeoutMillis = 5_000) { compose.onAllNodes(action).fetchSemanticsNodes().isNotEmpty() }
@@ -87,7 +90,8 @@ class BuildAndDiagnosticsUiTest {
 
     @Test
     fun transportExportOffersSaveShareAndCancelFromOneButton() {
-        compose.onNodeWithText(string(R.string.diagnostics)).performScrollTo().performClick()
+        // Нижняя панель навигации не прокручивается.
+        compose.onNodeWithText(string(R.string.diagnostics)).performClick()
         val label = hasText(string(R.string.transport_export)) and hasClickAction()
         val export = compose.onNode(label)
         compose.waitUntil(timeoutMillis = 5_000) {
@@ -138,7 +142,7 @@ class BuildAndDiagnosticsUiTest {
 
     @Test
     fun aboutShowsBuildNumberAndPackagedCommit() {
-        compose.onNodeWithText(string(R.string.settings)).performScrollTo().performClick()
+        compose.onNodeWithText(string(R.string.settings)).performClick()
         compose.onNodeWithText(string(R.string.about_title)).performScrollTo().performClick()
 
         val activity = compose.activity
@@ -156,6 +160,42 @@ class BuildAndDiagnosticsUiTest {
         compose.onNodeWithText(activity.getString(R.string.about_version, info.versionName)).assertIsDisplayed()
         compose.onNodeWithText(expectedBuild).assertIsDisplayed()
         compose.onNodeWithText(activity.getString(R.string.about_git_commit, expectedCommit)).assertIsDisplayed()
+    }
+
+    @Test
+    fun bottomNavigationOpensSectionsAndKeepsSettingsSelectedInsideItsSubscreens() {
+        compose.onNodeWithText(string(R.string.vpn_start)).assertExists()
+        compose.onNodeWithText(string(R.string.diagnostics)).performClick()
+        compose.onNode(hasText(string(R.string.diagnostics)) and isSelected()).assertExists()
+        compose.onNodeWithText(string(R.string.diagnostic_export_all)).assertExists()
+
+        compose.onNodeWithText(string(R.string.settings)).performClick()
+        compose.onNodeWithText(string(R.string.theme)).assertExists()
+        compose.onNodeWithText(string(R.string.about_title)).performScrollTo().performClick()
+        compose.onNodeWithText(string(R.string.about_licenses)).assertExists()
+        compose.onNode(hasText(string(R.string.settings)) and isSelected()).assertExists()
+
+        compose.onNodeWithText(string(R.string.nav_home)).performClick()
+        compose.onNode(hasText(string(R.string.nav_home)) and isSelected()).assertExists()
+        compose.onNodeWithText(string(R.string.vpn_start)).assertExists()
+    }
+
+    @Test
+    fun themeChoiceIsAppliedImmediatelyAndStored() {
+        val stored = compose.activity.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        try {
+            compose.onNodeWithText(string(R.string.settings)).performClick()
+            compose.onNodeWithText(string(R.string.theme_dark)).performScrollTo().performClick()
+            compose.waitUntil(timeoutMillis = 5_000) { stored.getString("theme", null) == "Dark" }
+            compose.onNode(hasText(string(R.string.theme_dark)) and isSelected()).assertExists()
+
+            compose.onNodeWithText(string(R.string.theme_light)).performScrollTo().performClick()
+            compose.waitUntil(timeoutMillis = 5_000) { stored.getString("theme", null) == "Light" }
+            compose.onNode(hasText(string(R.string.theme_light)) and isSelected()).assertExists()
+        } finally {
+            // Выбранная тема не должна влиять на остальные тесты.
+            stored.edit().remove("theme").commit()
+        }
     }
 
     @Test

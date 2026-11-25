@@ -57,6 +57,7 @@ internal fun AboutScreen() {
         LicenseLink(R.string.about_androidx, "https://android.googlesource.com/platform/frameworks/support/+/androidx-main/LICENSE.txt")
         LicenseLink(R.string.about_kotlin, "https://github.com/JetBrains/kotlin/blob/v2.3.21/license/LICENSE.txt")
         LicenseLink(R.string.about_coroutines, "https://github.com/Kotlin/kotlinx.coroutines/blob/1.10.2/LICENSE.txt")
+        LicenseLink(R.string.about_symbols, "https://github.com/google/material-design-icons/blob/10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7/LICENSE")
     }
 }
 
