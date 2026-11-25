@@ -113,6 +113,8 @@ class DiagnosticCenterTest {
         val details = VpnCleanupDetails(UUID.randomUUID(), 4_031, true, true, 2,
             RelayShutdownStatus(0, 0, 0, 0, 0), 0, 0, emptyList())
         assertFalse(details.incomplete)
+        assertFalse(details.copy(issues = listOf(CleanupIssue(CleanupStep.ForegroundNotification, ExceptionKind.SecurityException))).incomplete)
+        assertTrue(details.copy(issues = listOf(CleanupIssue(CleanupStep.ServiceStop, ExceptionKind.SecurityException))).incomplete)
         assertTrue(details.copy(relay = RelayShutdownStatus(4, 0, 0, 1, 0)).incomplete)
         assertTrue(details.copy(issues = listOf(CleanupIssue(CleanupStep.TunClose, ExceptionKind.IOException))).incomplete)
         center(journal).record(DiagnosticCode.VpnCleanupDelayed, idle, cleanup = details)

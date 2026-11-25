@@ -36,7 +36,7 @@ data class FlowAggregate(
     val udp443Associations: Long,
     val udp443Out: Long,
     val udp443In: Long,
-    /** Ассоциации, где ушло не меньше 4 датаграмм и пришло не больше одной (признак «UDP без ответа»). */
+    /** Малый входящий обмен, исключая локальные ошибки и отмену. Причина не установлена. */
     val udpUnanswered: Long,
     val udp443Unanswered: Long,
 ) {
@@ -52,7 +52,7 @@ data class FlowAggregate(
         appendLine("Отказы ключей по категориям: " + counts(failuresByCategory.mapKeys { it.key.name }) + ".")
         appendLine("Отказы по errno: " + counts(failuresByErrno.mapKeys { it.key.toString() }) + ".")
         appendLine("Внутренние отказы релея (не отказы ключей): " + counts(internalRefusals.mapKeys { it.key.name }) + ".")
-        appendLine("Клиент бросил соединение сразу после первой порции ответа: $clientAbandoned.")
+        appendLine("Сброс клиентского сокета вскоре после первого ответа: $clientAbandoned.")
         append("Скорость приёма: соединений $rateFlows")
         if (rateFlows > 0) {
             append(", от $rateMinBytesPerSecond до $rateMaxBytesPerSecond байт/с, по степеням двойки: ")
@@ -60,8 +60,8 @@ data class FlowAggregate(
         }
         appendLine(".")
         appendLine("Пик одновременных TCP-соединений: $peakActive" + (relayLimit?.let { " из лимита $it" } ?: "") + ".")
-        appendLine("UDP: ассоциаций $udpAssociations, датаграмм исходящих $udpOut, входящих $udpIn, без ответа $udpUnanswered. " +
-            "UDP/443: ассоциаций $udp443Associations, исходящих $udp443Out, входящих $udp443In, без ответа $udp443Unanswered.")
+        appendLine("UDP: ассоциаций $udpAssociations, датаграмм исходящих $udpOut, входящих $udpIn, мало входящих $udpUnanswered. " +
+            "UDP/443: ассоциаций $udp443Associations, исходящих $udp443Out, входящих $udp443In, мало входящих $udp443Unanswered.")
     }.trimEnd()
 
     private fun counts(values: Map<String, Long>) = if (values.isEmpty()) "нет" else values.entries.joinToString(", ") { "${it.key} ${it.value}" }
@@ -153,7 +153,8 @@ class FlowOutcomeRecorder : FlowObserver {
 
     override fun onUdp(association: UdpRecord) {
         synchronized(lock) {
-            val unanswered = association.outDatagrams >= UNANSWERED_OUT && association.inDatagrams <= 1
+            val unanswered = (association.end == UdpEnd.FINISHED || association.end == UdpEnd.IDLE) &&
+                association.outDatagrams >= UNANSWERED_OUT && association.inDatagrams <= 1
             udpAssociations++
             udpOut += association.outDatagrams
             udpIn += association.inDatagrams

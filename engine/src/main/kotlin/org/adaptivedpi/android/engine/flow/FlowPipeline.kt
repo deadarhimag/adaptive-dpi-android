@@ -66,15 +66,15 @@ internal class FlowPipeline(
         if (kind != FlowKind.TLS) return Captured(first, firstSize, false)
 
         val prefix = ByteArray(ClientHelloInspector.MAX_PREFIX)
-        first.copyInto(prefix, 0, 0, minOf(firstSize, prefix.size))
         var size = minOf(firstSize, prefix.size)
+        first.copyInto(prefix, endIndex = size)
         var eof = false
         val deadline = clock() + captureNanos
         while (true) {
             val result = try {
                 classify(prefix, size)
             } catch (error: Exception) {
-                report(error)
+                reportSafely(error)
                 ClientHelloInspector.Result.Unknown
             }
             if (result is ClientHelloInspector.Result.Hello) {
@@ -95,7 +95,7 @@ internal class FlowPipeline(
             }
             size += count
         }
-        return Captured(prefix, size, eof)
+        return if (firstSize > prefix.size) Captured(first, firstSize, false) else Captured(prefix, size, eof)
     }
 
     internal fun finished() = active.decrementAndGet()
@@ -120,8 +120,12 @@ internal class FlowPipeline(
         try {
             action()
         } catch (error: Exception) {
-            report(error)
+            reportSafely(error)
         }
+    }
+
+    private fun reportSafely(error: Exception) {
+        try { report(error) } catch (_: Exception) { /* Сбой диагностики не отменяет передачу. */ }
     }
 
     private fun kindOf(bytes: ByteArray, size: Int): FlowKind {
@@ -150,41 +154,40 @@ internal class FlowTracker(
 ) {
     @Volatile var kind = FlowKind.OTHER
     @Volatile var hello: FlowHello? = null
-    private val startedAt = owner.clock()
     private val toServer = AtomicLong()
     private val fromServer = AtomicLong()
-    @Volatile private var helloSentAt = 0L
-    @Volatile private var firstResponseAt = 0L
+    @Volatile private var helloSentAt: Long? = null
+    @Volatile private var firstResponseAt: Long? = null
     @Volatile private var firstResponseBytes = 0L
     @Volatile private var lastResponseAt = 0L
     @Volatile private var clientSentAfterResponse = false
-    @Volatile private var clientClosedAt = 0L
+    @Volatile private var clientClosedAt: Long? = null
     private val failure = AtomicReference<Pair<FlowFailure, Long>?>()
     private val finished = AtomicBoolean()
 
-    fun sentToServer(size: Int) {
+    fun sentToServer(size: Int, writeStartedAt: Long) {
         toServer.addAndGet(size.toLong())
-        if (firstResponseAt != 0L) clientSentAfterResponse = true
+        if (firstResponseAt?.let { writeStartedAt > it } == true) clientSentAfterResponse = true
     }
 
     /** Первая порция клиента (ClientHello или начало запроса) передана серверу. */
     fun firstPortionSent() {
-        if (helloSentAt == 0L) helloSentAt = owner.clock()
+        if (helloSentAt == null) helloSentAt = owner.clock()
     }
 
     fun receivedFromServer(size: Int) {
         val now = owner.clock()
         val total = fromServer.addAndGet(size.toLong())
-        if (firstResponseAt == 0L) {
+        if (firstResponseAt == null) {
             firstResponseBytes = total
             firstResponseAt = now
         }
         lastResponseAt = now
     }
 
-    /** Клиент закрыл соединение сам, а не релей. */
+    /** Наблюдалось аварийное завершение клиентского сокета. Обычный EOF подтверждает лишь полузакрытие. */
     fun clientClosed() {
-        if (clientClosedAt == 0L) clientClosedAt = owner.clock()
+        if (clientClosedAt == null) clientClosedAt = owner.clock()
     }
 
     fun failed(value: FlowFailure) {
@@ -207,10 +210,11 @@ internal class FlowTracker(
             else -> FlowStage.FIRST_CHUNK
         }
         val firstResponse = firstResponseAt
-        val abandoned = firstResponse != 0L && clientClosedAt != 0L && !clientSentAfterResponse &&
-            clientClosedAt - firstResponse <= maxOf(connectNanos, MIN_RTT_NANOS)
-        val interval = lastResponseAt - firstResponse
-        val rate = if (firstResponse != 0L && interval >= MIN_RATE_INTERVAL_NANOS && bytesFromServer > firstResponseBytes) {
+        val clientClosed = clientClosedAt
+        val abandoned = firstResponse != null && clientClosed != null && !clientSentAfterResponse &&
+            failed?.first?.internal != true && clientClosed - firstResponse in 0L..maxOf(connectNanos, MIN_RTT_NANOS)
+        val interval = firstResponse?.let { lastResponseAt - it } ?: 0L
+        val rate = if (interval >= MIN_RATE_INTERVAL_NANOS && bytesFromServer > firstResponseBytes) {
             ((bytesFromServer - firstResponseBytes) * 1_000_000_000.0 / interval).toLong()
         } else {
             null
@@ -218,7 +222,7 @@ internal class FlowTracker(
         owner.emit(
             FlowRecord(
                 keyHash, port, kind, hello, stage, failed?.first, owner.nanosToMillis(connectNanos),
-                failed?.let { owner.nanosToMillis(it.second - (helloSentAt.takeIf { sent -> sent != 0L } ?: startedAt)) },
+                helloSentAt?.let { sent -> failed?.second?.minus(sent)?.takeIf { it >= 0 }?.let(owner::nanosToMillis) },
                 toServer.get(), bytesFromServer, abandoned, rate,
             ),
         )

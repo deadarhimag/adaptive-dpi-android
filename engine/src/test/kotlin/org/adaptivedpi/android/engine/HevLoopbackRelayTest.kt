@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -28,6 +29,68 @@ class HevLoopbackRelayTest {
     private val policy = object : OutboundSocketPolicy {
         override fun prepare(socket: Socket) = Unit
         override fun prepare(socket: DatagramSocket) = Unit
+    }
+
+    @Test
+    fun drainRetriesListenerCloseBeforeJoiningAcceptThread() {
+        lateinit var listener: ServerSocket
+        val listening = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        var attempts = 0
+        OutboundTransport().use { transport ->
+            val relay = HevLoopbackRelay(
+                transport, ip, 1, TransportFailureReporter(),
+                { socket, thread -> listener = socket; thread.start() },
+                closeRelaySocket = { socket ->
+                    if (socket === listener && ++attempts == 1) throw IOException("Первое закрытие не удалось")
+                    socket.close()
+                },
+            ) { error("Неожиданная остановка релея") }
+            try {
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    listening.countDown()
+                }
+                val stop = executor.submit {
+                    assertTrue(listening.await(1, TimeUnit.SECONDS))
+                    relay.close()
+                    relay.awaitDrained()
+                }
+                stop.get(2, TimeUnit.SECONDS)
+                assertTrue(relay.isTerminated)
+                assertTrue(relay.socketClosures().confirmed)
+                assertEquals(2, attempts)
+            } finally {
+                listener.close()
+                executor.shutdownNow()
+                relay.close()
+            }
+        }
+    }
+
+    @Test
+    fun udpKeepsForwardingOneWayTrafficBeyondReceiveTimeout() {
+        DatagramSocket(InetSocketAddress(ip, 0)).use { server ->
+            server.soTimeout = 1_000
+            relay(readTimeoutMillis = 160) { relay, _ ->
+                client(relay).use { socket ->
+                    val input = DataInputStream(socket.getInputStream())
+                    val output = DataOutputStream(socket.getOutputStream())
+                    assertEquals(0, authenticate(relay.configSecret, input, output))
+                    command(output, 5, 0)
+                    assertEquals(0, reply(input))
+                    repeat(8) { index ->
+                        frame(output, server.localPort, byteArrayOf(index.toByte()))
+                        val packet = DatagramPacket(ByteArray(1), 1)
+                        server.receive(packet)
+                        assertEquals(index, packet.data[0].toInt())
+                        Thread.sleep(45)
+                    }
+                }
+            }
+        }
     }
 
     @Test
