@@ -3,14 +3,16 @@
 # Находит телефон и сам не запускает тестов. Действия:
 #   Snapshot  - проверяет предварительные условия и записывает исходное состояние в $StateFile;
 #   WifiCycle - выключает и снова включает Wi-Fi (нужно подключение по USB, иначе ADB по Wi-Fi оборвётся);
+#   Capabilities - ставит APK сборки и снимает таблицу «операция - ok / errno» эксперимента 1.6;
 #   Collect   - сохраняет журнал приложения и данные батареи;
 #   Restore   - возвращает только то, что меняли проверки, и пишет в итог, что вернуть не удалось.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'WifiCycle', 'Collect', 'Restore')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'WifiCycle', 'Capabilities', 'Collect', 'Restore')][string]$Action,
     [Parameter(Mandatory)][string]$StateFile,
     [string]$Serial,
-    [string]$LogDirectory
+    [string]$LogDirectory,
+    [string]$ArtifactDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -122,6 +124,23 @@ try {
             Invoke-Device @('shell', 'svc', 'wifi', 'enable') | Out-Null
             if (-not (Wait-Wifi $true 30)) { throw 'Wi-Fi не включился за 30 секунд.' }
             Write-Host 'Wi-Fi выключен и снова включён.'
+        } elseif ($Action -eq 'Capabilities') {
+            if (-not $LogDirectory -or -not $ArtifactDirectory) { throw 'Для Capabilities нужны LogDirectory и ArtifactDirectory.' }
+            $logs = (New-Item -ItemType Directory -Path $LogDirectory -Force).FullName
+            foreach ($apk in @('app-debug.apk', 'app-debug-androidTest.apk')) {
+                $path = Join-Path $ArtifactDirectory $apk
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "В артефакте сборки нет $apk." }
+                Invoke-Device @('install', '-r', '-t', $path) | Out-Null
+            }
+            Invoke-Device @('logcat', '-c') | Out-Null
+            $output = Invoke-Device @('shell', 'am', 'instrument', '-w', '-r', '-e', 'class',
+                'org.adaptivedpi.android.KernelCapabilitiesInstrumentedTest', 'org.adaptivedpi.android.test/androidx.test.runner.AndroidJUnitRunner')
+            $output | Set-Content -LiteralPath (Join-Path $logs 'instrumentation.log') -Encoding UTF8
+            $table = Invoke-Device @('logcat', '-d', '-s', 'KernelCaps:I') | Where-Object { $_ -match 'KernelCaps' }
+            $table | Set-Content -LiteralPath (Join-Path $logs 'kernel-capabilities.txt') -Encoding UTF8
+            $table | ForEach-Object { Write-Host $_ }
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("``````text`n" + ($table -join "`n") + "`n``````") }
+            if (-not (($output -join "`n") -match 'OK \(1 test\)')) { throw 'Эксперимент 1.6 завершился ошибкой: см. instrumentation.log.' }
         } elseif ($Action -eq 'Collect') {
             if (-not $LogDirectory) { throw 'Для Collect нужен LogDirectory.' }
             $logs = (New-Item -ItemType Directory -Path $LogDirectory -Force).FullName

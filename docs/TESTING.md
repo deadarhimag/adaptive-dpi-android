@@ -29,7 +29,7 @@
 
 | Когда | Состав |
 | --- | --- |
-| Каждый push в `main` и каждый pull request, кроме правок только документации (`*.md`, `docs/**`, `LICENSE`; исключение - `docs/PIXEL7_TESTING_RU.md`, он входит в артефакт сборки) | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (22) и расширенный (7) наборы, проверка APK |
+| Каждый push в `main` и каждый pull request, кроме правок только документации (`*.md`, `docs/**`, `LICENSE`; исключение - `docs/PIXEL7_TESTING_RU.md`, он входит в артефакт сборки) | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (23) и расширенный (7) наборы, влияние операций над сокетом на сегменты loopback хоста (`scripts/kernel-ops-pcap.py`), проверка APK |
 | Экспериментальные ветки | Черновой pull request в `main` ради Android CI без слияния |
 | Вручную или по расписанию **[план]** | AVD API 29 (нижняя граница) и 36; API 37 - при наличии официального образа; нативные host-тесты с санитайзерами; фаззинг разборщиков |
 | Лаборатория, вручную **[план]** | DPI-стенд Linux с PCAP |
@@ -196,6 +196,27 @@ PR из форков сейчас останавливаются до checkout (
 | Включён | Заведомо неподходящая | Содержимого нет |
 
 Для операций, меняющих байты потока (разбиение на TLS-записи), критерий целостности - сервер получил тот же handshake-message, а не те же байты.
+
+## Возможности ядра
+
+Эксперимент 1.6 ([ROADMAP.md](ROADMAP.md)). Код: `vpn/src/main/hev/adaptive_ops.c` (только debug), `NativeSocketOps`, `KernelCapabilityProbe` (`app/src/debug`), тест `KernelCapabilitiesInstrumentedTest` (строки в logcat с тегом `KernelCaps`; в CI - в журнале шага AVD, на Pixel 7 - сценарий `capabilities` раннера). Сегменты на Linux-хосте - `sudo python3 scripts/kernel-ops-pcap.py`, тот же C-код, собранный под хост.
+
+Номера опций, которых нет в `OsConstants` (по [справочнику OsConstants](https://developer.android.com/reference/android/system/OsConstants) нет `TCP_MAXSEG`): `TCP_MAXSEG` = 2, `TCP_FASTOPEN_CONNECT` = 30, `TCP_MD5SIG` = 14 - `usr/include/linux/tcp.h` (на хосте `/usr/include/linux/tcp.h`, в NDK тот же заголовок uapi в sysroot; поля `tcpi_notsent_bytes`, `tcpi_total_retrans`, `tcpi_rtt` проверяются компиляцией NDK в CI).
+
+| Операция | Linux-хост 6.18, loopback, 25.11.2026 | AVD API 34 | Pixel 7 |
+| --- | --- | --- | --- |
+| `TCP_INFO` (`notsent`, `total_retrans`, `rtt`) | доступно | не снято | не проверено |
+| Гарантированный разрез (ожидание `notsent == 0`) | доступно: сегменты данных 100 и 200 байт | не снято | не проверено |
+| BPF-фильтр RST (`SO_ATTACH_FILTER`) | доступно: RST пришёл, клиент его не увидел (тишина 500 мс); без фильтра - `ECONNRESET` | не снято | не проверено |
+| `vmsplice` + `splice` в сокет | доступно: сервер получил байт | не снято | не проверено |
+| `TCP_MD5SIG` | установка и снятие ключа приняты | не снято | не проверено |
+| `TCP_MAXSEG` до `connect()` | доступно: MSS в SYN 300 | не снято | не проверено |
+| `SO_RCVBUF` 2048 до `connect()` | доступно: окно в SYN 2048 | не снято | не проверено |
+| `TCP_FASTOPEN_CONNECT` | опция принята; данных в SYN нет (первое соединение без cookie, сервер без `TCP_FASTOPEN`) | не снято | не проверено |
+| `IP_TTL` | доступно: TTL сегмента 5 | не снято | не проверено |
+| `MSG_OOB` | доступно: сегмент с URG | не снято | не проверено |
+
+Пределы: на loopback размеры пакетов сервера не показывают дробление ответа (ядро укрупняет сегменты), поэтому фактическое влияние `TCP_MAXSEG` и `SO_RCVBUF` на ответ сервера проверяется на стенде 2.3. Колонка Android - только «работает / ошибка» на loopback-паре: проходит ли изменение через сеть оператора, видно только на реальной сети.
 
 ## Разборщики недоверенных данных
 
