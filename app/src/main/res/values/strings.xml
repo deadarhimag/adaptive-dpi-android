@@ -111,5 +111,10 @@
     <string name="about_androidx">AndroidX — Apache 2.0</string>
     <string name="about_kotlin">Kotlin — Apache 2.0</string>
     <string name="about_coroutines">kotlinx.coroutines — Apache 2.0</string>
+    <string name="nav_home">Главная</string>
+    <string name="developer_title">Для разработчика</string>
+    <string name="developer_description">Проверочный транспорт и тестовые подключения</string>
+    <string name="developer_unavailable">Запуск проверочного транспорта недоступен, пока VPN работает или остановка не завершена.</string>
+    <string name="about_symbols">Значки Material Symbols — Apache 2.0</string>
     <string name="about_link_unavailable">Не удалось открыть ссылку</string>
 </resources>

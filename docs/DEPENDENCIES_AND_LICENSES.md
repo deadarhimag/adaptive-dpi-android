@@ -28,7 +28,7 @@
 | Компонент | Лицензия, чем проверено | Где | Задача | Согласовано |
 | --- | --- | --- | --- | --- |
 | Public Suffix List, `public_suffix_list.dat` | MPL 2.0 - заголовок файла | Ресурс `:analysis` (в APK) | 2.1 | Да (пользователь) |
-| Material Symbols Outlined, `google/material-design-icons` (только нужные SVG, переведённые в векторные ресурсы) | Apache 2.0 - `LICENSE` | `:designsystem` (в APK) | 2.4g | Да (пользователь, 24.11.2026) |
+| Material Symbols Outlined, `google/material-design-icons` (только нужные SVG, переведённые в векторные ресурсы) | Apache 2.0 - `LICENSE` | `:designsystem` (в APK) | 2.4g; **подключён частично 25.11.2026**: ревизия `10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7`, значки `home`, `power_settings_new`, `description`, `settings`, `chevron_right` (`designsystem/src/main/res/drawable/ic_*.xml`); уведомление - в «О приложении» | Да (пользователь, 24.11.2026) |
 | `kotlinx-coroutines-test` той же версии, что `kotlinx-coroutines-core` (1.10.2) | Apache 2.0 - репозиторий `Kotlin/kotlinx.coroutines` (тот же, что у уже подключённой `coroutines-core`) | Только тесты `:analysis` | 2.1 | Да (пользователь, 24.11.2026) |
 | `NetfilterQueue`, `oremanj/python-netfilterqueue` | MIT - `LICENSE.txt` | Только DPI-стенд в CI, не в APK | 2.3 | Да (пользователь, 24.11.2026) |
 
