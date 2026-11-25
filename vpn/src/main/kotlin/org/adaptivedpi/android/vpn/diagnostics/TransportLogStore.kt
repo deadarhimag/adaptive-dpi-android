@@ -97,7 +97,8 @@ internal class TransportLogStore(
             summary.sessionId, summary.merged, summary.dropped, summary.lastFailure?.toEpochMilli() ?: 0,
             summary.byCategory.entries.joinToString(",") { (category, count) -> "${category.name}=$count" },
             summary.dropsBySource.entries.joinToString(",") { (source, count) -> "${source.name}=$count" },
-        ).joinToString("\t")
+            summary.flowText,
+        ).filterNotNull().joinToString("\t")
         val data = checked(payload).toByteArray(Charsets.UTF_8)
         require(data.size <= MAX_LINE_BYTES)
         writeDiagnosticFile(summaryFile, data)
@@ -108,7 +109,7 @@ internal class TransportLogStore(
         return runCatching {
             require(summaryFile.length() <= MAX_LINE_BYTES)
             val parts = payload(summaryFile.readText()).split('\t')
-            require(parts.size in 5..6)
+            require(parts.size in 5..7)
             TransportSessionSummary(
                 UUID.fromString(parts[0]),
                 parts[4].split(',').filter(String::isNotEmpty).associate {
@@ -119,6 +120,7 @@ internal class TransportLogStore(
                 parts.getOrNull(5).orEmpty().split(',').filter(String::isNotEmpty).associate {
                     TransportDropSource.valueOf(it.substringBefore('=')) to it.substringAfter('=').toLong().also { count -> require(count > 0) }
                 },
+                parts.getOrNull(6),
             )
         }.onFailure { storageError = true }.getOrNull()
     }
