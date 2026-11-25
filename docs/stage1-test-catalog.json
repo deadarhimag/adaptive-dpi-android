@@ -253,15 +253,16 @@
       "stage": 1,
       "requirements": [
         "1.7",
-        "1.5"
+        "1.5",
+        "REV25-011"
       ],
       "mechanism": "Гибель активного процесса и восстановление",
       "preconditions": "Отдельный AVD, согласие, Known TCP echo и разрешённые уведомления",
-      "inputs": "PID, ID сеанса и приватный активный маркер",
-      "events": "Подтвердить TCP через TUN, дождаться ready, послать SIGKILL с хоста, дождаться удаления маршрута, запустить приложение повторно",
+      "inputs": "UUID запуска, PID, ID сеанса и приватный активный маркер",
+      "events": "Подтвердить TCP через TUN, дождаться единственной READY с UUID запуска, сверить PID и маркер, послать SIGKILL с хоста, дождаться удаления маршрута, запустить приложение повторно и очистить эксперимент",
       "expected": "Новый PID, TUN исчез, TCP снова проходит, одна запись и уведомление с ID потерянного сеанса",
-      "forbidden": "Старый PID, самопроизвольный Start, дубликат, зависший маршрут",
-      "acceptance": "ADB видит присутствие и затем исчезновение адреса TUN, независимый сервер сверяет содержимое, тест проверяет журнал и уведомление",
+      "forbidden": "SIGKILL по старой или неоднозначной READY, старый PID, самопроизвольный Start, дубликат, зависший маршрут, отчёт об успехе без проверки очистки",
+      "acceptance": "ADB видит присутствие и затем исчезновение адреса TUN, независимый сервер сверяет содержимое, тест проверяет журнал и уведомление, итоговый JSON связывает UUID, PID и ID сеанса",
       "environment": "AVD API 34, внешний управляющий сценарий",
       "suites": [
         "Android CI, системный"
@@ -272,6 +273,29 @@
         "DiagnosticsInstrumentedTest#anAbortedVpnProcessIsReportedAfterTheNextLaunch"
       ],
       "limitations": "SIGKILL без штатного onDestroy. Java crash, системный LMK, Always-on и lockdown требуют отдельных вариантов."
+    },
+    {
+      "id": "S1-VPN-PROCESS-HOST-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-011"
+      ],
+      "mechanism": "Изоляция управляющего эксперимента и валидация протоколов",
+      "preconditions": "Bash и Python на хосте",
+      "inputs": "Управляемый ADB, READY разных запусков, протокол AndroidJUnitRunner",
+      "events": "Первый и повторный запуск, старый READY без нового, дубли, некорректные идентификаторы, несовпавшие PID и маркер, ранний выход, тайм-ауты, ошибки до и после SIGKILL и сбой очистки",
+      "expected": "Только единичная корректная READY влияет на текущий эксперимент, аварийный и неполный протокол отклоняются, ошибки ведут к очистке",
+      "forbidden": "SIGKILL до проверки принадлежности, запуск на физическом устройстве, успешный отчёт при сбое очистки",
+      "acceptance": "Хост-проверка сверяет вызовы ADB, артефакты, завершение управляемого процесса и отказ валидатора на отрицательных входах",
+      "environment": "Хост без Android",
+      "suites": [
+        "Android CI, хост"
+      ],
+      "implementation": [
+        ".github/scripts/test-vpn-process-recovery-host.py",
+        ".github/scripts/verify-extended-transport-results.py"
+      ],
+      "limitations": "Фиктивный ADB проверяет управляющую логику. Реальное восстановление TCP и TUN требует S1-VPN-PROCESS-01."
     },
     {
       "id": "S1-VPN-REVOKE-01",
@@ -292,6 +316,36 @@
       ],
       "implementation": [],
       "limitations": "Открыто. Смена Wi‑Fi и LTE, Always-on и поведение конкретной настройки Pixel 7 проверяются отдельно."
+    },
+    {
+      "id": "S1-SAF-FIXTURE-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-009",
+        "REV25-010",
+        "REV25-006",
+        "REV25-007"
+      ],
+      "mechanism": "Самостоятельный провайдер тестового APK и его канал",
+      "preconditions": "Собранные debug, release и AndroidTest APK; оба подписанных APK установлены на свежем AVD",
+      "inputs": "Реальный content URI тестового пакета, известные байты и управляемые сбои канала",
+      "events": "Проверить DEX, обратиться к провайдеру до больших наборов, проверить блокировку, открытие, запись, обрыв, повторный open, тайм-аут и reset при двух стадиях работы",
+      "expected": "UID тестового APK, другой PID, точный размер и SHA-256 после release, наблюдаемый исход для каждого отказа и завершение работника перед сменой назначения",
+      "forbidden": "Зависимость от классов APK приложения, попадание фикстуры в release, успешный digest при обрыве или ошибке, авария процесса или зависший поток",
+      "acceptance": "DEX-валидатор подтверждает границу классов, четыре строго именованных Android-теста завершаются успешно, отрицательные контроли возвращают нужное состояние",
+      "environment": "Android SDK на хосте и свежий AVD API 34",
+      "suites": [
+        "Android CI, DEX",
+        "Android CI, предварительный на обоих AVD"
+      ],
+      "implementation": [
+        ".github/scripts/verify-test-apk-dex.py",
+        "SafFixtureInstrumentedTest#startsInTestPackageAndReceivesExactBytesAfterRelease",
+        "SafFixtureInstrumentedTest#requestedOpenAndWriteFailuresAreObservableWithoutFixtureError",
+        "SafFixtureInstrumentedTest#prematureAndFaultedPipesFailWithoutPublishingADigest",
+        "SafFixtureInstrumentedTest#resetRetiresBothReadingAndBlockedWorkersAndTimeoutIsAnError"
+      ],
+      "limitations": "Проверка DEX не заменяет старт процесса Android. Фикстура моделирует сбои канала и не описывает семантику всех внешних SAF-поставщиков."
     },
     {
       "id": "S1-SAF-LIFECYCLE-01",
@@ -325,22 +379,26 @@
       "stage": 1,
       "requirements": [
         "REV25-006",
+        "REV25-012",
         "1.7"
       ],
       "mechanism": "Продолжение SAF после гибели процесса",
       "preconditions": "Сохранённое состояние системной задачи и отдельный поставщик",
-      "inputs": "Два сценария: picker открыт и URI получен перед зависшей записью",
-      "events": "Хост убивает PID, не убивая picker или поставщик. Продолжить picker либо вернуть старую задачу к приложению после записи",
-      "expected": "Открытый picker может завершить первую попытку. Неясная запись требует явного повтора, сохранён тот же снимок",
-      "forbidden": "Автоматическая перезапись частичного документа или повторный запуск picker без действия пользователя",
-      "acceptance": "Внешний поставщик сверяет количество открытий и байты, ADB подтверждает PID, пользователь завершает явный повтор на другом URI",
-      "environment": "AVD с реальным picker и внешним управляющим сценарием",
+      "inputs": "Состояние registry и два request code, готовый снимок и маркер .writing, URI с известным содержимым",
+      "events": "Восстановить новый ViewModel и registry, подать результат до регистрации и после перехода в retry, запустить повтор с новым ключом. В запланированном сквозном тесте хост убивает PID при открытом picker или начатой записи",
+      "expected": "Результат активного запуска завершает исходную попытку. Неясная запись требует явного повтора, снимок сохраняется",
+      "forbidden": "Применение старого URI к новой попытке, удаление .writing старой отменой, автоматическая перезапись частичного документа или открытие нового picker без действия пользователя",
+      "acceptance": "Базовые случаи сверяют состояние Registry, байты и файловые маркеры. Для сквозного случая поставщик сверяет количество открытий и байты, ADB подтверждает новый PID",
+      "environment": "AVD с AndroidX Registry; для системного прогона нужен реальный picker и внешний управляющий сценарий",
       "suites": [
-        "Android CI, базовый контракт файла",
+        "Android CI, базовый контракт результата и файла",
         "проект сквозной системной проверки"
       ],
       "implementation": [
-        "DiagnosticsInstrumentedTest#consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry"
+        "DiagnosticsInstrumentedTest#consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry",
+        "DiagnosticsInstrumentedTest#queuedSafResultUsesItsRestoredSnapshotBeforeFallback",
+        "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelANewAttempt",
+        "DiagnosticsInstrumentedTest#restoredSafCancellationPreservesTheInterruptedWrite"
       ],
       "limitations": "Сквозная гибель процесса в обоих SAF-сценариях открыта. Обычный SAF не даёт атомарного подтверждения результата для стороннего документа."
     },
