@@ -72,6 +72,9 @@ jobs:
           ./gradlew --no-daemon --no-configuration-cache testDebugUnitTest :engine:test
           ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug :app:lintDebug :app:lintRelease :app:assembleDebugAndroidTest :app:assembleRelease
 
+      - name: Проверить влияние операций над своим сокетом на сегменты (Linux-хост, loopback)
+        run: sudo python3 scripts/kernel-ops-pcap.py
+
       - name: Проверить системное согласие, жизненный цикл, Compose и транспорт через Android TUN
         id: device_tests
         timeout-minutes: 20

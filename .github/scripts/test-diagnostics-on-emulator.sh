@@ -281,5 +281,5 @@ ANDROID_SERIAL="$serial" ./gradlew --no-daemon --no-configuration-cache :app:con
   2>&1 | tee "$log_dir/gradle-tests.log"
 python3 .github/scripts/verify-android-test-results.py app/build/outputs/androidTest-results/connected \
   "$log_dir/consent.log" "$log_dir/results.json"
-timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I '*:S' || true
+timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I KernelCaps:I '*:S' || true
 check_app_anr

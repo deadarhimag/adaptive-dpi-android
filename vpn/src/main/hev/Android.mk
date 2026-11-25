@@ -25,6 +25,8 @@ LOCAL_C_INCLUDES := $(ADAPTIVE_PATH) $(SRCDIR) $(SRCDIR)/misc $(SRCDIR)/core/inc
 LOCAL_CFLAGS := -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -fno-stack-clash-protection $(VERSION_CFLAGS)
 ifeq ($(ADAPTIVE_TEST_HOOKS),1)
 LOCAL_CFLAGS += -DADAPTIVE_TEST_HOOKS
+# Эксперимент 1.6: операции над своим сокетом только в debug, в release их нет (docs/ROADMAP.md, 1.6).
+LOCAL_SRC_FILES += adaptive_ops.c
 endif
 LOCAL_STATIC_LIBRARIES := yaml lwip hev-task-system
 LOCAL_LDLIBS := -llog

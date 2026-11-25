@@ -51,7 +51,8 @@ def verify(apk, aapt2, apksigner, llvm_nm, revision, build):
             symbols = {line.split()[-1] for line in tool_output(llvm_nm, "--dynamic", "--defined-only", library).splitlines() if line.strip()}
             if "Java_org_adaptivedpi_android_vpn_HevBridge_counters" not in symbols:
                 raise ValueError(f"В release библиотеке HEV для {abi} отсутствуют штатные JNI-символы")
-            if any(symbol.startswith("Java_org_adaptivedpi_android_vpn_TransportTestHooks_") for symbol in symbols):
+            if any(symbol.startswith(("Java_org_adaptivedpi_android_vpn_TransportTestHooks_",
+                                      "Java_org_adaptivedpi_android_vpn_analysis_NativeSocketOps_")) for symbol in symbols):
                 raise ValueError(f"В release библиотеке HEV для {abi} найден тестовый JNI-вход")
 
     signature = subprocess.run(["java", "-jar", apksigner, "verify", apk], capture_output=True, check=False)
