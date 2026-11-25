@@ -175,6 +175,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (savedInstanceState == null) handleRestartRequest(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -210,6 +211,14 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         diagnosticRequest.value = VpnDiagnostics.eventId(intent)
+        handleRestartRequest(intent)
+    }
+
+    // Действие «Включить снова» из уведомления об отзыве VPN: обычный путь согласия, только по нажатию пользователя.
+    private fun handleRestartRequest(intent: Intent) {
+        if (intent.action != VpnController.ACTION_RESTART) return
+        intent.setAction(null)
+        requestVpnStart()
     }
 
     override fun onDestroy() {
