@@ -27,7 +27,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.withResumed
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.adaptivedpi.android.designsystem.AdaptiveDpiTheme
@@ -54,10 +53,8 @@ class MainActivity : ComponentActivity() {
     private var pendingConsentId: String? = null
     private var pendingTransportTarget: String? = null
     private var pendingTransportApplication: String? = null
-    private var pendingReportId: String? = null
     private var preparingReportId: String? = null
     private val snapshotPreparation by lazy { ViewModelProvider(this)[DiagnosticSnapshotPreparation::class.java] }
-    private val retryReportId = mutableStateOf<String?>(null)
     private val diagnosticRequest = mutableStateOf<UUID?>(null)
 
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -73,42 +70,8 @@ class MainActivity : ComponentActivity() {
 
     private val createDiagnosticDocument =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-            val id = pendingReportId ?: return@registerForActivityResult
-            val pending = snapshotName(id)
-            lifecycleScope.launch {
-                var keepForRetry = false
-                try {
-                    if (uri == null) return@launch
-                    val report = when {
-                        pending != null -> withContext(Dispatchers.IO) { DiagnosticExports.readPending(applicationContext, pending) }
-                        id == TRANSPORT_REPORT_ID -> null
-                        else -> VpnDiagnostics.events.value.firstOrNull { it.id.toString() == id }?.report()
-                    }
-                    if (report == null && id != TRANSPORT_REPORT_ID) {
-                        Toast.makeText(this@MainActivity, R.string.diagnostic_missing, Toast.LENGTH_SHORT).show()
-                        return@launch
-                    }
-                    withContext(NonCancellable + Dispatchers.IO) {
-                        if (id == TRANSPORT_REPORT_ID) {
-                            DiagnosticExports.saveTransportJournal(applicationContext, uri)
-                        } else {
-                            DiagnosticExports.save(applicationContext, uri, checkNotNull(report))
-                        }
-                    }
-                    Toast.makeText(this@MainActivity, R.string.diagnostic_saved, Toast.LENGTH_SHORT).show()
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
-                    keepForRetry = pending != null
-                    if (keepForRetry) retryReportId.value = id
-                    reportExportError(DiagnosticCode.SaveFailed, error)
-                } finally {
-                    pendingReportId = null
-                    if (pending != null && !keepForRetry) withContext(NonCancellable + Dispatchers.IO) {
-                        runCatching { DiagnosticExports.deletePending(applicationContext, pending) }
-                    }
-                }
-            }
+            val id = snapshotPreparation.picker ?: return@registerForActivityResult
+            snapshotPreparation.finishPicker(applicationContext, uri, id, snapshotName(id), id == TRANSPORT_REPORT_ID)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -120,10 +83,13 @@ class MainActivity : ComponentActivity() {
             pendingVpnSwitch.value = VpnSelection(it.getString(SWITCH_TARGET), it.getString(SWITCH_APPLICATION))
         }
         // Старое состояние могло сохранить пустой префикс до выделения имени файла.
-        pendingReportId = savedInstanceState?.getString(PENDING_REPORT_ID)
+        val restoredPicker = savedInstanceState?.getString(PENDING_REPORT_ID)
             ?.takeUnless { it == COMBINED_REPORT_PREFIX || it == SNAPSHOT_PREFIX }
-        retryReportId.value = savedInstanceState?.getString(RETRY_REPORT_ID)
-        listOfNotNull(pendingReportId, retryReportId.value).mapNotNull(::snapshotName).forEach(DiagnosticExports::retainPending)
+        if (snapshotPreparation.restore(restoredPicker, savedInstanceState?.getString(WRITING_REPORT_ID),
+                savedInstanceState?.getString(RETRY_REPORT_ID))) {
+            listOfNotNull(snapshotPreparation.picker, snapshotPreparation.retry.value)
+                .mapNotNull(::snapshotName).forEach(DiagnosticExports::retainPending)
+        }
         preparingReportId = savedInstanceState?.getString(PREPARING_REPORT_ID)?.takeIf { snapshotName(it) != null }
         preparingReportId?.let { id ->
             val name = checkNotNull(snapshotName(id))
@@ -182,14 +148,19 @@ class MainActivity : ComponentActivity() {
                     onThemeChange = ::saveTheme,
                     onNotificationSettings = ::openNotificationSettings,
                 )
-                retryReportId.value?.let { id ->
+                val feedback = snapshotPreparation.feedback.value
+                LaunchedEffect(feedback) {
+                    if (feedback != null) {
+                        Toast.makeText(this@MainActivity, feedback, Toast.LENGTH_SHORT).show()
+                        snapshotPreparation.feedback.value = null
+                    }
+                }
+                snapshotPreparation.retry.value?.let { id ->
                     AlertDialog(
                         onDismissRequest = { discardRetry(id) },
                         text = { Text(stringResource(R.string.diagnostic_retry_message)) },
                         confirmButton = {
-                            TextButton(onClick = {
-                                if (requestSave(id, snapshotFileName(id))) retryReportId.value = null
-                            }) { Text(stringResource(R.string.diagnostic_retry)) }
+                            TextButton(onClick = { retrySnapshot(id) }) { Text(stringResource(R.string.diagnostic_retry)) }
                         },
                         dismissButton = {
                             TextButton(onClick = { discardRetry(id) }) { Text(stringResource(R.string.cancel)) }
@@ -222,9 +193,10 @@ class MainActivity : ComponentActivity() {
                 putString(SWITCH_APPLICATION, selection.application)
             })
         }
-        outState.putString(PENDING_REPORT_ID, pendingReportId)
+        outState.putString(PENDING_REPORT_ID, snapshotPreparation.picker)
+        outState.putString(WRITING_REPORT_ID, snapshotPreparation.writing)
         outState.putString(PREPARING_REPORT_ID, preparingReportId)
-        outState.putString(RETRY_REPORT_ID, retryReportId.value)
+        outState.putString(RETRY_REPORT_ID, snapshotPreparation.retry.value)
         outState.putString(PREVIOUS_PROCESS, VpnController.processIdentity)
         outState.putString(PENDING_DIAGNOSTIC_REQUEST, diagnosticRequest.value?.toString())
         super.onSaveInstanceState(outState)
@@ -244,6 +216,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshVpnAvailability()
+        // Activity Result Registry подключает callback на ON_START.
+        snapshotPreparation.recoverIfNeeded(applicationContext, ::snapshotName)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -263,13 +237,9 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (isFinishing) {
             pendingConsentId?.let(VpnController::abandonConsent)
-            preparingReportId?.let(::snapshotName)?.let { name ->
-                val pending = snapshotPreparation.take(name)
-                lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
-                    pending?.join()
-                    DiagnosticExports.deletePending(applicationContext, name)
-                }
-            }
+            listOfNotNull(preparingReportId, snapshotPreparation.picker, snapshotPreparation.writing,
+                snapshotPreparation.retry.value).mapNotNull(::snapshotName).distinct()
+                .forEach(snapshotPreparation::clearFinishedOwner)
         }
         super.onDestroy()
     }
@@ -325,11 +295,11 @@ class MainActivity : ComponentActivity() {
     private fun saveCombinedReport(report: String) = saveSnapshot(report, DiagnosticExports.COMBINED_FILE_NAME)
 
     private fun saveSnapshot(report: String, fileName: String) {
-        if (pendingReportId != null || preparingReportId != null || retryReportId.value != null) return
+        if (snapshotPreparation.busy || preparingReportId != null) return
         val name = "${UUID.randomUUID()}.txt"
         val id = "$SNAPSHOT_PREFIX$fileName:$name"
         preparingReportId = id
-        snapshotPreparation.start(applicationContext, name, report)
+        snapshotPreparation.prepare(applicationContext, name, report)
         openPreparedReport(id, name)
     }
 
@@ -353,22 +323,28 @@ class MainActivity : ComponentActivity() {
                 preparingReportId = null
                 snapshotPreparation.take(name)
                 if (error == null) {
-                    if (!requestSave(id, snapshotFileName(id))) retryReportId.value = id
+                    if (!requestSave(id, snapshotFileName(id))) snapshotPreparation.retry.value = id
                 } else {
-                    lifecycleScope.launch(NonCancellable + Dispatchers.IO) {
-                        DiagnosticExports.deletePending(applicationContext, name)
-                    }
+                    snapshotPreparation.discard(applicationContext, name)
                     reportExportError(DiagnosticCode.SaveFailed, error)
                 }
             }
         }
     }
 
-    private fun discardRetry(id: String) {
-        if (retryReportId.value != id) return
-        retryReportId.value = null
+    private fun retrySnapshot(id: String) {
+        if (snapshotPreparation.retry.value != id) return
         val name = snapshotName(id) ?: return
-        lifecycleScope.launch(NonCancellable + Dispatchers.IO) { DiagnosticExports.deletePending(applicationContext, name) }
+        snapshotPreparation.retry.value = null
+        preparingReportId = id
+        snapshotPreparation.prepare(applicationContext, name, report = null)
+        openPreparedReport(id, name)
+    }
+
+    private fun discardRetry(id: String) {
+        if (snapshotPreparation.retry.value != id) return
+        snapshotPreparation.retry.value = null
+        snapshotName(id)?.let { snapshotPreparation.discard(applicationContext, it) }
     }
 
     private fun snapshotName(id: String): String? = when {
@@ -385,13 +361,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestSave(id: String, fileName: String): Boolean {
-        if (pendingReportId != null || preparingReportId != null) return false
-        pendingReportId = id
+        if (snapshotPreparation.busy || preparingReportId != null) return false
+        snapshotPreparation.picker = id
         return try {
             createDiagnosticDocument.launch(fileName)
             true
         } catch (exception: RuntimeException) {
-            pendingReportId = null
+            snapshotPreparation.picker = null
             reportExportError(DiagnosticCode.SaveFailed, exception)
             false
         }
@@ -488,6 +464,7 @@ class MainActivity : ComponentActivity() {
         private const val SWITCH_APPLICATION = "application"
         private const val NOTIFICATION_REQUESTED = "notification_requested"
         private const val PENDING_REPORT_ID = "pending_report"
+        private const val WRITING_REPORT_ID = "writing_report"
         private const val PREPARING_REPORT_ID = "preparing_report"
         private const val RETRY_REPORT_ID = "retry_report"
         private const val SNAPSHOT_PREFIX = "snapshot:"

@@ -4,12 +4,16 @@ import android.Manifest
 import android.app.Activity
 import android.app.Instrumentation
 import android.app.NotificationManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.VpnService
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import android.provider.OpenableColumns
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
@@ -40,6 +44,11 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 import java.io.StringWriter
+import java.io.DataInputStream
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -116,6 +125,282 @@ class DiagnosticsInstrumentedTest {
             destination.delete()
         }
     }
+
+    @Test
+    fun recreatingDuringSafWriteKeepsOneWriteAndUnblocksAnotherExport() {
+        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val pending = File(context.noBackupFilesDir, "pending-export")
+        val previous = pending.list().orEmpty().toSet()
+        val report = "Проверка записи ✓\n".repeat(12_000)
+        val monitor = monitorSave(fixture)
+        try {
+            context.contentResolver.call(fixture, "reset", "success", null)
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { it.exportSnapshot(report) }
+                await { context.contentResolver.call(fixture, "state", null, null)?.getBoolean("writing") == true }
+                scenario.recreate()
+                assertEquals(1, monitor.hits)
+                context.contentResolver.call(fixture, "release", null, null)
+                await {
+                    val result = context.contentResolver.call(fixture, "state", null, null)
+                    result?.getBoolean("finished") == true && result.getInt("bytes") == report.toByteArray().size &&
+                        result.getString("digest") == digest(report.toByteArray()) &&
+                        (pending.list().orEmpty().toSet() - previous).isEmpty()
+                }
+                assertEquals(1, context.contentResolver.call(fixture, "state", null, null)?.getInt("opened"))
+                context.contentResolver.call(fixture, "reset", "success", null)
+                context.contentResolver.call(fixture, "release", null, null)
+                val second = "Второй отчёт"
+                scenario.onActivity { it.exportSnapshot(second) }
+                await { monitor.hits == 2 }
+                await {
+                    context.contentResolver.call(fixture, "state", null, null)?.getString("digest") ==
+                        digest(second.toByteArray()) && (pending.list().orEmpty().toSet() - previous).isEmpty()
+                }
+            }
+        } finally {
+            context.contentResolver.call(fixture, "release", null, null)
+            instrumentation.removeMonitor(monitor)
+        }
+    }
+
+    @Test
+    fun recreatingAfterSafResultBeforeReadPreservesThePendingWrite() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val report = "До чтения ✓"
+        val directory = File(context.cacheDir, "diagnostic-reports").apply { mkdirs() }
+        val destination = File.createTempFile("snapshot-before-read-", ".txt", directory)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", destination)
+        val monitor = monitorSave(uri)
+        val name = DiagnosticExports.storePending(context, report)
+        val retained = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val gateExpired = AtomicBoolean()
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                val holder = thread {
+                    synchronized(DiagnosticExports) {
+                        retained.countDown()
+                        if (!release.await(15, TimeUnit.SECONDS)) gateExpired.set(true)
+                    }
+                }
+                try {
+                    assertTrue(retained.await(4, TimeUnit.SECONDS))
+                    scenario.onActivity { activity ->
+                        val fileName = DiagnosticExports.COMBINED_FILE_NAME
+                        activity.javaClass.getDeclaredMethod("requestSave", String::class.java, String::class.java)
+                            .apply { isAccessible = true }.invoke(activity, "snapshot:$fileName:$name", fileName)
+                    }
+                    await {
+                        var received = false
+                        scenario.onActivity {
+                            val owner = androidx.lifecycle.ViewModelProvider(it)[DiagnosticSnapshotPreparation::class.java]
+                            received = owner.writing != null
+                        }
+                        received
+                    }
+                    scenario.recreate()
+                    assertFalse(gateExpired.get())
+                    assertEquals(0L, destination.length())
+                } finally {
+                    release.countDown()
+                    holder.join(5_000)
+                }
+                await { destination.readText() == report && DiagnosticExports.readPending(context, name) == null }
+                assertEquals(1, monitor.hits)
+            }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+            DiagnosticExports.deletePending(context, name)
+            destination.delete()
+        }
+    }
+
+    @Test
+    fun consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry() {
+        val report = "Состояние на диске после получения URI ✓"
+        val name = DiagnosticExports.storePending(context, report)
+        try {
+            assertEquals(DiagnosticExports.WriteClaim.Claimed, DiagnosticExports.claimWrite(context, name))
+            DiagnosticExports.releasePending(name)
+            DiagnosticExports.retainPending(name)
+            assertEquals(DiagnosticExports.WriteClaim.Interrupted, DiagnosticExports.claimWrite(context, name))
+            assertEquals(report, DiagnosticExports.readPending(context, name))
+            DiagnosticExports.armRetry(context, name)
+            assertEquals(DiagnosticExports.WriteClaim.Claimed, DiagnosticExports.claimWrite(context, name))
+            DiagnosticExports.deletePending(context, name)
+            assertEquals(DiagnosticExports.WriteClaim.Missing, DiagnosticExports.claimWrite(context, name))
+        } finally {
+            DiagnosticExports.deletePending(context, name)
+        }
+    }
+
+    @Test
+    fun cancelSafClearsSnapshotAndAllowsAnotherSave() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val pending = File(context.noBackupFilesDir, "pending-export")
+        val previous = pending.list().orEmpty().toSet()
+        val monitor = monitorSave(null)
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                repeat(2) { index ->
+                    scenario.onActivity { it.exportSnapshot("Отмена ${index + 1} ✓") }
+                    await { monitor.hits == index + 1 && (pending.list().orEmpty().toSet() - previous).isEmpty() }
+                }
+            }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+    }
+
+    @Test
+    fun failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry() {
+        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val pending = File(context.noBackupFilesDir, "pending-export")
+        val previous = pending.list().orEmpty().toSet()
+        val physical = File(context.cacheDir, "diagnostic-reports").apply { mkdirs() }
+        val saved = File.createTempFile("retry-", ".txt", physical)
+        val goodUri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", saved)
+        try {
+            for (mode in listOf("open-error", "write-error")) {
+                val broken = monitorSave(fixture)
+                context.contentResolver.call(fixture, "reset", mode, null)
+                try {
+                    ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                        val report = "Повтор записи: $mode ✓"
+                        val errors = VpnDiagnostics.events.value.map { it.id }.toSet()
+                        scenario.onActivity { it.exportSnapshot(report) }
+                        await { VpnDiagnostics.events.value.any { it.id !in errors && it.code == DiagnosticCode.SaveFailed } }
+                        assertEquals(1, context.contentResolver.call(fixture, "state", null, null)?.getInt("opened"))
+                        assertTrue((pending.listFiles().orEmpty().filter { it.name !in previous }).single().readText() == report)
+                        scenario.recreate()
+                        assertEquals(1, broken.hits)
+                        instrumentation.removeMonitor(broken)
+                        val recovery = monitorSave(goodUri)
+                        try {
+                            scenario.onActivity { activity ->
+                                val owner = androidx.lifecycle.ViewModelProvider(activity)[DiagnosticSnapshotPreparation::class.java]
+                                activity.javaClass.getDeclaredMethod("retrySnapshot", String::class.java)
+                                    .apply { isAccessible = true }.invoke(activity, checkNotNull(owner.retry.value))
+                            }
+                            await { saved.readText() == report && (pending.list().orEmpty().toSet() - previous).isEmpty() }
+                            assertEquals(1, recovery.hits)
+                        } finally {
+                            instrumentation.removeMonitor(recovery)
+                        }
+                    }
+                } finally {
+                    instrumentation.removeMonitor(broken)
+                }
+            }
+        } finally {
+            saved.delete()
+        }
+    }
+
+    @Test
+    fun recentOrFutureOrphansCannotBlockExportAndActiveSnapshotsSurviveReclamation() {
+        val pending = File(context.noBackupFilesDir, "pending-export").apply { mkdirs() }
+        val active = DiagnosticExports.storePending(context, "Действующий снимок")
+        val activeFile = File(pending, active)
+        val orphans = List(7) {
+            val name = "${java.util.UUID.randomUUID()}.txt"
+            File(pending, name).apply {
+                writeText("Снимок предыдущего процесса")
+                check(setLastModified(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(5)))
+            }
+        }
+        try {
+            check(activeFile.setLastModified(1))
+            DiagnosticExports.prunePending(context)
+            val next = DiagnosticExports.storePending(context, "Новый снимок")
+            try {
+                assertEquals("Новый снимок", DiagnosticExports.readPending(context, next))
+                assertEquals("Действующий снимок", DiagnosticExports.readPending(context, active))
+                assertTrue(orphans.any { !it.exists() })
+                assertTrue(pending.listFiles().orEmpty().size <= 8)
+            } finally {
+                DiagnosticExports.deletePending(context, next)
+            }
+        } finally {
+            DiagnosticExports.deletePending(context, active)
+            orphans.forEach(File::delete)
+        }
+        val abandoned = List(7) { File(pending, "${UUID.randomUUID()}.txt").apply { writeText("Готовый файл") } }
+        val temporary = File(pending, "${UUID.randomUUID()}.txt.tmp")
+        try {
+            temporary.writeText("Незавершённая запись")
+            check(temporary.setLastModified(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(5)))
+            val name = DiagnosticExports.storePending(context, "Экспорт после заполнения квоты")
+            try {
+                assertFalse(temporary.exists())
+                assertEquals("Экспорт после заполнения квоты", DiagnosticExports.readPending(context, name))
+            } finally {
+                DiagnosticExports.deletePending(context, name)
+            }
+        } finally {
+            temporary.delete()
+            abandoned.forEach(File::delete)
+        }
+    }
+
+    @Test
+    fun finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = Uri.parse("content://org.adaptivedpi.android.test.saf/result")
+        val directory = File(context.noBackupFilesDir, "pending-export")
+        val previous = directory.list().orEmpty().toSet()
+        val monitor = monitorSave(fixture)
+        try {
+            context.contentResolver.call(fixture, "reset", "open-error", null)
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { it.exportSnapshot("Закрытая задача ✓") }
+                await {
+                    var retry = false
+                    scenario.onActivity {
+                        retry = androidx.lifecycle.ViewModelProvider(it)[DiagnosticSnapshotPreparation::class.java].retry.value != null
+                    }
+                    retry
+                }
+                scenario.onActivity { it.finish() }
+            }
+            val file = directory.listFiles().orEmpty().single { it.name !in previous }
+            val orphans = List(7) { File(directory, "${UUID.randomUUID()}.txt").apply { writeText("Более новый снимок") } }
+            try {
+                check(file.setLastModified(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(5)))
+                val name = DiagnosticExports.storePending(context, "Следующий экспорт")
+                try {
+                    assertFalse(file.exists())
+                    assertEquals("Следующий экспорт", DiagnosticExports.readPending(context, name))
+                } finally {
+                    DiagnosticExports.deletePending(context, name)
+                }
+            } finally {
+                DiagnosticExports.deletePending(context, file.name.removeSuffix(".writing"))
+                orphans.forEach(File::delete)
+            }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+    }
+
+    private fun MainActivity.exportSnapshot(report: String) {
+        javaClass.getDeclaredMethod("saveSnapshot", String::class.java, String::class.java)
+            .apply { isAccessible = true }.invoke(this, report, DiagnosticExports.COMBINED_FILE_NAME)
+    }
+
+    private fun monitorSave(uri: Uri?) = InstrumentationRegistry.getInstrumentation().addMonitor(
+        IntentFilter(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addDataType("text/plain")
+            addCategory(Intent.CATEGORY_OPENABLE)
+        },
+        Instrumentation.ActivityResult(
+            if (uri == null) Activity.RESULT_CANCELED else Activity.RESULT_OK, Intent().setData(uri),
+        ),
+        true,
+    )
 
     @Test
     fun sharesOnlyAReadableDiagnosticCacheFileAndUsesTheDocumentPickerForSaving() {
@@ -320,21 +605,75 @@ class DiagnosticsInstrumentedTest {
         }
     }
 
+    @Test(timeout = 75_000)
+    fun armsVpnForExternalProcessDeath() {
+        val target = checkNotNull(InstrumentationRegistry.getArguments().getString("transportTarget"))
+        ActivityScenario.launch(TransportTestActivity::class.java).use { scenario ->
+            try {
+                scenario.onActivity {
+                    assertEquals(null, VpnService.prepare(it))
+                    assertEquals(null, VpnController.requestStart(it, target))
+                }
+                await { VpnController.state.value == VpnState.EngineRunning }
+                val session = checkNotNull(VpnController.currentSessionId)
+                assertFixtureEcho(target)
+                assertTrue(androidVpnExists())
+                await { File(context.noBackupFilesDir, "diagnostics/active-vpn").length() > 0L }
+                Log.i("VpnRecoveryTest", "READY ${android.os.Process.myPid()} $session")
+                CountDownLatch(1).await(40, TimeUnit.SECONDS)
+                error("Управляющий сценарий не уничтожил процесс")
+            } finally {
+                InstrumentationRegistry.getInstrumentation().runOnMainSync { VpnController.stop() }
+            }
+        }
+    }
+
     @Test
     fun anAbortedVpnProcessIsReportedAfterTheNextLaunch() {
         val argument = InstrumentationRegistry.getArguments().getString("recoveredVpnError")
         assumeTrue("Тест запускается после отдельного аварийного завершения приложения", argument != null)
         val code = DiagnosticCode.valueOf(checkNotNull(argument))
-        await { VpnDiagnostics.events.value.any { it.code == code && !it.acknowledged } }
-        val event = VpnDiagnostics.events.value.first { it.code == code && !it.acknowledged }
+        val session = InstrumentationRegistry.getArguments().getString("recoveredVpnSession")?.let(UUID::fromString)
+        val target = InstrumentationRegistry.getArguments().getString("transportTarget")
+        val expected: (DiagnosticEvent) -> Boolean = { it.code == code && !it.acknowledged && (session == null || it.id == session) }
+        await { VpnDiagnostics.events.value.any(expected) }
+        val event = VpnDiagnostics.events.value.first(expected)
         try {
             assertTrue(event.vpnStopped)
             assertEquals(VpnState.Idle, VpnController.state.value)
             assertTrue(event.report().contains(event.id.toString()))
             val type = if (code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
             await { VpnEventHistory.state.value.entries.any { it.id == event.id && it.type == type } }
+            if (session != null && target != null) {
+                val oldPid = checkNotNull(InstrumentationRegistry.getArguments().getString("oldVpnPid")).toInt()
+                assertTrue(android.os.Process.myPid() != oldPid)
+                ActivityScenario.launch(MainActivity::class.java).use {
+                    await { notifications.activeNotifications.any { notice -> notice.tag == session.toString() } }
+                    assertFalse(androidVpnExists())
+                    assertFixtureEcho(target)
+                    assertEquals(1, VpnDiagnostics.events.value.count { event -> event.id == session })
+                    assertEquals(1, VpnEventHistory.state.value.entries.count { event -> event.id == session && event.type == type })
+                }
+            }
         } finally {
             VpnDiagnostics.acknowledge(event.id)
+        }
+    }
+
+    private fun androidVpnExists(): Boolean {
+        val manager = checkNotNull(context.getSystemService(ConnectivityManager::class.java))
+        return manager.allNetworks.any { manager.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+    }
+
+    private fun assertFixtureEcho(target: String) {
+        val expected = "vpn-system-recovery ✓".toByteArray()
+        Socket(Proxy.NO_PROXY).use { socket ->
+            socket.soTimeout = 5_000
+            socket.connect(InetSocketAddress(target, 39052), 5_000)
+            socket.getOutputStream().write(expected)
+            val received = ByteArray(expected.size)
+            DataInputStream(socket.getInputStream()).readFully(received)
+            assertArrayEquals(expected, received)
         }
     }
 

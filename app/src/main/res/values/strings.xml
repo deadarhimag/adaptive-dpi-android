@@ -89,7 +89,9 @@
     <string name="diagnostic_empty">В журнале пока нет ошибок</string>
     <string name="diagnostic_saved">Отчёт сохранён</string>
     <string name="diagnostic_retry">Повторить сохранение</string>
-    <string name="diagnostic_retry_message">Не удалось сохранить отчёт. Можно повторить сохранение того же снимка.</string>
+    <string name="diagnostic_retry_message">Снимок сохранён в приложении. Проверьте выбранный документ и при необходимости повторите экспорт того же снимка.</string>
+    <string name="diagnostic_outcome_unknown">Результат записи отчёта неизвестен</string>
+    <string name="diagnostic_save_failed_export">Не удалось сохранить отчёт</string>
     <string name="diagnostic_missing">Отчёт больше недоступен</string>
     <string name="diagnostic_export_all">Экспортировать диагностику</string>
     <string name="vpn_journal_title">Журнал событий VPN</string>

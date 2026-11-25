@@ -47,6 +47,13 @@ DIAGNOSTICS_METHODS = (
     "criticalErrorPostsOneNotificationAndOpensItsDiagnosticEvent",
     "pendingCombinedReportSnapshotIsAPrivateFileUntilDeleted",
     "recreatingDuringSnapshotPreparationLaunchesSafOnceAndSavesTheSameText",
+    "recreatingDuringSafWriteKeepsOneWriteAndUnblocksAnotherExport",
+    "recreatingAfterSafResultBeforeReadPreservesThePendingWrite",
+    "consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry",
+    "cancelSafClearsSnapshotAndAllowsAnotherSave",
+    "failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry",
+    "recentOrFutureOrphansCannotBlockExportAndActiveSnapshotsSurviveReclamation",
+    "finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot",
 )
 
 

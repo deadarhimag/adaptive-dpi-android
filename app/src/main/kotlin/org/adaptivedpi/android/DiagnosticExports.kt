@@ -5,32 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import java.io.File
 import java.io.Writer
 
 class DiagnosticFileProvider : FileProvider()
-
-/** Работа с диском переживает смену Activity. Право запускать SAF остаётся у Activity. */
-internal class DiagnosticSnapshotPreparation : ViewModel() {
-    private var snapshot: Pair<String, Deferred<String>>? = null
-
-    fun start(context: Context, name: String, report: String) {
-        check(snapshot == null)
-        val app = context.applicationContext
-        snapshot = name to viewModelScope.async(Dispatchers.IO) { DiagnosticExports.storePending(app, report, name) }
-    }
-
-    fun taskFor(name: String) = snapshot?.takeIf { it.first == name }?.second
-
-    fun take(name: String) = taskFor(name)?.also { snapshot = null }
-}
 
 internal object DiagnosticExports {
     private const val CACHE_DIR = "diagnostic-reports"
@@ -83,11 +63,22 @@ internal object DiagnosticExports {
     }
 
     @Synchronized
+    fun releasePending(name: String) {
+        retained.remove(name)
+    }
+
+    @Synchronized
     fun prunePending(context: Context) {
         val cutoff = System.currentTimeMillis() - MAX_CACHE_AGE_MILLIS
-        File(context.noBackupFilesDir, PENDING_DIR).listFiles().orEmpty().forEach { file ->
-            if (file.isFile && file.name !in retained && file.lastModified() < cutoff) file.delete()
-        }
+        File(context.noBackupFilesDir, PENDING_DIR).listFiles().orEmpty()
+            .filter(::isOrphan)
+            .filter { it.name.endsWith(".tmp") || it.lastModified() < cutoff }
+            .forEach(File::delete)
+    }
+
+    private fun isOrphan(file: File): Boolean {
+        val name = file.name.removeSuffix(".tmp").removeSuffix(".writing")
+        return file.isFile && pendingName.matches(name) && name !in retained
     }
 
     /**
@@ -103,7 +94,14 @@ internal object DiagnosticExports {
         prunePending(context)
         val directory = File(context.noBackupFilesDir, PENDING_DIR)
         directory.mkdirs()
-        check(directory.isDirectory && directory.listFiles().orEmpty().count(File::isFile) < MAX_PENDING_FILES)
+        check(directory.isDirectory)
+        val files = checkNotNull(directory.listFiles()).filter(File::isFile)
+        var occupied = files.size
+        for (orphan in files.filter(::isOrphan).sortedBy(File::lastModified)) {
+            if (occupied < MAX_PENDING_FILES) break
+            if (orphan.delete()) occupied--
+        }
+        check(occupied < MAX_PENDING_FILES)
         // Запись через временный файл: после сбоя не остаётся оборванного снимка под рабочим именем.
         val temporary = File(directory, "$name.tmp")
         try {
@@ -116,10 +114,39 @@ internal object DiagnosticExports {
         return name
     }
 
-    fun readPending(context: Context, name: String): String? {
+    fun readPending(context: Context, name: String): String? = pendingFile(context, name)?.readText(Charsets.UTF_8)
+
+    fun hasPending(context: Context, name: String): Boolean = pendingFile(context, name) != null
+
+    private fun pendingFile(context: Context, name: String): File? {
         if (!pendingName.matches(name)) return null
-        val file = File(File(context.noBackupFilesDir, PENDING_DIR), name)
-        return if (file.isFile && file.length() <= MAX_PENDING_BYTES) file.readText(Charsets.UTF_8) else null
+        val directory = File(context.noBackupFilesDir, PENDING_DIR)
+        val file = File(directory, name).takeIf(File::isFile) ?: File(directory, "$name.writing")
+        return file.takeIf { it.isFile && it.length() <= MAX_PENDING_BYTES }
+    }
+
+    internal enum class WriteClaim { Claimed, Interrupted, Missing }
+
+    // Переименование фиксирует попытку до первого обращения к внешнему поставщику.
+    @Synchronized
+    fun claimWrite(context: Context, name: String): WriteClaim {
+        require(pendingName.matches(name))
+        val directory = File(context.noBackupFilesDir, PENDING_DIR)
+        val writing = File(directory, "$name.writing")
+        if (writing.isFile) return WriteClaim.Interrupted
+        val pending = File(directory, name)
+        if (!pending.isFile) return WriteClaim.Missing
+        check(pending.renameTo(writing))
+        return WriteClaim.Claimed
+    }
+
+    @Synchronized
+    fun armRetry(context: Context, name: String) {
+        require(pendingName.matches(name))
+        val directory = File(context.noBackupFilesDir, PENDING_DIR)
+        val writing = File(directory, "$name.writing")
+        if (writing.isFile) check(writing.renameTo(File(directory, name)))
+        check(File(directory, name).isFile)
     }
 
     @Synchronized
@@ -129,6 +156,7 @@ internal object DiagnosticExports {
         val directory = File(context.noBackupFilesDir, PENDING_DIR)
         File(directory, name).delete()
         File(directory, "$name.tmp").delete()
+        File(directory, "$name.writing").delete()
     }
 
     private inline fun shareIntent(context: Context, fileName: String, write: (Writer) -> Unit): Intent {
