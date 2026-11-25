@@ -1,0 +1,136 @@
+name: Pixel 7
+
+# Только ручной запуск и только в этом репозитории. Никогда pull_request: раннер стоит на компьютере
+# пользователя, и код из форка получил бы доступ к компьютеру и телефону.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Сценарий
+        type: choice
+        required: true
+        default: transport
+        options:
+          - transport
+          - wifi-cycle
+      transport_target:
+        description: Частный IPv4 компьютера для сценария transport, например 192.168.0.157
+        required: false
+        type: string
+      serial:
+        description: Serial телефона из adb devices, если подключено несколько устройств
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pixel7
+  cancel-in-progress: false
+
+jobs:
+  pixel7:
+    if: github.repository == 'deadarhimag/adaptive-dpi-android' && github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+    runs-on: [self-hosted, pixel7]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Найти успешную сборку этого коммита
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $uri = "$($env:GITHUB_API_URL)/repos/$($env:GITHUB_REPOSITORY)/actions/workflows/android-build.yml/runs?branch=$($env:GITHUB_REF_NAME)&status=success&per_page=30"
+          $runs = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = 'application/vnd.github+json' }
+          # Нужна сборка ровно этого коммита из этого репозитория: скрипты и APK должны быть из одной версии.
+          $run = $runs.workflow_runs | Where-Object { $_.head_sha -eq $env:GITHUB_SHA -and $_.head_repository.full_name -eq $env:GITHUB_REPOSITORY } | Select-Object -First 1
+          if (-not $run) { throw "Для коммита $($env:GITHUB_SHA) нет успешной «Сборки Android» в ветке $($env:GITHUB_REF_NAME). Дождитесь её и повторите." }
+          "run_id=$($run.id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Скачать APK и скрипты сборки
+        uses: actions/download-artifact@v5
+        with:
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: adaptive-dpi-android-debug-*
+          merge-multiple: true
+          path: ${{ runner.temp }}\pixel7-artifact
+
+      - name: Снять состояние телефона и проверить условия
+        env:
+          INPUT_SERIAL: ${{ inputs.serial }}
+        run: |
+          $env:STATE_FILE = Join-Path $env:RUNNER_TEMP 'pixel7-state.json'
+          $env:LOG_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-logs'
+          $env:ARTIFACT_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-artifact'
+          New-Item -ItemType Directory -Path $env:LOG_DIRECTORY -Force | Out-Null
+          $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\scripts\pixel7-session.ps1', '-Action', 'Snapshot', '-StateFile', $env:STATE_FILE)
+          if ($env:INPUT_SERIAL) { $arguments += @('-Serial', $env:INPUT_SERIAL) }
+          powershell @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Сценарий transport
+        if: inputs.scenario == 'transport'
+        env:
+          INPUT_TARGET: ${{ inputs.transport_target }}
+          INPUT_SERIAL: ${{ inputs.serial }}
+        run: |
+          $env:STATE_FILE = Join-Path $env:RUNNER_TEMP 'pixel7-state.json'
+          $env:LOG_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-logs'
+          $env:ARTIFACT_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-artifact'
+          if (-not $env:INPUT_TARGET) { throw 'Для сценария transport укажите transport_target.' }
+          $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $env:ARTIFACT_DIRECTORY 'test-pixel7.ps1'),
+            '-TransportTarget', $env:INPUT_TARGET, '-ArtifactDirectory', $env:ARTIFACT_DIRECTORY, '-LogDirectory', (Join-Path $env:LOG_DIRECTORY 'transport'))
+          if ($env:INPUT_SERIAL) { $arguments += @('-Serial', $env:INPUT_SERIAL) }
+          powershell @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Сценарий wifi-cycle
+        if: inputs.scenario == 'wifi-cycle'
+        env:
+          INPUT_SERIAL: ${{ inputs.serial }}
+        run: |
+          $env:STATE_FILE = Join-Path $env:RUNNER_TEMP 'pixel7-state.json'
+          $env:LOG_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-logs'
+          $env:ARTIFACT_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-artifact'
+          $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\scripts\pixel7-session.ps1', '-Action', 'WifiCycle', '-StateFile', $env:STATE_FILE)
+          powershell @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Собрать журналы телефона
+        if: always()
+        run: |
+          $env:STATE_FILE = Join-Path $env:RUNNER_TEMP 'pixel7-state.json'
+          $env:LOG_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-logs'
+          $env:ARTIFACT_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-artifact'
+          if (Test-Path -LiteralPath $env:STATE_FILE) {
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\pixel7-session.ps1 -Action Collect -StateFile $env:STATE_FILE -LogDirectory (Join-Path $env:LOG_DIRECTORY 'device')
+          }
+
+      - name: Вернуть исходное состояние телефона
+        if: always()
+        run: |
+          $env:STATE_FILE = Join-Path $env:RUNNER_TEMP 'pixel7-state.json'
+          $env:LOG_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-logs'
+          $env:ARTIFACT_DIRECTORY = Join-Path $env:RUNNER_TEMP 'pixel7-artifact'
+          if (Test-Path -LiteralPath $env:STATE_FILE) {
+            powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\pixel7-session.ps1 -Action Restore -StateFile $env:STATE_FILE
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Сохранить журналы
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixel7-logs-${{ github.run_number }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}\pixel7-logs
+          if-no-files-found: warn
