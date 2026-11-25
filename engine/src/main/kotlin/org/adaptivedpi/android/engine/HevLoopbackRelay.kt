@@ -1,5 +1,13 @@
 package org.adaptivedpi.android.engine
 
+import org.adaptivedpi.android.engine.flow.FlowFailure
+import org.adaptivedpi.android.engine.flow.FlowKey
+import org.adaptivedpi.android.engine.flow.FlowKind
+import org.adaptivedpi.android.engine.flow.FlowObserver
+import org.adaptivedpi.android.engine.flow.FlowPipeline
+import org.adaptivedpi.android.engine.flow.FlowTracker
+import org.adaptivedpi.android.engine.flow.PrefixSource
+import org.adaptivedpi.android.engine.flow.UdpRecord
 import java.io.Closeable
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -25,6 +33,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 data class RelayShutdownStatus(
@@ -45,6 +54,9 @@ class HevLoopbackRelay internal constructor(
     private val failures: TransportFailureReporter,
     startAccepting: (ServerSocket, Thread) -> Unit,
     tcpIdleTimeoutMillis: Long = 60_000,
+    flows: FlowObserver = FlowObserver.None,
+    flowCaptureMillis: Long = FlowPipeline.CAPTURE_MILLIS,
+    flowClassify: ((ByteArray, Int) -> ClientHelloInspector.Result)? = null,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     constructor(
@@ -52,8 +64,12 @@ class HevLoopbackRelay internal constructor(
         destination: InetAddress?,
         maxSessions: Int = 16,
         failures: TransportFailureReporter = TransportFailureReporter(),
+        flows: FlowObserver = FlowObserver.None,
         onListenerFailure: () -> Unit,
-    ) : this(transport, destination, maxSessions, failures, { _, thread -> thread.start() }, onListenerFailure = onListenerFailure)
+    ) : this(
+        transport, destination, maxSessions, failures, { _, thread -> thread.start() }, flows = flows,
+        onListenerFailure = onListenerFailure,
+    )
 
     init { require(maxSessions > 0 && tcpIdleTimeoutMillis > 0) }
 
@@ -84,6 +100,12 @@ class HevLoopbackRelay internal constructor(
     private val responses = RelayPool(maxSessions, responseThreadName)
     private val secret = ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { "%02x".format(it.toInt() and 255) }
     private val closures = SocketClosures()
+    // Захват начала потока только считает: байты клиента уходят серверу без изменений. Ошибка конвейера не рвёт соединение.
+    private val pipeline = FlowPipeline(
+        flows, { error -> failures.recordError(FLOW, error, fallback = TransportCategory.INTERNAL) },
+        captureNanos = TimeUnit.MILLISECONDS.toNanos(flowCaptureMillis),
+        classify = flowClassify ?: { bytes, length -> ClientHelloInspector.inspect(bytes, length) },
+    )
     private val closeCompleted = CountDownLatch(1)
     @Volatile private var closing = false
     @Volatile private var drainWait: Pair<Thread, String>? = null
@@ -159,6 +181,7 @@ class HevLoopbackRelay internal constructor(
             // после которого HEV уже прекратил ждать ответ на CONNECT.
             if (!permits.tryAcquire(SLOT_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
                 failures.record(TransportFailure(ACCEPT, TransportCategory.LIMIT, TransportCode.SESSION_LIMIT))
+                pipeline.internalRefusal(TransportCode.SESSION_LIMIT)
                 return
             }
             peer.holdsPermit = true
@@ -206,22 +229,30 @@ class HevLoopbackRelay internal constructor(
 
     private fun tcp(peer: Peer, input: DataInputStream, output: DataOutputStream, endpoint: Endpoint) {
         observe(TCP_READ, peer) { checkDestination(endpoint) }
+        val key = FlowKey(endpoint.address, endpoint.port)
+        val connectStarted = System.nanoTime()
         val connection = try {
             transport.connectTcp(endpoint.address, endpoint.port)
         } catch (error: IOException) {
+            // Исход подключения учитывается отдельно: сам отказ уже записан транспортом.
+            pipeline.connectFailed(key, System.nanoTime() - connectStarted, flowFailure(failures.classify(CONNECT, error)))
             observe(CONTROL_WRITE, peer) { reply(output, 5) }
             throw error
         }
+        val connectNanos = System.nanoTime() - connectStarted
         connection.use {
             connection.useRelayIdleTimeout()
             val idle = TcpIdle {
                 try {
                     failures.record(TransportFailure(TCP_IDLE, TransportCategory.TIMEOUT, TransportCode.TIMEOUT))
+                    peer.flow?.failed(FlowFailure(TransportCategory.TIMEOUT, TransportCode.TIMEOUT, null))
                 } finally {
                     connection.close()
                     closePeer(peer)
                 }
             }
+            val flow = pipeline.begin(key, connectNanos)
+            peer.flow = flow
             var response: Future<*>? = null
             try {
                 observe(CONTROL_WRITE, peer) { reply(output, 0) }
@@ -232,6 +263,7 @@ class HevLoopbackRelay internal constructor(
                         while (true) {
                             val size = connection.read(buffer)
                             if (size < 0) break
+                            flow.receivedFromServer(size)
                             observe(TCP_WRITE, peer) { output.write(buffer, 0, size) }
                             idle.forwarded()
                         }
@@ -242,14 +274,38 @@ class HevLoopbackRelay internal constructor(
                     }
                 }
                 val buffer = ByteArray(TCP_BUFFER)
+                var first = true
                 while (true) {
-                    val size = observe(TCP_READ, peer) { input.read(buffer) }
+                    val size = readClient(peer, input, buffer, flow)
                     if (size < 0) {
                         peer.eof = true
                         break
                     }
-                    connection.write(buffer, 0, size)
-                    idle.forwarded()
+                    if (first) {
+                        first = false
+                        val captured = observe(TCP_READ, peer) {
+                            val source = PrefixSource { target, offset, length, timeoutMillis ->
+                                peer.socket.soTimeout = timeoutMillis
+                                input.read(target, offset, length)
+                            }
+                            pipeline.capture(flow, buffer, size, source).also {
+                                if (flow.kind == FlowKind.TLS) peer.socket.soTimeout = 0
+                            }
+                        }
+                        connection.write(captured.bytes, 0, captured.size)
+                        flow.sentToServer(captured.size)
+                        flow.firstPortionSent()
+                        idle.forwarded()
+                        if (captured.eof) {
+                            peer.eof = true
+                            flow.clientClosed()
+                            break
+                        }
+                    } else {
+                        connection.write(buffer, 0, size)
+                        flow.sentToServer(size)
+                        idle.forwarded()
+                    }
                 }
                 connection.shutdownOutput()
                 response.get()
@@ -258,9 +314,24 @@ class HevLoopbackRelay internal constructor(
                 if (response != null) {
                     finishDirections(peer, connection, response)
                 }
+                flow.finish()
             }
         }
     }
+
+    /** Чтение от клиента. Закрытие клиентом отмечается в исходе, закрытие самим релеем - нет. */
+    private fun readClient(peer: Peer, input: DataInputStream, buffer: ByteArray, flow: FlowTracker): Int {
+        val size = try {
+            observe(TCP_READ, peer) { input.read(buffer) }
+        } catch (error: Exception) {
+            if (peer.cancellation.get() == null) flow.clientClosed()
+            throw error
+        }
+        if (size < 0) flow.clientClosed()
+        return size
+    }
+
+    private fun flowFailure(failure: TransportFailure) = FlowFailure(failure.category, failure.code, failure.errno)
 
     private inner class TcpIdle(private val onTimeout: () -> Unit) : Closeable {
         private var lastForwarded = 0L
@@ -309,6 +380,8 @@ class HevLoopbackRelay internal constructor(
             readDatagram(peer, input, payload)
         } ?: return
         transport.connectUdp(first.endpoint.address, first.endpoint.port).use { connection ->
+            val received = AtomicLong()
+            var sent = 0L
             val response = submit(UDP_SCHEDULE) {
                 try {
                     val buffer = ByteArray(MAX_DATAGRAM + 1)
@@ -320,6 +393,7 @@ class HevLoopbackRelay internal constructor(
                             if (error.code == TransportCode.DATAGRAM_LIMIT) continue
                             throw error
                         }
+                        received.incrementAndGet()
                         observe(UDP_WRITE, peer) {
                             output.writeShort(size)
                             output.writeByte(10)
@@ -336,14 +410,17 @@ class HevLoopbackRelay internal constructor(
             }
             try {
                 connection.send(payload, length = first.length)
+                sent++
                 while (peer.cancellation.get() == null) {
                     val next = observe(UDP_READ, peer) {
                         readDatagram(peer, input, payload, first.endpoint)
                     } ?: break
                     connection.send(payload, length = next.length)
+                    sent++
                 }
             } finally {
                 finishDirections(peer, connection, response)
+                pipeline.udpEnded(UdpRecord(first.endpoint.port, sent, received.get()))
             }
         }
     }
@@ -416,7 +493,10 @@ class HevLoopbackRelay internal constructor(
     ): T = try {
         operation()
     } catch (error: Exception) {
-        failures.recordError(site, error, peer.cancellation.get(), fallback, peer.eof)
+        val failure = failures.classify(site, error, peer.cancellation.get(), fallback, peer.eof)
+        failures.record(failure)
+        // Завершение записи после EOF партнёра - обычный конец соединения, а не отказ.
+        if (failure.code != TransportCode.PEER_EOF) peer.flow?.failed(flowFailure(failure))
         throw error
     }
 
@@ -432,6 +512,7 @@ class HevLoopbackRelay internal constructor(
             failures.record(TransportFailure(site, TransportCategory.CANCELLED, TransportCode.SESSION_CANCELLED))
         } else {
             failures.record(TransportFailure(site, TransportCategory.INTERNAL, TransportCode.WORKER_REJECTED))
+            pipeline.internalRefusal(TransportCode.WORKER_REJECTED)
         }
     }
 
@@ -582,6 +663,7 @@ class HevLoopbackRelay internal constructor(
         val cancellation = AtomicReference<TransportCancellation?>()
         @Volatile var eof = false
         @Volatile var holdsPermit = false
+        @Volatile var flow: FlowTracker? = null
     }
 
     private class RelayPool(size: Int, name: String) : ThreadPoolExecutor(
@@ -622,6 +704,8 @@ class HevLoopbackRelay internal constructor(
         val ACCEPT = TransportSite(TransportSubsystem.HEV, TransportOperation.ACCEPT)
         val AUTH = TransportSite(TransportSubsystem.HEV, TransportOperation.AUTHENTICATE)
         val CLOSE = TransportSite(TransportSubsystem.HEV, TransportOperation.CLOSE)
+        val FLOW = TransportSite(TransportSubsystem.HEV, TransportOperation.RUN, TransportProtocol.TCP)
+        val CONNECT = TransportSite(TransportSubsystem.TCP, TransportOperation.CONNECT, TransportProtocol.TCP, TransportDirection.OUTBOUND)
         val CONTROL_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ)
         val CONTROL_WRITE = TransportSite(TransportSubsystem.HEV, TransportOperation.WRITE)
         val TCP_READ = TransportSite(TransportSubsystem.HEV, TransportOperation.READ, TransportProtocol.TCP, TransportDirection.OUTBOUND)

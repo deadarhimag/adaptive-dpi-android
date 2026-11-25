@@ -94,8 +94,10 @@ internal object ClientHelloInspector {
         }
     }
 
-    fun inspect(prefix: ByteArray): Result = try {
-        inspectRecords(prefix)
+    /** Разбор первых [length] байт массива: накопленный префикс не копируется при каждом вызове. */
+    fun inspect(prefix: ByteArray, length: Int = prefix.size): Result = try {
+        require(length in 0..prefix.size)
+        inspectRecords(prefix, length)
     } catch (_: RuntimeException) {
         Result.Unknown
     }
@@ -122,23 +124,23 @@ internal object ClientHelloInspector {
         Result.Unknown
     }
 
-    private fun inspectRecords(prefix: ByteArray): Result {
-        if (prefix.isEmpty()) return Result.NeedMore
-        if (prefix.size > MAX_PREFIX || prefix[0].toInt() != 22) return Result.Unknown
+    private fun inspectRecords(prefix: ByteArray, length: Int): Result {
+        if (length == 0) return Result.NeedMore
+        if (length > MAX_PREFIX || prefix[0].toInt() != 22) return Result.Unknown
 
-        val incomplete = if (prefix.size == MAX_PREFIX) Result.Unknown else Result.NeedMore
-        val handshake = ByteArray(prefix.size)
+        val incomplete = if (length == MAX_PREFIX) Result.Unknown else Result.NeedMore
+        val handshake = ByteArray(length)
         val pieces = StreamMap.Builder()
         var records = 0
         var size = 0
         var offset = 0
-        while (offset < prefix.size) {
-            if (prefix.size - offset < 5) return incomplete
+        while (offset < length) {
+            if (length - offset < 5) return incomplete
             if (prefix[offset].toInt() != 22 || prefix[offset + 1].toInt() != 3) return Result.Unknown
-            val length = u16(prefix, offset + 3)
-            if (length !in 1..16_384) return Result.Unknown
+            val recordLength = u16(prefix, offset + 3)
+            if (recordLength !in 1..16_384) return Result.Unknown
             offset += 5
-            val available = minOf(length, prefix.size - offset)
+            val available = minOf(recordLength, length - offset)
             prefix.copyInto(handshake, size, offset, offset + available)
             pieces.piece(size, offset, available)
             records++
@@ -149,14 +151,14 @@ internal object ClientHelloInspector {
                 if (bodyLength !in 41..MAX_PREFIX - 4) return Result.Unknown
                 // Разбор только после полной TLS-записи: следующей стадии нужны границы записи, а не только сообщения.
                 if (size >= bodyLength + 4) {
-                    return if (available < length) incomplete else {
+                    return if (available < recordLength) incomplete else {
                         val message = handshake.copyOf(bodyLength + 4)
                         inspectHandshake(message, pieces.build(), records, unsigned(prefix[2]))
                     }
                 }
             }
-            if (available < length) return incomplete
-            offset += length
+            if (available < recordLength) return incomplete
+            offset += recordLength
         }
         return incomplete
     }

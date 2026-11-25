@@ -62,6 +62,7 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
     private val dropped = AtomicLongArray(TransportDropSource.entries.size)
     private val last = AtomicLong(Long.MIN_VALUE)
     private val finished = AtomicBoolean()
+    private val flowText = AtomicReference<String?>()
     private val vpnState = AtomicReference(VpnState.Starting)
     val total get() = operations.get()
     val problems get() = problemOperations.get()
@@ -94,6 +95,11 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
         last.accumulateAndGet(end, ::maxOf)
     }
 
+    /** Агрегаты телеметрии сеанса: попадают в итоговую сводку, которую записывает [finish]. Табуляция разделяет поля файла. */
+    fun recordFlowSummary(text: String) {
+        flowText.set(text.replace('\t', ' ').takeUtf8(MAX_FLOW_BYTES))
+    }
+
     fun merge(count: Long) { if (count > 0) merged.addAndGet(count) }
     fun drop(source: TransportDropSource, count: Long) { dropped.addAndGet(source.ordinal, count) }
 
@@ -117,8 +123,32 @@ internal class TransportSessionDiagnostics(val id: UUID, private val journal: Tr
                 }
             },
             merged.get(), dropsBySource.values.sum(), last.get().takeUnless { it == Long.MIN_VALUE }?.let(Instant::ofEpochMilli),
-            finished.get(), dropsBySource,
+            finished.get(), dropsBySource, flowText.get(),
         )
+    }
+
+    // Целые символы: обрезка не разрывает многобайтную последовательность UTF-8.
+    private fun String.takeUtf8(limit: Int): String {
+        var bytes = 0
+        var end = 0
+        while (end < length) {
+            val codePoint = codePointAt(end)
+            val size = when {
+                codePoint < 0x80 -> 1
+                codePoint < 0x800 -> 2
+                codePoint < 0x10000 -> 3
+                else -> 4
+            }
+            if (bytes + size > limit) break
+            bytes += size
+            end += Character.charCount(codePoint)
+        }
+        return substring(0, end)
+    }
+
+    private companion object {
+        // Файл сводки не больше MAX_LINE_BYTES (4096): остальные поля с категориями и источниками занимают меньше 1 КБ.
+        const val MAX_FLOW_BYTES = 3_000
     }
 }
 

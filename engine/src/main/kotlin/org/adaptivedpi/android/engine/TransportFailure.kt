@@ -122,6 +122,17 @@ class TransportFailureReporter(
         fallback: TransportCategory = TransportCategory.UNKNOWN,
         peerEof: Boolean = false,
     ) {
+        record(classify(site, error, cancellation, fallback, peerEof))
+    }
+
+    /** Та же классификация, что у [recordError], но без записи: для исхода соединения, который уже учтён отдельно. */
+    fun classify(
+        site: TransportSite,
+        error: Throwable,
+        cancellation: TransportCancellation? = null,
+        fallback: TransportCategory = TransportCategory.UNKNOWN,
+        peerEof: Boolean = false,
+    ): TransportFailure {
         val errno = errnoOf(error)
         val actualSite = when (error) {
             is UnknownHostException -> site.copy(subsystem = TransportSubsystem.DNS, operation = TransportOperation.RESOLVE)
@@ -153,7 +164,7 @@ class TransportFailureReporter(
             error is ProtocolException -> TransportCategory.RELAY_PROTOCOL to TransportCode.RELAY_PROTOCOL
             else -> fallback to codeFromType
         }
-        record(TransportFailure(actualSite, category, code, errno))
+        return TransportFailure(actualSite, category, code, errno)
     }
 
     private fun isClosedOperation(error: Throwable, errno: Int?, nativeError: ErrnoCategory?): Boolean {

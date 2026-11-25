@@ -66,6 +66,30 @@ class TransportJournalTest {
     }
 
     @Test
+    fun flowSummaryIsSavedWithTheSessionSummaryAndOversizedTextIsCutAtACharacterBoundary() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val directory = temporary.newFolder()
+        try {
+            val journal = TransportJournal(scope, batchMillis = 60_000) { TransportLogStore(directory) }
+            val session = TransportSessionDiagnostics(UUID.randomUUID(), journal).also(journal::useSession)
+            session.record(VpnState.EngineRunning, timeout, 1)
+            // Двухбайтные символы и табуляция: обрезка идёт по байтам и не рвёт символ, табуляция не ломает формат файла.
+            session.recordFlowSummary("Телеметрия\tсеанса\n" + "я".repeat(5_000))
+            session.finish()
+            journal.flush()
+            val stored = checkNotNull(TransportLogStore(directory).readSummary())
+            val text = checkNotNull(stored.flowText)
+            assertTrue(text.startsWith("Телеметрия сеанса\n"))
+            assertTrue(text.toByteArray(Charsets.UTF_8).size <= 3_000)
+            assertTrue(text.all { it != '\uFFFD' })
+            assertTrue(stored.text().contains("Телеметрия сеанса"))
+            assertEquals(1L, stored.total)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun fullPendingWindowDropsDistinctRecordsButStillMergesAndCountsEveryOperation() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val directory = temporary.newFolder()

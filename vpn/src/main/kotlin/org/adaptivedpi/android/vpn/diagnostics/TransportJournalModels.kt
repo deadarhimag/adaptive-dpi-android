@@ -37,6 +37,8 @@ data class TransportSessionSummary internal constructor(
     val lastFailure: Instant?,
     val finished: Boolean,
     internal val dropsBySource: Map<TransportDropSource, Long> = emptyMap(),
+    /** Агрегаты пассивной телеметрии сеанса (только числа), если сеанс их сохранил. */
+    internal val flowText: String? = null,
 ) {
     val total get() = byCategory.values.sum()
     val expected get() = count(TransportDisposition.EXPECTED)
@@ -56,6 +58,10 @@ data class TransportSessionSummary internal constructor(
         }
         appendLine("Последний отказ ${lastFailure ?: "—"}")
         for ((category, count) in byCategory) appendLine("${category.title} (${category.name}) $count")
+        flowText?.let {
+            appendLine()
+            appendLine(it)
+        }
     }.trimEnd()
 }
 
