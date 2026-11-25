@@ -299,6 +299,55 @@ class FlowTelemetryTest {
         assertNotNull(outcomes.queue.poll(5, TimeUnit.SECONDS))
     }
 
+    @Test(timeout = 20_000)
+    fun serverResetIsAKeyFailureWithoutResponse() {
+        val outcomes = Outcomes()
+        val hello = realHello("reset.example")
+        ServerSocket(0, 1, ip).use { listener ->
+            listener.soTimeout = 5_000
+            relay(outcomes, captureMillis = 500) { relay ->
+                connect(relay, listener.localPort).use { client ->
+                    client.getOutputStream().write(hello)
+                    listener.accept().use { peer ->
+                        peer.soTimeout = 5_000
+                        DataInputStream(peer.getInputStream()).readFully(ByteArray(hello.size))
+                        peer.setSoLinger(true, 0)
+                    }
+                    // Клиент видит закрытие от релея, а не данные.
+                    client.soTimeout = 5_000
+                    runCatching { client.getInputStream().read() }
+                }
+            }
+        }
+        val outcome = checkNotNull(outcomes.queue.poll(5, TimeUnit.SECONDS))
+        assertEquals(FlowStage.NO_RESPONSE, outcome.stage)
+        val failure = checkNotNull(outcome.failure) { "сброс сервером не попал в исход" }
+        assertFalse("сброс сервером - не внутренний отказ: $failure", failure.internal)
+    }
+
+    @Test(timeout = 20_000)
+    fun clientResetIsNotCountedAsAKeyFailure() {
+        val outcomes = Outcomes()
+        ServerSocket(0, 1, ip).use { listener ->
+            listener.soTimeout = 5_000
+            relay(outcomes, captureMillis = 100) { relay ->
+                val client = connect(relay, listener.localPort)
+                client.getOutputStream().write("GET / HTTP/1.1\r\n\r\n".toByteArray())
+                listener.accept().use { peer ->
+                    peer.soTimeout = 5_000
+                    assertEquals('G'.code, peer.getInputStream().read())
+                    client.setSoLinger(true, 0)
+                    client.close()
+                    // Сервер видит конец потока после того, как релей освободит соединение.
+                    runCatching { peer.getInputStream().readAllBytes() }
+                }
+            }
+        }
+        val outcome = checkNotNull(outcomes.queue.poll(5, TimeUnit.SECONDS))
+        val failure = outcome.failure
+        assertTrue("обрыв клиентом не отказ ключа: $failure", failure == null || failure.internal)
+    }
+
     private fun randomPayload(random: Random): ByteArray {
         val payload = ByteArray(1 + random.nextInt(40_000)).also(random::nextBytes)
         when (random.nextInt(3)) {

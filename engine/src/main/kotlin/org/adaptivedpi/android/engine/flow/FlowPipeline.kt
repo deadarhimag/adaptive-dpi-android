@@ -1,6 +1,7 @@
 package org.adaptivedpi.android.engine.flow
 
 import org.adaptivedpi.android.engine.ClientHelloInspector
+import org.adaptivedpi.android.engine.TransportCategory
 import org.adaptivedpi.android.engine.TransportCode
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
@@ -188,6 +189,11 @@ internal class FlowTracker(
 
     fun failed(value: FlowFailure) {
         failure.compareAndSet(null, value to owner.clock())
+    }
+
+    /** Простой соединения закрыт релеем. Отказ ключа - только если сервер так и не ответил («тишина»). */
+    fun idleTimeout() {
+        if (fromServer.get() == 0L) failed(FlowFailure(TransportCategory.TIMEOUT, TransportCode.TIMEOUT, null))
     }
 
     fun finish() {
