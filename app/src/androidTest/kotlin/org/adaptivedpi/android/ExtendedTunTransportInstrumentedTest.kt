@@ -1,6 +1,7 @@
 package org.adaptivedpi.android
 
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
@@ -44,6 +45,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ExtendedTunTransportInstrumentedTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -165,6 +167,47 @@ class ExtendedTunTransportInstrumentedTest {
             }
         }
         assertEquals(1, VpnEventHistory.state.value.entries.count { it.sessionId == session && it.type == VpnEventType.TransportPollDelayed })
+        assertTrue(session != start(activity))
+        stop()
+    }
+
+    @Test(timeout = 60_000)
+    fun blockedSocketCleanupDoesNotHoldVpnRouteOrAdmitAnotherSession() = withActivity { activity ->
+        val session = start(activity)
+        val release = CountDownLatch(1)
+        val pendingClose = CountDownLatch(1)
+        val relayClose = CountDownLatch(1)
+        val gateExpired = AtomicBoolean()
+        fun hold(entered: CountDownLatch) {
+            entered.countDown()
+            if (!release.await(25, TimeUnit.SECONDS)) gateExpired.set(true)
+        }
+        TransportTestHooks.beforePendingTcpClose = { hold(pendingClose) }
+        TransportTestHooks.beforeWorkerRelayClose = { hold(relayClose) }
+        try {
+            requestStop()
+            assertTrue("Команда Stop не дошла до очистки сокетов", pendingClose.await(4, TimeUnit.SECONDS))
+            assertTrue("HEV должен выйти до освобождения внешних сокетов", relayClose.await(4, TimeUnit.SECONDS))
+            runBlocking {
+                withTimeout(6_000) {
+                    while (connectivity.allNetworks.any {
+                            connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                        }) delay(50)
+                }
+                withTimeout(7_000) { VpnController.cleanupDelay.first { it != null } }
+            }
+            assertEquals(VpnState.Stopping, VpnController.state.value)
+            assertFalse(VpnController.state.value.canStart)
+            acceptedByFixture()
+            activity.onActivity { assertNull(VpnController.requestStart(it, target)) }
+            assertEquals(session, VpnController.currentSessionId)
+            assertFalse("Очистка должна оставаться заблокированной", gateExpired.get())
+        } finally {
+            TransportTestHooks.beforePendingTcpClose = null
+            TransportTestHooks.beforeWorkerRelayClose = null
+            release.countDown()
+            stop()
+        }
         assertTrue(session != start(activity))
         stop()
     }

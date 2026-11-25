@@ -26,6 +26,11 @@ object TransportTestHooks {
     init { System.loadLibrary("adaptive-hev") }
 
     @Volatile var afterTcpPrepare: ((Socket) -> Unit)? = null
+    @Volatile var beforePendingTcpClose: (() -> Unit)? = null
+    @Volatile var beforeWorkerRelayClose: (() -> Unit)? = null
+
+    internal fun pendingTcpClosing() { beforePendingTcpClose?.invoke() }
+    internal fun workerRelayClosing() { beforeWorkerRelayClose?.invoke() }
 
     @Volatile private var fixtureRoute: Pair<VpnService, Network>? = null
 

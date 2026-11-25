@@ -157,10 +157,13 @@ internal class ExperimentalTransport(
         stopAcceptingNewConnections()
         if (stopping.compareAndSet(false, true)) {
             diagnostics.stateChanged(VpnState.Stopping)
-            step(CleanupStep.PendingTcpClose)
-            cleanupStep(CleanupStep.PendingTcpClose, RELAY_STOP, outbound::closePendingTcpConnections)
             step(CleanupStep.NativeStop)
             cleanupStep(CleanupStep.NativeStop, RELAY_STOP) { HevBridge.stop(token, VpnState.Stopping.ordinal) }
+            step(CleanupStep.PendingTcpClose)
+            cleanupStep(CleanupStep.PendingTcpClose, RELAY_STOP) {
+                TransportTestHooks.pendingTcpClosing()
+                outbound.closePendingTcpConnections()
+            }
             step(CleanupStep.RelayClose)
             cleanupStep(CleanupStep.RelayClose, RELAY_STOP, relay::close)
         }
@@ -232,6 +235,15 @@ internal class ExperimentalTransport(
 
     private fun finish() {
         try {
+            // HEV уже вернул управление и завершил работу с FD. Релей может блокироваться независимо.
+            finalizationStep = CleanupStep.TunClose to SystemClock.elapsedRealtime()
+            val descriptor = tunnel.fileDescriptor
+            cleanupStep(CleanupStep.TunClose, TUN_CLOSE) {
+                if (descriptor.valid()) tunnel.close()
+            }
+            tunClosed = !descriptor.valid()
+            if (!tunClosed) drainingTun.set(descriptor)
+
             finalizationStep = CleanupStep.TransportSnapshot to SystemClock.elapsedRealtime()
             diagnostics.stateChanged(VpnState.Stopping)
             runCatching {
@@ -242,14 +254,10 @@ internal class ExperimentalTransport(
                 failures.recordError(NATIVE_RUN, it, fallback = TransportCategory.INTERNAL)
             }
             finalizationStep = CleanupStep.RelayClose to SystemClock.elapsedRealtime()
-            cleanupStep(CleanupStep.RelayClose, RELAY_STOP, relay::close)
-            finalizationStep = CleanupStep.TunClose to SystemClock.elapsedRealtime()
-            val descriptor = tunnel.fileDescriptor
-            cleanupStep(CleanupStep.TunClose, TUN_CLOSE) {
-                if (descriptor.valid()) tunnel.close()
+            cleanupStep(CleanupStep.RelayClose, RELAY_STOP) {
+                TransportTestHooks.workerRelayClosing()
+                relay.close()
             }
-            tunClosed = !descriptor.valid()
-            if (!tunClosed) drainingTun.set(descriptor)
         } finally {
             if (!relay.isTerminated) drainingRelay.set(relay)
             try {

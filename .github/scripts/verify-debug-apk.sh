@@ -139,7 +139,7 @@ from pathlib import Path
 import sys
 
 summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if summary["executed"] != 7 or summary["failed"] or summary["errors"] or summary["skipped"]:
+if summary["executed"] != 8 or summary["failed"] or summary["errors"] or summary["skipped"]:
     sys.exit("Нет полного успешного расширенного прогона")
 print(summary["executed"])
 PY

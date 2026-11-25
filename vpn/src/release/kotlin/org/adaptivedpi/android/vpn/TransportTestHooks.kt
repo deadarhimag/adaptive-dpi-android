@@ -6,6 +6,9 @@ import java.net.Socket
 
 @Suppress("NOTHING_TO_INLINE", "UNUSED_PARAMETER")
 internal object TransportTestHooks {
+    inline fun pendingTcpClosing() = Unit
+    inline fun workerRelayClosing() = Unit
+
     inline fun fixtureRouteStarted(service: VpnService, network: Network) = Unit
     inline fun fixtureRouteEnded(service: VpnService) = Unit
 
