@@ -101,6 +101,7 @@ jobs:
           path: |
             ${{ runner.temp }}/tun-ci/results.json
             ${{ runner.temp }}/tun-ci/consent.log
+            ${{ runner.temp }}/tun-ci/process-recovery/
             app/build/outputs/androidTest-results/connected/**/TEST-*.xml
           if-no-files-found: error
 

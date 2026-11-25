@@ -283,3 +283,5 @@ python3 .github/scripts/verify-android-test-results.py app/build/outputs/android
   "$log_dir/consent.log" "$log_dir/results.json"
 timeout 10s "$adb" -s "$serial" logcat -d -t 5000 -v brief TunTransportTest:I AppTransportTest:I AdaptiveTun:I KernelCaps:I '*:S' || true
 check_app_anr
+bash .github/scripts/test-vpn-process-recovery.sh "$serial" "$log_dir/process-recovery"
+check_app_anr
