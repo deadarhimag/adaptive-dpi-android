@@ -91,7 +91,7 @@ fun combinedDiagnosticReport(
 
     appendLine()
     appendLine("Журнал ошибок")
-    if (unreadableErrors > 0) appendLine("Нечитаемые записи журнала ошибок: $unreadableErrors. Журнал неполон.")
+    if (unreadableErrors > 0) appendLine("Нечитаемые записи журнала ошибок и слотов восстановления: $unreadableErrors. Журнал неполон.")
     if (errors.isEmpty()) appendLine("Записей нет.")
     for (event in errors) {
         appendLine()

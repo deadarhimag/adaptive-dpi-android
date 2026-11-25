@@ -11,7 +11,7 @@ internal data class ProcessExitRecord(val pid: Int, val timestampMillis: Long, v
 
 /** Чтение причин прошлых завершений процесса (`ApplicationExitInfo`, API 30+). */
 internal object ExitReasonReader {
-    private const val MAX_RECORDS = 16
+    const val MAX_RECORDS = 16
 
     fun read(context: Context): List<ProcessExitRecord> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()

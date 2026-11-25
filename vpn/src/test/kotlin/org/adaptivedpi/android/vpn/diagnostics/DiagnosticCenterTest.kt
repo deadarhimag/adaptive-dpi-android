@@ -406,7 +406,7 @@ class DiagnosticCenterTest {
     }
 
     @Test
-    fun onlyReasonsTheCrashHandlerMissesAreRecordedAndOldRecordsAreSkipped() {
+    fun processExitsFilterByReasonButAcceptOldReportedTimestamps() {
         val now = 10L * 24 * 60 * 60 * 1_000
         val week = 7L * 24 * 60 * 60 * 1_000
         val journal = DiagnosticJournal(temporary.root, clock = { now })
@@ -428,8 +428,73 @@ class DiagnosticCenterTest {
         center.recordProcessExits(records)
 
         assertEquals(wanted.values.toSet(), center.events.value.map { it.code }.toSet())
-        assertEquals(wanted.size, center.events.value.size)
+        assertEquals(wanted.size + 1, center.events.value.size)
+        assertTrue(center.events.value.any { it.timeMillis == now - week - 1 })
         assertTrue(center.events.value.none { it.requiresNotification || it.vpnStopped })
+    }
+
+    @Test
+    fun aClockJumpCannotDiscardAProcessExitOrReimportItAfterExpiry() {
+        var now = 10_000L
+        var elapsed = 0L
+        fun journal() = DiagnosticJournal(temporary.root, maxAgeMillis = 500, clock = { now },
+            monotonicMillis = { elapsed }, bootCount = 1)
+        val record = ProcessExitRecord(7, now, ApplicationExitInfo.REASON_LOW_MEMORY, "private.app")
+        now += 10_000
+        center(journal()).recordProcessExits(listOf(record))
+        assertEquals(listOf(ExitReasonReader.idOf(record)), journal().read().map { it.id })
+        now -= 12_000
+        center(journal()).recordProcessExits(listOf(record))
+        assertEquals(1, journal().read().size)
+        elapsed += 501
+        assertTrue(journal().read().isEmpty())
+        center(journal()).recordProcessExits(listOf(record))
+        assertTrue(journal().read().isEmpty())
+        assertFalse(File(temporary.root, "journal").readText().contains("private.app"))
+    }
+
+    @Test
+    fun journalReadsBothEventVersionsAlongsideExitIdsAndHonorsItsQuota() {
+        val journal = DiagnosticJournal(temporary.root)
+        val legacy = DiagnosticEvent.create(DiagnosticCode.SaveFailed, null, 29, idle)
+        val stamped = journal.stamp(DiagnosticEvent.create(DiagnosticCode.ShareFailed, null, 36, idle))
+        val exitId = UUID.randomUUID()
+        journal.write(listOf(legacy, stamped), listOf(exitId))
+        val restored = DiagnosticJournal(temporary.root)
+        assertEquals(listOf(legacy, stamped), restored.read())
+        assertEquals(listOf(exitId), restored.processExitIds)
+
+        val existing = center(restored)
+        repeat(40) { existing.record(DiagnosticCode.SaveFailed, idle) }
+        assertEquals(32, restored.read().size)
+        assertTrue(File(temporary.root, "journal").length() <= 32 * 1024)
+        assertEquals(listOf(exitId), restored.processExitIds)
+    }
+
+    @Test
+    fun corruptedSlotsStayCountedAcrossRecoveryAndReplacement() {
+        val first = center(DiagnosticJournal(temporary.root))
+        first.markActive(running)
+        File(temporary.root, "active-vpn").appendText("private-invalid-marker\n")
+        File(temporary.root, "last-crash").writeText("private-invalid-crash\n")
+        val recovered = center(DiagnosticJournal(temporary.root))
+        assertEquals(listOf(DiagnosticCode.VpnInterrupted), recovered.events.value.map { it.code })
+        assertEquals(2L, recovered.unreadableRecords)
+
+        recovered.markActive(running)
+        recovered.captureCrash(running, IllegalStateException(), DiagnosticJournal(temporary.root).readActive()?.id)
+        val reloaded = center(DiagnosticJournal(temporary.root))
+        assertEquals(2L, reloaded.unreadableRecords)
+        val notified = mutableListOf<DiagnosticCode>()
+        val afterRecovery = center(DiagnosticJournal(temporary.root)) { notified += it.code; true }
+        val crash = afterRecovery.events.value.first { it.code == DiagnosticCode.AppCrash }
+        afterRecovery.notifyOnce(crash.id)
+        afterRecovery.notifyOnce(crash.id)
+        assertEquals(listOf(DiagnosticCode.AppCrash), notified)
+        assertEquals(2L, afterRecovery.unreadableRecords)
+        for (name in listOf("active-vpn", "last-crash", "journal")) {
+            assertFalse(File(temporary.root, name).takeIf(File::isFile)?.readText().orEmpty().contains("private-invalid"))
+        }
     }
 
     @Test

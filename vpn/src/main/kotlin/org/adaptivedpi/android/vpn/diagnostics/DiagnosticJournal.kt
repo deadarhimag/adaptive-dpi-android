@@ -20,11 +20,14 @@ internal class DiagnosticJournal(
     bootCount: Int? = null,
 ) {
     private val journal = File(directory, "journal")
-    private val crash = File(directory, "last-crash")
-    private val active = File(directory, "active-vpn")
+    private val crash = RecoverySlot("last-crash")
+    private val active = RecoverySlot("active-vpn")
     private val bootMark = bootCount?.toString() ?: processBootMark
-    @Volatile var unreadableRecords: Long = 0
+    @Volatile private var historyLosses = 0L
+    var processExitIds: List<UUID> = emptyList()
         private set
+    val unreadableRecords: Long get() = listOf(historyLosses, crash.losses, active.losses)
+        .fold(0L) { total, loss -> total + loss.coerceAtMost(Long.MAX_VALUE - total) }
 
     init {
         require(maxEntries > 0 && maxBytes > 0 && maxAgeMillis > 0)
@@ -35,23 +38,32 @@ internal class DiagnosticJournal(
     fun stamp(event: DiagnosticEvent) = event.copy(age = DiagnosticAge(bootMark, monotonicMillis()))
 
     fun read(): List<DiagnosticEvent> {
-        val entries = readEvents(journal)
-        val retained = bounded(entries)
-        if (retained != entries) runCatching { write(retained) }
+        var ids = emptyList<UUID>()
+        val history = readEvents(journal) { index, line ->
+            if (index > 1 || !line.startsWith(EXIT_IDS_PREFIX)) false else {
+                val parsed = runCatching {
+                    line.removePrefix(EXIT_IDS_PREFIX).split(',').map(UUID::fromString)
+                }.getOrNull()
+                if (ids.isNotEmpty() || parsed == null || parsed.size > ExitReasonReader.MAX_RECORDS) false else {
+                    ids = parsed
+                    true
+                }
+            }
+        }
+        processExitIds = ids
+        historyLosses = history.losses
+        val retained = bounded(history.entries)
+        if (retained != history.entries || history.damaged) runCatching { write(retained) }
         return retained
     }
 
-    fun readCrash(): DiagnosticEvent? {
-        val entry = readEvents(crash).firstOrNull() ?: return null
-        if (isFresh(entry, monotonicMillis())) return entry
-        runCatching(::clearCrash)
-        return null
-    }
-    fun readActive(): DiagnosticEvent? = readEvents(active).firstOrNull()
+    fun readCrash(): DiagnosticEvent? = crash.read { isFresh(it, monotonicMillis()) }
 
-    fun bounded(events: List<DiagnosticEvent>): List<DiagnosticEvent> {
+    fun readActive(): DiagnosticEvent? = active.read()
+
+    fun bounded(events: List<DiagnosticEvent>, exitIds: List<UUID> = processExitIds): List<DiagnosticEvent> {
         val now = monotonicMillis()
-        var size = diagnosticLossHeader(unreadableRecords).length
+        var size = diagnosticLossHeader(historyLosses).length + exitIdsHeader(exitIds).length
         return events.filter { isFresh(it, now) }.distinctBy(DiagnosticEvent::id).take(maxEntries).takeWhile {
             size += it.encode().toByteArray(Charsets.UTF_8).size + 1
             size <= maxBytes
@@ -66,41 +78,67 @@ internal class DiagnosticJournal(
         return elapsed < maxAgeMillis
     }
 
-    /** Событие с таким временем журнал ещё хранит. Старше срока хранения событие не записывается вовсе. */
-    fun retains(timeMillis: Long) = isRetained(timeMillis, now())
+    fun write(events: List<DiagnosticEvent>, exitIds: List<UUID> = processExitIds) {
+        val header = diagnosticLossHeader(historyLosses) + exitIdsHeader(exitIds)
+        writeFile(journal, header, bounded(events, exitIds))
+        processExitIds = exitIds
+    }
 
-    private fun isRetained(timeMillis: Long, now: Long) =
-        timeMillis >= 0 && (timeMillis > now || now - timeMillis < maxAgeMillis)
+    fun writeCrash(event: DiagnosticEvent) = crash.replace(event)
+    fun markActive(event: DiagnosticEvent) = active.replace(event)
+    fun clearCrash() = crash.replace(null)
+    fun clearActive() = active.replace(null)
 
-    fun write(events: List<DiagnosticEvent>) = writeFile(journal, bounded(events))
-    fun writeCrash(event: DiagnosticEvent) = writeFile(crash, listOf(event))
-    fun markActive(event: DiagnosticEvent) = writeFile(active, listOf(event))
-    fun clearCrash() = Files.deleteIfExists(crash.toPath())
-    fun clearActive() = Files.deleteIfExists(active.toPath())
+    private fun exitIdsHeader(ids: List<UUID>) = if (ids.isEmpty()) "" else "$EXIT_IDS_PREFIX${ids.joinToString(",")}\n"
 
-    private fun readEvents(file: File): List<DiagnosticEvent> {
+    private fun readEvents(
+        file: File,
+        metadata: (Int, String) -> Boolean = { _, _ -> false },
+    ): DiagnosticLines<DiagnosticEvent> {
         val attributes = try {
             Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
         } catch (_: NoSuchFileException) {
-            return emptyList()
+            return DiagnosticLines(emptyList(), 0, false)
         }
         check(attributes.isRegularFile)
-        if (attributes.size() > maxBytes) {
-            if (file == journal) unreadableRecords = maxOf(1L, unreadableRecords)
-            return emptyList()
-        }
-        val (entries, damaged) = readDiagnosticLines(file, ::decode)
-        if (file == journal) unreadableRecords = damaged
-        return entries.take(maxEntries)
+        if (attributes.size() > maxBytes) return DiagnosticLines(emptyList(), 1, true)
+        return readDiagnosticLines(file, ::decode, metadata)
     }
 
-    private fun writeFile(file: File, events: List<DiagnosticEvent>) {
+    private fun writeFile(file: File, header: String, events: List<DiagnosticEvent>) {
         val bytes = buildString {
-            if (file == journal) append(diagnosticLossHeader(unreadableRecords))
+            append(header)
             events.forEach { appendLine(it.encode()) }
         }.toByteArray(Charsets.UTF_8)
         require(bytes.size <= maxBytes)
         writeDiagnosticFile(file, bytes)
+    }
+
+    // Счётчик потерь живёт в том же атомарном файле, что и запись слота.
+    private inner class RecoverySlot(name: String) {
+        private val file = File(directory, name)
+        @Volatile var losses = 0L
+            private set
+
+        @Synchronized
+        fun read(accept: (DiagnosticEvent) -> Boolean = { true }): DiagnosticEvent? {
+            val rows = readEvents(file)
+            val entry = rows.entries.firstOrNull()?.takeIf(accept)
+            losses = rows.losses
+            if (rows.damaged || rows.entries.isNotEmpty() && entry == null) runCatching { write(entry) }
+            return entry
+        }
+
+        @Synchronized
+        fun replace(event: DiagnosticEvent?) {
+            losses = readEvents(file).losses
+            write(event)
+        }
+
+        private fun write(event: DiagnosticEvent?) {
+            if (event == null && losses == 0L) Files.deleteIfExists(file.toPath())
+            else writeFile(file, diagnosticLossHeader(losses), listOfNotNull(event))
+        }
     }
 
     private fun DiagnosticEvent.encode(): String {
@@ -141,6 +179,7 @@ internal class DiagnosticJournal(
 
     private companion object {
         val processBootMark = UUID.randomUUID().toString()
+        const val EXIT_IDS_PREFIX = "exits\t"
     }
 }
 
@@ -148,8 +187,15 @@ private const val LOSS_PREFIX = "loss\t"
 
 internal fun diagnosticLossHeader(count: Long) = if (count > 0) "$LOSS_PREFIX$count\n" else ""
 
-internal fun <T> readDiagnosticLines(file: File, decode: (String) -> T): Pair<List<T>, Long> {
+internal data class DiagnosticLines<T>(val entries: List<T>, val losses: Long, val damaged: Boolean)
+
+internal fun <T> readDiagnosticLines(
+    file: File,
+    decode: (String) -> T,
+    metadata: (Int, String) -> Boolean = { _, _ -> false },
+): DiagnosticLines<T> {
     var losses = 0L
+    var damaged = false
     val entries = file.useLines(Charsets.UTF_8) { lines ->
         lines.mapIndexedNotNull { index, line ->
             val marker = if (index == 0 && line.startsWith(LOSS_PREFIX)) {
@@ -158,14 +204,17 @@ internal fun <T> readDiagnosticLines(file: File, decode: (String) -> T): Pair<Li
             if (marker != null) {
                 losses = marker
                 null
-            } else if (line.isEmpty()) {
+            } else if (line.isEmpty() || metadata(index, line)) {
                 null
             } else {
-                runCatching { decode(line) }.onFailure { if (losses < Long.MAX_VALUE) losses++ }.getOrNull()
+                runCatching { decode(line) }.onFailure {
+                    damaged = true
+                    if (losses < Long.MAX_VALUE) losses++
+                }.getOrNull()
             }
         }.toList()
     }
-    return entries to losses
+    return DiagnosticLines(entries, losses, damaged)
 }
 
 internal fun writeDiagnosticFile(file: File, bytes: ByteArray) {
