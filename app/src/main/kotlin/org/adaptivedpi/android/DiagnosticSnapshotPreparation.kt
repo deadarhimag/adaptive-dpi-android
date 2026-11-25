@@ -48,9 +48,10 @@ internal class DiagnosticSnapshotPreparation(
     },
 ) : ViewModel() {
     data class Picker(val id: String, val key: String?)
+    data class Preparation(val name: String, val creating: Boolean, val job: Deferred<DiagnosticExports.PreparedSnapshot>)
     private data class Recovery(val id: String, val picker: Picker?)
 
-    private var snapshot: Pair<String, Deferred<Unit>>? = null
+    private var snapshot: Preparation? = null
     private var initialized = false
     private var write: Job? = null
     private var recovering: Recovery? = null
@@ -106,15 +107,19 @@ internal class DiagnosticSnapshotPreparation(
     fun prepare(context: Context, name: String, report: String?) {
         check(snapshot == null)
         val app = context.applicationContext
-        snapshot = name to viewModelScope.async<Unit>(Dispatchers.IO) {
+        val job = viewModelScope.async(Dispatchers.IO) {
             if (report == null) DiagnosticExports.armRetry(app, name)
-            else DiagnosticExports.storePending(app, report, name)
+            else {
+                DiagnosticExports.storePending(app, report, name)
+                DiagnosticExports.PreparedSnapshot.Ready
+            }
         }
+        snapshot = Preparation(name, report != null, job)
     }
 
-    fun taskFor(name: String) = snapshot?.takeIf { it.first == name }?.second
+    fun taskFor(name: String) = snapshot?.takeIf { it.name == name }
 
-    fun take(name: String) = taskFor(name)?.also { snapshot = null }
+    fun take(name: String) = taskFor(name)?.also { snapshot = null }?.job
 
     @MainThread
     fun finishPicker(context: Context, uri: Uri?, key: String?, snapshotName: (String) -> String?, transportId: String): Job? {

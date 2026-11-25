@@ -434,6 +434,7 @@
       "requirements": [
         "REV25-006",
         "REV25-012",
+        "REV25-015",
         "1.7"
       ],
       "mechanism": "Продолжение SAF после гибели процесса",
@@ -457,9 +458,35 @@
         "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelANewAttempt",
         "DiagnosticsInstrumentedTest#restoredSafCancellationPreservesTheInterruptedWrite",
         "DiagnosticsInstrumentedTest#restoringSafWithoutSnapshotUnblocksFutureExport",
-        "DiagnosticsInstrumentedTest#recreatingActivityTwiceKeepsOneSafRecovery"
+        "DiagnosticsInstrumentedTest#recreatingActivityTwiceKeepsOneSafRecovery",
+        "DiagnosticsInstrumentedTest#clearingSafRecoveryOwnerLeavesSnapshotForFreshRecovery"
       ],
       "limitations": "Сквозная гибель процесса в обоих SAF-сценариях открыта. Обычный SAF не даёт атомарного подтверждения результата для стороннего документа."
+    },
+    {
+      "id": "S1-SAF-PREPARE-ERROR-01",
+      "stage": 1,
+      "requirements": [
+        "1.7",
+        "REV25-016"
+      ],
+      "mechanism": "Открытие сохранённого снимка и явный повтор",
+      "preconditions": "Приватный снимок с известным текстом, состояние подготовки или прерванной записи",
+      "inputs": "Временный отказ чтения, занятое имя назначения, отсутствующий файл, неверный UTF-8 и отказ создания",
+      "events": "Восстановить подготовку или подтвердить повтор. Внести управляемый отказ, затем снять препятствие и выполнить явный повтор либо новый экспорт",
+      "expected": "Готовый снимок сохраняет точные байты при временном отказе. Готовность следующего экспорта восстанавливается после отсутствующего, негодного или несозданного снимка",
+      "forbidden": "Удаление готового файла из-за ошибки чтения или переименования, автоматический показ диалога после отказа и запись повреждённого содержимого",
+      "acceptance": "Исходные байты и маркер на месте после ошибки, документ остаётся пустым, после явного повтора новая запись одна и точная",
+      "environment": "AVD API 34 и изолированный JVM-контроль файлов",
+      "suites": [
+        "Android CI, базовый"
+      ],
+      "implementation": [
+        "DiagnosticsInstrumentedTest#failedSafRetryPreparationKeepsInterruptedSnapshot",
+        "DiagnosticsInstrumentedTest#failedReadingRestoredPreparationKeepsSnapshot",
+        "DiagnosticsInstrumentedTest#missingCorruptAndUncreatedSnapshotsLeaveExportAvailable"
+      ],
+      "limitations": "JVM-контроль подменяет Android Lifecycle и picker. Сквозная гибель процесса с системным диалогом остаётся открыта."
     },
     {
       "id": "S1-SAF-QUOTA-01",

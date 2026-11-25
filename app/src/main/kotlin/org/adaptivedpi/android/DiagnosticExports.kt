@@ -9,6 +9,12 @@ import org.adaptivedpi.android.vpn.diagnostics.DiagnosticEvent
 import org.adaptivedpi.android.vpn.diagnostics.TransportDiagnostics
 import java.io.File
 import java.io.Writer
+import java.nio.charset.CharacterCodingException
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 
 class DiagnosticFileProvider : FileProvider()
 
@@ -150,13 +156,41 @@ internal object DiagnosticExports {
         return WriteClaim.Claimed
     }
 
+    internal enum class PreparedSnapshot { Ready, Interrupted, Missing, Invalid }
+
     @Synchronized
-    fun armRetry(context: Context, name: String) {
-        require(pendingName.matches(name))
-        val directory = File(context.noBackupFilesDir, PENDING_DIR)
-        val writing = File(directory, "$name.writing")
-        if (writing.isFile) check(writing.renameTo(File(directory, name)))
-        check(File(directory, name).isFile)
+    fun inspectPrepared(context: Context, name: String): PreparedSnapshot = inspectPrepared(context, name, retry = false)
+
+    @Synchronized
+    fun armRetry(context: Context, name: String): PreparedSnapshot = inspectPrepared(context, name, retry = true)
+
+    private fun inspectPrepared(context: Context, name: String, retry: Boolean): PreparedSnapshot {
+        if (!pendingName.matches(name)) return PreparedSnapshot.Invalid
+        val ready = File(context.noBackupFilesDir, PENDING_DIR).toPath().resolve(name)
+        val writing = ready.resolveSibling("$name.writing")
+        // Маркер прерванной записи имеет приоритет, даже если рядом обнаружен другой файл.
+        val state = inspectSnapshotFile(writing) ?: return inspectSnapshotFile(ready) ?: PreparedSnapshot.Missing
+        if (state == PreparedSnapshot.Invalid) return state
+        if (!retry) return PreparedSnapshot.Interrupted
+        Files.move(writing, ready)
+        return PreparedSnapshot.Ready
+    }
+
+    private fun inspectSnapshotFile(path: Path): PreparedSnapshot? = try {
+        val attributes = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        if (!attributes.isRegularFile || attributes.size() > MAX_PENDING_BYTES) {
+            PreparedSnapshot.Invalid
+        } else {
+            Files.newBufferedReader(path, Charsets.UTF_8).use { reader ->
+                val buffer = CharArray(4096)
+                while (reader.read(buffer) != -1) Unit
+            }
+            PreparedSnapshot.Ready
+        }
+    } catch (_: NoSuchFileException) {
+        null
+    } catch (_: CharacterCodingException) {
+        PreparedSnapshot.Invalid
     }
 
     @Synchronized

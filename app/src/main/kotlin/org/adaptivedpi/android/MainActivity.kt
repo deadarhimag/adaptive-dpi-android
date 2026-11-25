@@ -317,32 +317,38 @@ class MainActivity : ComponentActivity() {
 
     private fun openPreparedReport(id: String, name: String) {
         lifecycleScope.launch {
-            var interrupted = false
-            val error = try {
-                val task = snapshotPreparation.taskFor(name)
-                if (task != null) {
-                    task.await()
-                } else {
-                    interrupted = withContext(Dispatchers.IO) {
-                        check(DiagnosticExports.readPending(applicationContext, name) != null)
-                        DiagnosticExports.hasInterruptedWrite(applicationContext, name)
-                    }
+            val task = snapshotPreparation.taskFor(name)
+            val creating = task?.creating == true
+            var failure: Exception? = null
+            val prepared = try {
+                task?.job?.await() ?: withContext(Dispatchers.IO) {
+                    DiagnosticExports.inspectPrepared(applicationContext, name)
                 }
-                null
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (failure: Exception) {
-                failure
+            } catch (error: Exception) {
+                failure = error
+                null
             }
             lifecycle.withResumed {
                 if (preparingReportId != id) return@withResumed
                 preparingReportId = null
                 snapshotPreparation.take(name)
-                if (error == null) {
-                    if (interrupted || !requestSave(id, snapshotFileName(id))) snapshotPreparation.retry.value = id
-                } else {
-                    snapshotPreparation.discard(applicationContext, name)
-                    reportExportError(DiagnosticCode.SaveFailed, error)
+                when (prepared) {
+                    null -> {
+                        if (creating) snapshotPreparation.discard(applicationContext, name)
+                        else snapshotPreparation.retry.value = id
+                        reportExportError(DiagnosticCode.SaveFailed, checkNotNull(failure))
+                    }
+                    DiagnosticExports.PreparedSnapshot.Ready -> {
+                        if (!requestSave(id, snapshotFileName(id))) snapshotPreparation.retry.value = id
+                    }
+                    DiagnosticExports.PreparedSnapshot.Interrupted -> snapshotPreparation.retry.value = id
+                    DiagnosticExports.PreparedSnapshot.Missing, DiagnosticExports.PreparedSnapshot.Invalid -> {
+                        // Негодные файлы остаются доступными обычной очистке по сроку и квоте.
+                        DiagnosticExports.releasePending(name)
+                        snapshotPreparation.feedback.value = R.string.diagnostic_missing
+                    }
                 }
             }
         }

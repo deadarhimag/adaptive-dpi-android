@@ -216,6 +216,29 @@ internal class DiagnosticDocumentRecoveryChecks(private val context: Context) {
         }
     }
 
+    fun clearingOwnerCancelsRecovery() = withSnapshot { snapshot ->
+        val gate = RecoveryGate()
+        withRestoredOwner(snapshot.name, gate) { restored ->
+            lateinit var job: Job
+            onMain {
+                restored.register()
+                job = checkNotNull(restored.recover())
+            }
+            assertTrue(awaitEvent("Проверка снимка началась до уничтожения владельца", gate.checked))
+            onMain { restored.clearOwner() }
+            awaitEvent("Отмена восстановления") { job.join() }
+            assertTrue(job.isCancelled)
+            gate.release.complete(Unit)
+            onMain { assertNull(restored.owner.retry.value) }
+            assertEquals(snapshot.report, DiagnosticExports.readPending(context, snapshot.name))
+            assertEquals("", snapshot.good.readText())
+        }
+        withRestoredOwner(snapshot.name) { next ->
+            completeRecovery("Новый владелец", next)
+            assertRetry("Новый владелец", next.owner, snapshot.name)
+        }
+    }
+
     private data class Snapshot(val name: String, val report: String, val good: File, val stale: File,
                                 val goodUri: Uri, val staleUri: Uri)
 
@@ -262,7 +285,7 @@ internal class DiagnosticDocumentRecoveryChecks(private val context: Context) {
             val registry = DocumentRegistry()
             registry.onRestoreInstanceState(state)
             assertTrue(owner.restore(request, null, null))
-            restored = Restored(owner, registry, oldCode, request)
+            restored = Restored(owner, registry, oldCode, request, store::clear)
         }
         try {
             action(restored)
@@ -356,6 +379,7 @@ internal class DiagnosticDocumentRecoveryChecks(private val context: Context) {
         val registry: DocumentRegistry,
         val oldCode: Int,
         val request: DiagnosticSnapshotPreparation.Picker,
+        val clearOwner: () -> Unit,
     ) {
         var lastWrite: Job? = null
             private set

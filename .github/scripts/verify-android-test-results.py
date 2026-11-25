@@ -58,8 +58,12 @@ DIAGNOSTICS_METHODS = (
     "restoredSafCancellationPreservesTheInterruptedWrite",
     "restoringSafWithoutSnapshotUnblocksFutureExport",
     "recreatingActivityTwiceKeepsOneSafRecovery",
+    "clearingSafRecoveryOwnerLeavesSnapshotForFreshRecovery",
     "cancelSafClearsSnapshotAndAllowsAnotherSave",
     "failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry",
+    "failedSafRetryPreparationKeepsInterruptedSnapshot",
+    "failedReadingRestoredPreparationKeepsSnapshot",
+    "missingCorruptAndUncreatedSnapshotsLeaveExportAvailable",
     "recentOrFutureOrphansCannotBlockExportAndActiveSnapshotsSurviveReclamation",
     "finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot",
 )

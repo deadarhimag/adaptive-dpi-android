@@ -252,7 +252,7 @@ class ResultValidatorTest(unittest.TestCase):
                     ET.SubElement(suite, "testcase", classname=klass, name=method)
             report = path / "TEST-main.xml"
             ET.ElementTree(suites).write(report, encoding="utf-8")
-            self.assertEqual(42, baseline.verify(path, consent)["executed"])
+            self.assertEqual(46, baseline.verify(path, consent)["executed"])
             case = suite.find("./testcase[@name='lateSafResultCannotWriteOrCancelANewAttempt']")
             suite.remove(case)
             ET.ElementTree(suites).write(report, encoding="utf-8")

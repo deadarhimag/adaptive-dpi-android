@@ -18,6 +18,7 @@ import android.provider.OpenableColumns
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
@@ -269,6 +270,10 @@ class DiagnosticsInstrumentedTest {
         DiagnosticDocumentRecoveryChecks(context).activityRecreatedTwiceKeepsOneRecovery()
 
     @Test
+    fun clearingSafRecoveryOwnerLeavesSnapshotForFreshRecovery() =
+        DiagnosticDocumentRecoveryChecks(context).clearingOwnerCancelsRecovery()
+
+    @Test
     fun cancelSafClearsSnapshotAndAllowsAnotherSave() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val pending = File(context.noBackupFilesDir, "pending-export")
@@ -332,6 +337,134 @@ class DiagnosticsInstrumentedTest {
         } finally {
             saved.delete()
         }
+    }
+
+    @Test
+    fun failedSafRetryPreparationKeepsInterruptedSnapshot() = checkTemporaryPreparationFailure(interrupted = true)
+
+    @Test
+    fun failedReadingRestoredPreparationKeepsSnapshot() = checkTemporaryPreparationFailure(interrupted = false)
+
+    private fun checkTemporaryPreparationFailure(interrupted: Boolean) {
+        val report = "Сохранённый отчёт до отказа подготовки ✓"
+        val directory = File(context.noBackupFilesDir, "pending-export")
+        val name = DiagnosticExports.storePending(context, report)
+        val ready = File(directory, name)
+        val writing = File(directory, "$name.writing")
+        val id = "snapshot:${DiagnosticExports.COMBINED_FILE_NAME}:$name"
+        var created: File? = null
+        var registered: Instrumentation.ActivityMonitor? = null
+        try {
+            val destination = File.createTempFile("prepared-retry-", ".txt",
+                File(context.cacheDir, "diagnostic-reports").apply { mkdirs() }).also { created = it }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", destination)
+            val monitor = monitorSave(uri).also { registered = it }
+            if (interrupted) {
+                assertEquals(DiagnosticExports.WriteClaim.Claimed, DiagnosticExports.claimWrite(context, name))
+                assertTrue("Каталог целевого имени препятствует переименованию .writing", ready.mkdir())
+            } else {
+                assertTrue(ready.setReadable(false, false))
+                assertFalse("Чтение должно отказать по правам, метаданные файла доступны", ready.canRead())
+                assertTrue(ready.isFile)
+            }
+            val errors = VpnDiagnostics.events.value.map { it.id }.toSet()
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                if (interrupted) {
+                    scenario.onActivity { activity ->
+                        ViewModelProvider(activity)[DiagnosticSnapshotPreparation::class.java].retry.value = id
+                        activity.retryPendingExport(id)
+                    }
+                } else {
+                    scenario.onActivity { activity -> preparingReportField().set(activity, id) }
+                    scenario.recreate()
+                }
+                await { VpnDiagnostics.events.value.any { it.id !in errors && it.code == DiagnosticCode.SaveFailed } }
+                scenario.onActivity { activity ->
+                    assertEquals(id, ViewModelProvider(activity)[DiagnosticSnapshotPreparation::class.java].retry.value)
+                    assertEquals(null, preparingReportField().get(activity))
+                }
+                assertEquals(0, monitor.hits)
+                assertEquals("", destination.readText())
+                if (interrupted) {
+                    assertTrue(DiagnosticExports.hasInterruptedWrite(context, name))
+                    assertTrue(ready.delete())
+                } else {
+                    assertTrue(ready.isFile)
+                    assertTrue(ready.setReadable(true, true))
+                }
+                assertEquals(report, DiagnosticExports.readPending(context, name))
+                scenario.onActivity { it.retryPendingExport(id) }
+                await { destination.readText() == report && !ready.exists() && !writing.exists() }
+                assertEquals(1, monitor.hits)
+            }
+        } finally {
+            if (ready.isFile) ready.setReadable(true, true)
+            DiagnosticExports.deletePending(context, name)
+            registered?.let { InstrumentationRegistry.getInstrumentation().removeMonitor(it) }
+            created?.delete()
+        }
+    }
+
+    @Test
+    fun missingCorruptAndUncreatedSnapshotsLeaveExportAvailable() {
+        val pending = File(context.noBackupFilesDir, "pending-export")
+        val name = DiagnosticExports.storePending(context, "Бывший снимок")
+        val missing = "${UUID.randomUUID()}.txt"
+        var created: File? = null
+        var registered: Instrumentation.ActivityMonitor? = null
+        var nextSnapshot: String? = null
+        try {
+            val destination = File.createTempFile("valid-next-", ".txt",
+                File(context.cacheDir, "diagnostic-reports").apply { mkdirs() }).also { created = it }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostic-reports", destination)
+            val monitor = monitorSave(uri).also { registered = it }
+            File(pending, name).writeBytes(byteArrayOf(0xC3.toByte(), 0x28))
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                for (unusable in listOf(missing, name)) {
+                    scenario.onActivity { activity ->
+                        preparingReportField().set(activity, "snapshot:${DiagnosticExports.COMBINED_FILE_NAME}:$unusable")
+                    }
+                    scenario.recreate()
+                    awaitPreparationFinished(scenario)
+                    assertEquals(0, monitor.hits)
+                }
+                scenario.onActivity { it.exportSnapshot("x".repeat(1_048_577)) }
+                awaitPreparationFinished(scenario)
+                assertEquals(0, monitor.hits)
+                val valid = "Новый отчёт после отказа ✓"
+                scenario.onActivity { activity ->
+                    activity.exportSnapshot(valid)
+                    val owner = ViewModelProvider(activity)[DiagnosticSnapshotPreparation::class.java]
+                    nextSnapshot = ((preparingReportField().get(activity) as? String) ?: owner.picker?.id ?: owner.writing)
+                        ?.substringAfterLast(':')
+                }
+                await { destination.readText() == valid }
+                assertEquals(1, monitor.hits)
+            }
+        } finally {
+            DiagnosticExports.deletePending(context, name)
+            nextSnapshot?.let { DiagnosticExports.deletePending(context, it) }
+            registered?.let { InstrumentationRegistry.getInstrumentation().removeMonitor(it) }
+            created?.delete()
+        }
+    }
+
+    private fun awaitPreparationFinished(scenario: ActivityScenario<MainActivity>) {
+        await {
+            var complete = false
+            scenario.onActivity { activity -> complete = preparingReportField().get(activity) == null }
+            complete
+        }
+        scenario.onActivity { activity ->
+            assertFalse(ViewModelProvider(activity)[DiagnosticSnapshotPreparation::class.java].busy)
+        }
+    }
+
+    private fun preparingReportField() =
+        MainActivity::class.java.getDeclaredField("preparingReportId").apply { isAccessible = true }
+
+    private fun MainActivity.retryPendingExport(id: String) {
+        javaClass.getDeclaredMethod("retrySnapshot", String::class.java).apply { isAccessible = true }.invoke(this, id)
     }
 
     @Test
