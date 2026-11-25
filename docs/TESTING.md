@@ -29,7 +29,7 @@
 
 | Когда | Состав |
 | --- | --- |
-| Каждый push в `main` и каждый pull request, кроме правок только документации (`*.md`, `docs/**`, `LICENSE`; исключение - `docs/PIXEL7_TESTING_RU.md`, он входит в артефакт сборки) | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (23) и расширенный (7) наборы, влияние операций над сокетом на сегменты loopback хоста (`scripts/kernel-ops-pcap.py`), проверка APK |
+| Каждый push в `main` и каждый pull request, кроме правок только документации (`*.md`, `docs/**`, `LICENSE`; исключение - `docs/PIXEL7_TESTING_RU.md`, он входит в артефакт сборки) | JVM, lint, debug/androidTest/release APK, AVD API 34 базовый (25) и расширенный (7) наборы, влияние операций над сокетом на сегменты loopback хоста (`scripts/kernel-ops-pcap.py`), проверка APK |
 | Экспериментальные ветки | Черновой pull request в `main` ради Android CI без слияния |
 | Вручную или по расписанию **[план]** | AVD API 29 (нижняя граница) и 36; API 37 - при наличии официального образа; нативные host-тесты с санитайзерами; фаззинг разборщиков |
 | Лаборатория, вручную **[план]** | DPI-стенд Linux с PCAP |

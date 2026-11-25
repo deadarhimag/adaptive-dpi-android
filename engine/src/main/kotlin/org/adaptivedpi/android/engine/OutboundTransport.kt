@@ -140,13 +140,15 @@ class OutboundTransport(
         private val writeSite = site.copy(operation = TransportOperation.WRITE)
         private val closeSite = site.copy(operation = TransportOperation.SHUTDOWN_OUTPUT)
         @Volatile private var peerEof = false
+        /** Классифицированный отказ чтения или записи этого соединения, уже записанный в журнал. Для исхода потока. */
+        @Volatile internal var failureObserver: ((TransportFailure) -> Unit)? = null
 
         internal fun useRelayIdleTimeout() = countFailures(readSite, { lease.cancellation }) {
             socket.soTimeout = 0
         }
 
         fun read(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset): Int = countFailures(
-            readSite, { lease.cancellation },
+            readSite, { lease.cancellation }, observer = failureObserver,
         ) {
             val size = socket.getInputStream().read(buffer, offset, length)
             if (size > 0) receivedBytes.addAndGet(size.toLong())
@@ -155,14 +157,14 @@ class OutboundTransport(
         }
 
         fun write(buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset) = countFailures(
-            writeSite, { lease.cancellation },
+            writeSite, { lease.cancellation }, observer = failureObserver,
         ) {
             socket.getOutputStream().write(buffer, offset, length)
             sentBytes.addAndGet(length.toLong())
             Unit
         }
 
-        fun shutdownOutput() = countFailures(closeSite, { lease.cancellation }, TransportCategory.CLEANUP, { peerEof }) {
+        fun shutdownOutput() = countFailures(closeSite, { lease.cancellation }, TransportCategory.CLEANUP, { peerEof }, failureObserver) {
             socket.shutdownOutput()
         }
 
@@ -304,12 +306,15 @@ class OutboundTransport(
         cancellation: () -> TransportCancellation? = { null },
         fallback: TransportCategory = TransportCategory.UNKNOWN,
         peerEof: () -> Boolean = { false },
+        noinline observer: ((TransportFailure) -> Unit)? = null,
         operation: () -> T,
     ): T = try {
         operation()
     } catch (error: Exception) {
         failedOperations.incrementAndGet()
-        failures.recordError(site, error, cancellation(), fallback, peerEof())
+        val failure = failures.classify(site, error, cancellation(), fallback, peerEof())
+        failures.record(failure)
+        observer?.invoke(failure)
         throw error
     }
 

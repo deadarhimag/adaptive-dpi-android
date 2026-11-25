@@ -15,13 +15,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,13 +33,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.annotation.DrawableRes
+import androidx.annotation.StringRes
 import org.adaptivedpi.android.R
+import org.adaptivedpi.android.designsystem.AdaptiveIcons
 import org.adaptivedpi.android.designsystem.AdaptivePanel
+import org.adaptivedpi.android.designsystem.ListRowItem
+import org.adaptivedpi.android.designsystem.PowerButton
+import org.adaptivedpi.android.designsystem.Spacing
+import org.adaptivedpi.android.designsystem.StatusBadge
+import org.adaptivedpi.android.designsystem.StatusLevel
 import org.adaptivedpi.android.designsystem.ThemeMode
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.vpn.VpnAvailability
@@ -51,7 +61,21 @@ import org.adaptivedpi.android.vpn.diagnostics.TransportJournalView
 import org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryState
 import java.util.UUID
 
-private enum class Screen { Home, Settings, Diagnostics, About }
+private enum class Screen { Home, Diagnostics, Settings, Developer, About }
+
+private class NavigationItem(val screen: Screen, @DrawableRes val icon: Int, @StringRes val label: Int)
+
+private val navigationItems = listOf(
+    NavigationItem(Screen.Home, AdaptiveIcons.Home, R.string.nav_home),
+    NavigationItem(Screen.Diagnostics, AdaptiveIcons.Journal, R.string.diagnostics),
+    NavigationItem(Screen.Settings, AdaptiveIcons.Settings, R.string.settings),
+)
+
+/** Пункт нижней панели, к которому относится экран. */
+private fun Screen.tab(): Screen = when (this) {
+    Screen.Developer, Screen.About -> Screen.Settings
+    else -> this
+}
 
 @Composable
 internal fun AdaptiveDpiApp(
@@ -93,37 +117,77 @@ internal fun AdaptiveDpiApp(
         }
     }
     BackHandler(enabled = screen != Screen.Home) {
-        screen = if (screen == Screen.About) Screen.Settings else Screen.Home
+        screen = if (screen == Screen.About || screen == Screen.Developer) Screen.Settings else Screen.Home
     }
 
-    Scaffold { insets ->
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                for (item in navigationItems) {
+                    NavigationBarItem(
+                        selected = screen.tab() == item.screen,
+                        onClick = { screen = item.screen },
+                        icon = { Icon(painterResource(item.icon), contentDescription = null) },
+                        label = { Text(stringResource(item.label)) },
+                    )
+                }
+            }
+        },
+    ) { insets ->
         Box(
             modifier = Modifier.fillMaxSize().padding(insets),
             contentAlignment = Alignment.TopCenter,
         ) {
             when (screen) {
                 Screen.Home -> ScreenContent(R.string.app_name) {
+                    crashBannerEvent(diagnosticEvents)?.let { notice ->
+                        CrashBanner(
+                            event = notice,
+                            canStartVpn = vpnState.canStart && !resourcesBlocked,
+                            onStartVpn = onStartVpn,
+                            onSave = onSaveDiagnostic,
+                            onShare = onShareDiagnostic,
+                            onClose = {
+                                diagnosticEvents.filter { it.isCrashNotice && !it.acknowledged }
+                                    .forEach { onDiagnosticAcknowledge(it.id) }
+                            },
+                        )
+                    }
                     HomeScreen(
                         vpnState = vpnState,
                         resourcesBlocked = resourcesBlocked,
                         cleanupDelay = cleanupDelay,
                         vpnAvailability = vpnAvailability,
                         onStartVpn = onStartVpn,
-                        onStartTransport = onStartTransport,
-                        onStartApplicationTransport = onStartApplicationTransport,
                         transport = transport,
                         onStopVpn = onStopVpn,
                         onVpnSettings = onVpnSettings,
-                        onSettings = { screen = Screen.Settings },
-                        onDiagnostics = { screen = Screen.Diagnostics },
                     )
                 }
 
-                Screen.Settings -> ScreenContent(R.string.settings, onBack = { screen = Screen.Home }) {
-                    SettingsScreen(themeMode, onThemeChange, onNotificationSettings) { screen = Screen.About }
+                Screen.Settings -> ScreenContent(R.string.settings) {
+                    SettingsScreen(
+                        themeMode,
+                        onThemeChange,
+                        onNotificationSettings,
+                        onDeveloper = { screen = Screen.Developer },
+                        onAbout = { screen = Screen.About },
+                    )
                 }
 
-                Screen.Diagnostics -> ScreenContent(R.string.diagnostics, onBack = { screen = Screen.Home }) {
+                Screen.Developer -> ScreenContent(
+                    R.string.developer_title,
+                    onBack = { screen = Screen.Settings },
+                    backLabel = R.string.back_to_settings,
+                ) {
+                    DeveloperScreen(
+                        canRun = vpnState.canStart && !resourcesBlocked,
+                        onStartTransport = onStartTransport,
+                        onStartApplicationTransport = onStartApplicationTransport,
+                    )
+                }
+
+                Screen.Diagnostics -> ScreenContent(R.string.diagnostics) {
                     DiagnosticExport(vpnEventHistory.loaded, onBuildCombinedReport, onSaveCombinedReport, onShareCombinedReport)
                     VpnEventJournal(vpnEventHistory, onClearVpnEventHistory)
                     DiagnosticsScreen(vpnState, transport, resourcesBlocked)
@@ -146,7 +210,7 @@ internal fun AdaptiveDpiApp(
         }
     }
     val event = diagnosticEvents.firstOrNull { it.id.toString() == selectedEventId }
-        ?: diagnosticEvents.firstOrNull { !it.acknowledged && it.code != DiagnosticCode.VpnCleanupDelayed }
+        ?: diagnosticEvents.firstOrNull { !it.acknowledged && it.code != DiagnosticCode.VpnCleanupDelayed && !it.isCrashNotice }
     if (event != null) {
         DiagnosticErrorDialog(
             event = event,
@@ -174,11 +238,11 @@ private fun ScreenContent(
 ) {
     Column(
         modifier = Modifier
-            .widthIn(max = 600.dp)
+            .widthIn(max = Spacing.contentMaxWidth)
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = Spacing.xxl, vertical = Spacing.xxl),
+        verticalArrangement = Arrangement.spacedBy(Spacing.lg),
     ) {
         if (onBack != null) {
             TextButton(onClick = onBack) { Text(stringResource(backLabel)) }
@@ -199,16 +263,26 @@ private fun HomeScreen(
     cleanupDelay: String?,
     vpnAvailability: VpnAvailability,
     onStartVpn: () -> Unit,
-    onStartTransport: (String) -> Unit,
-    onStartApplicationTransport: (String) -> Unit,
     transport: TransportSnapshot?,
     onStopVpn: () -> Unit,
     onVpnSettings: () -> Unit,
-    onSettings: () -> Unit,
-    onDiagnostics: () -> Unit,
 ) {
+    val canStop = vpnState.canStop
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Spacing.md),
+    ) {
+        PowerButton(
+            label = stringResource(if (canStop) R.string.vpn_stop else R.string.vpn_start),
+            active = canStop,
+            enabled = canStop || vpnState.canStart && !resourcesBlocked,
+            onClick = if (canStop) onStopVpn else onStartVpn,
+        )
+        StatusBadge(stringResource(vpnTitle(vpnState)), vpnState.statusLevel())
+    }
+
     AdaptivePanel {
-        VpnStatus(vpnState)
         Text(
             text = stringResource(
                 when {
@@ -221,17 +295,8 @@ private fun HomeScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-
         if (resourcesBlocked) Text(stringResource(R.string.vpn_cleanup_pending))
         cleanupDelay?.let { Text(stringResource(R.string.vpn_cleanup_delayed, it)) }
-        val canStop = vpnState.canStop
-        Button(
-            onClick = if (canStop) onStopVpn else onStartVpn,
-            enabled = canStop || vpnState.canStart && !resourcesBlocked,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(stringResource(if (canStop) R.string.vpn_stop else R.string.vpn_start))
-        }
     }
 
     VpnAvailabilityNotice(vpnAvailability, vpnState, onVpnSettings)
@@ -241,58 +306,58 @@ private fun HomeScreen(
     }
 
     AdaptivePanel {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(stringResource(R.string.smart_bypass), style = MaterialTheme.typography.titleMedium)
-                EngineStatus(vpnState, transport, resourcesBlocked)
-            }
-            Switch(checked = false, onCheckedChange = null, enabled = false)
-        }
+        Text(stringResource(R.string.smart_bypass), style = MaterialTheme.typography.titleMedium)
+        EngineStatus(vpnState, transport, resourcesBlocked)
     }
+}
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onSettings, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.settings))
-        }
-        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.diagnostics))
-        }
+@Composable
+private fun DeveloperScreen(
+    canRun: Boolean,
+    onStartTransport: (String) -> Unit,
+    onStartApplicationTransport: (String) -> Unit,
+) {
+    if (!canRun) {
+        AdaptivePanel { Text(stringResource(R.string.developer_unavailable)) }
+        return
     }
-    if (vpnState.canStart && !resourcesBlocked) {
-        var application by rememberSaveable { mutableStateOf("com.android.chrome") }
-        AdaptivePanel {
-            Text(stringResource(R.string.vpn_app_transport_title), style = MaterialTheme.typography.titleMedium)
-            Text(stringResource(R.string.vpn_app_transport_scope))
-            OutlinedTextField(
-                value = application,
-                onValueChange = { if (it.length <= 223) application = it },
-                label = { Text(stringResource(R.string.vpn_app_transport_package)) },
-                singleLine = true,
-            )
-            OutlinedButton(
-                onClick = { onStartApplicationTransport(application.trim()) },
-                enabled = ExperimentalApplication.isPackageName(application.trim()),
-            ) { Text(stringResource(R.string.vpn_app_transport_start)) }
-        }
-        var target by rememberSaveable { mutableStateOf("") }
-        AdaptivePanel {
-            Text(stringResource(R.string.vpn_transport_title), style = MaterialTheme.typography.titleMedium)
-            Text(stringResource(R.string.vpn_transport_scope))
-            OutlinedTextField(
-                value = target,
-                onValueChange = { if (it.length <= 15) target = it },
-                label = { Text(stringResource(R.string.vpn_transport_address)) },
-                singleLine = true,
-            )
-            OutlinedButton(
-                onClick = { onStartTransport(target) },
-                enabled = ExperimentalTarget.parse(target) != null,
-            ) { Text(stringResource(R.string.vpn_transport_start)) }
-        }
+    var application by rememberSaveable { mutableStateOf("com.android.chrome") }
+    AdaptivePanel {
+        Text(stringResource(R.string.vpn_app_transport_title), style = MaterialTheme.typography.titleMedium)
+        Text(stringResource(R.string.vpn_app_transport_scope))
+        OutlinedTextField(
+            value = application,
+            onValueChange = { if (it.length <= 223) application = it },
+            label = { Text(stringResource(R.string.vpn_app_transport_package)) },
+            singleLine = true,
+        )
+        OutlinedButton(
+            onClick = { onStartApplicationTransport(application.trim()) },
+            enabled = ExperimentalApplication.isPackageName(application.trim()),
+        ) { Text(stringResource(R.string.vpn_app_transport_start)) }
     }
+    var target by rememberSaveable { mutableStateOf("") }
+    AdaptivePanel {
+        Text(stringResource(R.string.vpn_transport_title), style = MaterialTheme.typography.titleMedium)
+        Text(stringResource(R.string.vpn_transport_scope))
+        OutlinedTextField(
+            value = target,
+            onValueChange = { if (it.length <= 15) target = it },
+            label = { Text(stringResource(R.string.vpn_transport_address)) },
+            singleLine = true,
+        )
+        OutlinedButton(
+            onClick = { onStartTransport(target) },
+            enabled = ExperimentalTarget.parse(target) != null,
+        ) { Text(stringResource(R.string.vpn_transport_start)) }
+    }
+}
+
+private fun VpnState.statusLevel(): StatusLevel = when (this) {
+    VpnState.TestSessionRunning, VpnState.EngineRunning -> StatusLevel.Working
+    VpnState.AwaitingConsent, VpnState.Starting, VpnState.TransportStarting, VpnState.Stopping -> StatusLevel.Fixing
+    VpnState.StartFailed, VpnState.Failed -> StatusLevel.Error
+    VpnState.Idle, VpnState.ConsentDenied, VpnState.ConsentRevoked -> StatusLevel.Unavailable
 }
 
 @Composable
@@ -300,6 +365,7 @@ private fun SettingsScreen(
     themeMode: ThemeMode,
     onThemeChange: (ThemeMode) -> Unit,
     onNotifications: () -> Unit,
+    onDeveloper: () -> Unit,
     onAbout: () -> Unit,
 ) {
     AdaptivePanel {
@@ -313,7 +379,7 @@ private fun SettingsScreen(
                         .heightIn(min = 48.dp)
                         .selectable(selected, onClick = { onThemeChange(mode) }, role = Role.RadioButton),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.md),
                 ) {
                     RadioButton(selected = selected, onClick = null)
                     val label = when (mode) {
@@ -337,8 +403,13 @@ private fun SettingsScreen(
             Text(stringResource(R.string.open_notification_settings))
         }
     }
-    OutlinedButton(onClick = onAbout, modifier = Modifier.fillMaxWidth()) {
-        Text(stringResource(R.string.about_title))
+    AdaptivePanel {
+        ListRowItem(
+            title = stringResource(R.string.developer_title),
+            subtitle = stringResource(R.string.developer_description),
+            onClick = onDeveloper,
+        )
+        ListRowItem(title = stringResource(R.string.about_title), onClick = onAbout)
     }
 }
 
@@ -376,21 +447,23 @@ private fun DiagnosticsScreen(vpnState: VpnState, transport: TransportSnapshot?,
     }
 }
 
+private fun vpnTitle(state: VpnState): Int = when (state) {
+    VpnState.Idle -> R.string.vpn_idle
+    VpnState.AwaitingConsent -> R.string.vpn_awaiting_consent
+    VpnState.Starting -> R.string.vpn_starting
+    VpnState.TestSessionRunning -> R.string.vpn_test_session_running
+    VpnState.TransportStarting -> R.string.vpn_transport_initializing
+    VpnState.EngineRunning -> R.string.vpn_engine_running
+    VpnState.Stopping -> R.string.vpn_stopping
+    VpnState.ConsentDenied -> R.string.vpn_consent_denied
+    VpnState.ConsentRevoked -> R.string.vpn_consent_revoked
+    VpnState.StartFailed -> R.string.vpn_start_failed
+    VpnState.Failed -> R.string.vpn_failed
+}
+
 @Composable
 private fun VpnStatus(state: VpnState) {
-    val title = when (state) {
-        VpnState.Idle -> R.string.vpn_idle
-        VpnState.AwaitingConsent -> R.string.vpn_awaiting_consent
-        VpnState.Starting -> R.string.vpn_starting
-        VpnState.TestSessionRunning -> R.string.vpn_test_session_running
-        VpnState.TransportStarting -> R.string.vpn_transport_initializing
-        VpnState.EngineRunning -> R.string.vpn_engine_running
-        VpnState.Stopping -> R.string.vpn_stopping
-        VpnState.ConsentDenied -> R.string.vpn_consent_denied
-        VpnState.ConsentRevoked -> R.string.vpn_consent_revoked
-        VpnState.StartFailed -> R.string.vpn_start_failed
-        VpnState.Failed -> R.string.vpn_failed
-    }
+    val title = vpnTitle(state)
     Text(
         text = stringResource(R.string.vpn_status),
         style = MaterialTheme.typography.labelLarge,

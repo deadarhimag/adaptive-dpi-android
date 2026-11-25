@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import kotlinx.coroutines.CompletableDeferred
 import org.adaptivedpi.android.engine.HevLoopbackRelay
+import org.adaptivedpi.android.engine.flow.FlowOutcomeRecorder
 import org.adaptivedpi.android.engine.OutboundTransport
 import org.adaptivedpi.android.engine.OutboundStatistics
 import org.adaptivedpi.android.engine.TransportCancellation
@@ -92,6 +93,7 @@ internal class ExperimentalTransport(
     private val observer = NativeTransportObserver(diagnostics)
     private val drainLock = ReentrantLock()
     private val outbound = OutboundTransport(maxSockets = sessionLimit, readTimeoutMillis = 60_000, failures = failures)
+    private val flowRecorder = FlowOutcomeRecorder()
     private val relay: HevLoopbackRelay
     private var worker: Thread? = null
     val finished = CompletableDeferred<Unit>()
@@ -111,7 +113,7 @@ internal class ExperimentalTransport(
         try {
             requirePreviousTransportReleased()
             outbound.updateNetwork(VpnOutboundSocketPolicy(service, network))
-            relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, onFailure)
+            relay = HevLoopbackRelay(outbound, target, sessionLimit, failures, flowRecorder, onFailure)
         } catch (error: Throwable) {
             runCatching(outbound::close).exceptionOrNull()?.let(error::addSuppressed)
             runCatching { check(HevBridge.release(token)) }.exceptionOrNull()?.let(error::addSuppressed)
@@ -172,7 +174,12 @@ internal class ExperimentalTransport(
 
     fun awaitWorkerExit() = worker?.join()
 
-    fun awaitRelayRelease() = relay.awaitDrained()
+    fun awaitRelayRelease() {
+        relay.awaitDrained()
+        // Агрегаты полны только после завершения всех соединений релея.
+        runCatching { diagnostics.recordFlowSummary(flowRecorder.snapshot().text(sessionLimit)) }
+            .onFailure { failures.recordError(NATIVE_RUN, it, fallback = TransportCategory.INTERNAL) }
+    }
 
     fun relayShutdownDiagnostics(includeStacks: Boolean) = relay.shutdownDiagnosticLines(includeStacks, worker)
 

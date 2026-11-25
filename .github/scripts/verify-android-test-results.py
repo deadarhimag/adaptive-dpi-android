@@ -18,6 +18,8 @@ CLASSES = {
         "individualErrorUsesTheSameExportActionsAndReturnsToItsReportOnCancel",
         "transportExportOffersSaveShareAndCancelFromOneButton",
         "aboutShowsBuildNumberAndPackagedCommit",
+        "bottomNavigationOpensSectionsAndKeepsSettingsSelectedInsideItsSubscreens",
+        "themeChoiceIsAppliedImmediatelyAndStored",
         "anotherVpnDialogOffersThreeIndependentActions",
         "configurationRestrictionOffersSettingsWithoutSwitching",
     ),

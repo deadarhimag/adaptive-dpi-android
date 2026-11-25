@@ -7,6 +7,10 @@
     <string name="vpn_notification_experiment_title">Экспериментальный сеанс VPN</string>
     <string name="vpn_notification_experiment">Локальный транспорт для одного IPv4-адреса</string>
     <string name="vpn_notification_stop">Остановить</string>
+    <string name="vpn_revoked_channel">Отключение VPN системой</string>
+    <string name="vpn_revoked_title">VPN отключён системой</string>
+    <string name="vpn_revoked_message">VPN остановлен: его отключили в настройках Android или включили другой VPN. Автоматически он не включается.</string>
+    <string name="vpn_revoked_restart">Включить снова</string>
     <string name="vpn_error_channel">Критические ошибки VPN</string>
     <string name="vpn_error_title">VPN отключён из-за ошибки</string>
     <string name="vpn_error_stopped">Сеанс VPN остановлен.</string>

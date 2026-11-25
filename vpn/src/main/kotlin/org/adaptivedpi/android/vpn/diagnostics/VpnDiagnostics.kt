@@ -65,6 +65,8 @@ object VpnDiagnostics {
             val type = if (event.code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
             VpnEventHistory.record(type, sessionId, event.code, event.vpn.state, id = event.id)
         }
+        // Чтение истории завершений процесса не должно мешать остальному запуску.
+        runCatching { initialized.recordProcessExits(ExitReasonReader.read(app)) }
         runCatching(dispatcher::ensureChannel)
         installCrashHandler(initialized)
         initialized.events.value.firstOrNull {

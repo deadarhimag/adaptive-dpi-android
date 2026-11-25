@@ -73,6 +73,10 @@
     <string name="diagnostics_description">Здесь показано состояние службы. Сетевые проверки ресурсов появятся после подключения движка.</string>
     <string name="diagnostic_notifications">Уведомления об ошибках</string>
     <string name="diagnostic_notifications_description">Критические ошибки показываются в отдельном канале. Журнал доступен в диагностике при любых настройках уведомлений.</string>
+    <string name="crash_banner_title">Приложение завершилось с ошибкой</string>
+    <string name="crash_banner_vpn_stopped">VPN был остановлен из-за сбоя</string>
+    <string name="crash_banner_enable">Включить</string>
+    <string name="crash_banner_send">Отправить журнал ошибок</string>
     <string name="diagnostic_error">Ошибка приложения</string>
     <string name="diagnostic_technical">Технические подробности</string>
     <string name="diagnostic_preview">Состав отчёта</string>
@@ -111,5 +115,10 @@
     <string name="about_androidx">AndroidX — Apache 2.0</string>
     <string name="about_kotlin">Kotlin — Apache 2.0</string>
     <string name="about_coroutines">kotlinx.coroutines — Apache 2.0</string>
+    <string name="nav_home">Главная</string>
+    <string name="developer_title">Для разработчика</string>
+    <string name="developer_description">Проверочный транспорт и тестовые подключения</string>
+    <string name="developer_unavailable">Запуск проверочного транспорта недоступен, пока VPN работает или остановка не завершена.</string>
+    <string name="about_symbols">Значки Material Symbols — Apache 2.0</string>
     <string name="about_link_unavailable">Не удалось открыть ссылку</string>
 </resources>
