@@ -245,7 +245,7 @@ class HevLoopbackRelay internal constructor(
             val idle = TcpIdle {
                 try {
                     failures.record(TransportFailure(TCP_IDLE, TransportCategory.TIMEOUT, TransportCode.TIMEOUT))
-                    peer.flow?.failed(FlowFailure(TransportCategory.TIMEOUT, TransportCode.TIMEOUT, null))
+                    peer.flow?.idleTimeout()
                 } finally {
                     connection.close()
                     closePeer(peer)
@@ -253,6 +253,8 @@ class HevLoopbackRelay internal constructor(
             }
             val flow = pipeline.begin(key, connectNanos)
             peer.flow = flow
+            // Отказ ключа - только отказ на стороне сервера; ошибки сокета клиента к ключу не относятся.
+            connection.failureObserver = { failure -> if (failure.code != TransportCode.PEER_EOF) flow.failed(flowFailure(failure)) }
             var response: Future<*>? = null
             try {
                 observe(CONTROL_WRITE, peer) { reply(output, 0) }
@@ -310,11 +312,15 @@ class HevLoopbackRelay internal constructor(
                 connection.shutdownOutput()
                 response.get()
             } finally {
-                idle.close()
-                if (response != null) {
-                    finishDirections(peer, connection, response)
+                // Исход записывается, даже если Stop прервал ожидание ответа в finishDirections.
+                try {
+                    idle.close()
+                    if (response != null) {
+                        finishDirections(peer, connection, response)
+                    }
+                } finally {
+                    flow.finish()
                 }
-                flow.finish()
             }
         }
     }
@@ -493,10 +499,7 @@ class HevLoopbackRelay internal constructor(
     ): T = try {
         operation()
     } catch (error: Exception) {
-        val failure = failures.classify(site, error, peer.cancellation.get(), fallback, peer.eof)
-        failures.record(failure)
-        // Завершение записи после EOF партнёра - обычный конец соединения, а не отказ.
-        if (failure.code != TransportCode.PEER_EOF) peer.flow?.failed(flowFailure(failure))
+        failures.recordError(site, error, peer.cancellation.get(), fallback, peer.eof)
         throw error
     }
 
