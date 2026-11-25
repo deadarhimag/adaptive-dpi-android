@@ -124,14 +124,13 @@ object KernelCapabilityProbe {
     }
 
     private fun maxSegment() = pair(configure = { socket -> fileDescriptor(socket) { Os.setsockoptInt(it, OsConstants.IPPROTO_TCP, TCP_MAXSEG, 300) } }) { client, server ->
-        val effective = fileDescriptor(client) { Os.getsockoptInt(it, OsConstants.IPPROTO_TCP, TCP_MAXSEG) }
         server.getOutputStream().write(ByteArray(4_000))
         DataInputStream(client.getInputStream()).readFully(ByteArray(4_000))
-        "ok запрошено 300, после connect $effective, передача 4000 байт прошла"
+        "ok опция 300 принята, передача 4000 байт прошла"
     }
 
     private fun receiveBuffer() = pair(configure = { socket -> fileDescriptor(socket) { Os.setsockoptInt(it, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF, 2_048) } }) { client, server ->
-        val effective = fileDescriptor(client) { Os.getsockoptInt(it, OsConstants.SOL_SOCKET, OsConstants.SO_RCVBUF) }
+        val effective = client.receiveBufferSize
         server.getOutputStream().write(ByteArray(20_000))
         DataInputStream(client.getInputStream()).readFully(ByteArray(20_000))
         "ok запрошено 2048, ядро $effective, передача 20000 байт прошла"
@@ -144,15 +143,11 @@ object KernelCapabilityProbe {
     }
 
     private fun ttl() = pair { client, server ->
-        fileDescriptor(client) { fd ->
-            val previous = Os.getsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL)
-            Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL, 5)
-            val applied = Os.getsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL)
-            client.getOutputStream().write(ByteArray(10))
-            DataInputStream(server.getInputStream()).readFully(ByteArray(10))
-            Os.setsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL, previous)
-            "ok было $previous, установлено $applied, восстановлено ${Os.getsockoptInt(fd, OsConstants.IPPROTO_IP, OsConstants.IP_TTL)}"
-        }
+        // Чтения опции назад в публичном API нет (`Os.getsockoptInt` скрыт): TTL в пакетах виден только в PCAP хоста.
+        fileDescriptor(client) { Os.setsockoptInt(it, OsConstants.IPPROTO_IP, OsConstants.IP_TTL, 5) }
+        client.getOutputStream().write(ByteArray(10))
+        DataInputStream(server.getInputStream()).readFully(ByteArray(10))
+        "ok опция 5 принята, передача прошла"
     }
 
     private fun urgent() = pair { client, _ ->
