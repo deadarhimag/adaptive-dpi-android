@@ -64,6 +64,9 @@ jobs:
       - name: Подготовить Gradle Wrapper
         run: chmod +x ./gradlew
 
+      - name: Проверить управляющий сценарий восстановления и валидаторы Android
+        run: python3 .github/scripts/test-vpn-process-recovery-host.py
+
       - name: Запустить модульные тесты, lint и сборку APK
         env:
           ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}

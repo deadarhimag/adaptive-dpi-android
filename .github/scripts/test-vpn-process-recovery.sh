@@ -10,26 +10,61 @@ runner="$app.test/androidx.test.runner.AndroidJUnitRunner"
 suite="$app.DiagnosticsInstrumentedTest"
 setup=armsVpnForExternalProcessDeath
 test=anAbortedVpnProcessIsReportedAfterTheNextLaunch
+validator=.github/scripts/verify-extended-transport-results.py
 
 avd() { timeout 10s "$adb" -s "$serial" "$@"; }
 [[ $(avd shell getprop ro.kernel.qemu | tr -d '\r') == 1 ]]
 mkdir -p "$logs"
-rm -f -- "$logs/result.json" "$logs/junit-results.json" "$logs/TEST-VpnProcessRecovery.xml"
+rm -f -- "$logs/result.json" "$logs/result.json.tmp" "$logs/junit-results.json" "$logs/TEST-VpnProcessRecovery.xml"
 
 setup_pid=
+experiment_started=false
+run_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+read_app_pids() { avd shell "pidof $app || [ \$? -eq 1 ]" | tr -d '\r'; }
+setup_running() {
+  kill -0 "$setup_pid" 2>/dev/null &&
+    [[ -r "$logs/setup-instrumentation.log" ]] &&
+    ! grep -Eq '^INSTRUMENTATION_(FAILED|ABORTED|CODE):' "$logs/setup-instrumentation.log"
+}
+
 cleanup() {
-  local status=$?
+  local status=$? clean=false processes
   trap - EXIT
+  if $experiment_started; then
+    if avd shell am force-stop "$app" > "$logs/force-stop.log" 2>&1; then
+      for ((attempt=0; attempt<5; attempt++)); do
+        if processes=$(read_app_pids) && [[ -z "$processes" ]] &&
+            avd shell ip -o address show > "$logs/final-addresses.txt" &&
+            ! grep -qF '192.0.2.1/32' "$logs/final-addresses.txt"; then
+          clean=true
+          break
+        fi
+        sleep 1
+      done
+    fi
+    if [[ -n "$setup_pid" ]]; then
+      kill "$setup_pid" 2>/dev/null || true
+      wait "$setup_pid" 2>/dev/null || true
+    fi
+    if ! $clean; then
+      echo 'Не подтверждена очистка VPN и процесса после эксперимента.' >&2
+      if (( status == 0 )); then status=1; fi
+    fi
+  fi
   avd logcat -d -t 3000 -v threadtime VpnRecoveryTest:I AdaptiveTun:I AdaptiveHev:I Vpn:I AndroidRuntime:E '*:S' \
     > "$logs/android.log" 2>&1 || true
-  if [[ -n "$setup_pid" ]]; then
-    avd shell am force-stop "$app" >/dev/null 2>&1 || true
-    kill "$setup_pid" 2>/dev/null || true
-    wait "$setup_pid" 2>/dev/null || true
+  if (( status == 0 )); then
+    if ! printf '{"scenario":"S1-VPN-PROCESS-01","passed":true,"runId":"%s","pid":%s,"sessionId":"%s"}\n' \
+        "$run_id" "$pid" "$session" > "$logs/result.json.tmp" ||
+        ! mv -- "$logs/result.json.tmp" "$logs/result.json"; then
+      status=1
+    fi
   fi
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 avd shell ip -o address show > "$logs/initial-addresses.txt"
 if grep -qF '192.0.2.1/32' "$logs/initial-addresses.txt"; then
@@ -37,32 +72,49 @@ if grep -qF '192.0.2.1/32' "$logs/initial-addresses.txt"; then
   exit 1
 fi
 
-timeout 60s "$adb" -s "$serial" shell am instrument -w -r \
-  -e class "$suite#$setup" -e transportTarget 10.0.2.2 "$runner" > "$logs/setup-instrumentation.log" 2>&1 &
+: > "$logs/setup-instrumentation.log"
+experiment_started=true
+timeout -k 5s 60s "$adb" -s "$serial" shell am instrument -w -r \
+  -e class "$suite#$setup" -e transportTarget 10.0.2.2 -e recoveryRunId "$run_id" \
+  "$runner" > "$logs/setup-instrumentation.log" 2>&1 &
 setup_pid=$!
 ready=''
-for ((attempt=0; attempt<25; attempt++)); do
+ready_deadline=$((SECONDS + 25))
+while (( SECONDS < ready_deadline )); do
+  if ! setup_running; then
+    echo 'Подготовительный тест завершился до SIGKILL.' >&2
+    exit 1
+  fi
   avd logcat -d -v brief VpnRecoveryTest:I '*:S' > "$logs/ready.log"
-  ready=$(sed -nE 's/^.*: READY ([1-9][0-9]*) ([a-f0-9-]{36})\r?$/\1 \2/p' "$logs/ready.log")
-  [[ -z "$ready" ]] || break
-  kill -0 "$setup_pid"
+  if ready=$(python3 "$validator" --ready-run "$run_id" "$logs/ready.log"); then
+    break
+  else
+    status=$?
+    if (( status != 3 )); then exit "$status"; fi
+  fi
   sleep 1
 done
-[[ "$ready" =~ ^([1-9][0-9]*)\ ([a-f0-9-]{36})$ ]]
-pid="${BASH_REMATCH[1]}"
-session="${BASH_REMATCH[2]}"
-[[ $(avd shell pidof "$app" | tr -d '\r') == "$pid" ]]
-avd shell run-as "$app" test -s no_backup/diagnostics/active-vpn
+if [[ -z "$ready" ]]; then
+  echo 'Истёк срок ожидания READY текущего эксперимента.' >&2
+  exit 1
+fi
+read -r pid session <<< "$ready"
+avd shell run-as "$app" cat no_backup/diagnostics/active-vpn > "$logs/active-marker.txt" ||
+  { echo 'Не удалось прочитать активный маркер VPN.' >&2; exit 1; }
+awk -F '\t' -v id="$session" '($1 == 1 || $1 == 2) && $2 == id { matched++ } END { exit matched != 1 }' "$logs/active-marker.txt" ||
+  { echo 'Активный маркер VPN не соответствует сеансу из READY.' >&2; exit 1; }
 avd shell ip -o address show > "$logs/active-addresses.txt"
 grep -qF '192.0.2.1/32' "$logs/active-addresses.txt"
 
 # Сигнал из процесса shell через run-as уничтожает только подтверждённый PID тестируемого debug APK.
+setup_running || { echo 'Подготовительный тест завершился до SIGKILL.' >&2; exit 1; }
+[[ $(read_app_pids) == "$pid" ]] || { echo 'PID из READY не принадлежит текущему процессу приложения.' >&2; exit 1; }
 avd shell run-as "$app" kill -KILL "$pid"
 released=false
 for ((attempt=0; attempt<15; attempt++)); do
   avd shell ip -o address show > "$logs/released-addresses.txt"
-  processes=$(avd shell pidof "$app" | tr -d '\r') || processes=''
-  if [[ "$processes" != "$pid" ]] && ! grep -qF '192.0.2.1/32' "$logs/released-addresses.txt"; then
+  processes=$(read_app_pids)
+  if [[ " $processes " != *" $pid "* ]] && ! grep -qF '192.0.2.1/32' "$logs/released-addresses.txt"; then
     released=true
     break
   fi
@@ -72,9 +124,9 @@ done
 wait "$setup_pid" || true
 setup_pid=
 
-timeout 35s "$adb" -s "$serial" shell am instrument -w -r \
+timeout -k 5s 35s "$adb" -s "$serial" shell am instrument -w -r \
   -e class "$suite#$test" -e recoveredVpnError VpnInterrupted -e recoveredVpnSession "$session" \
-  -e oldVpnPid "$pid" -e transportTarget 10.0.2.2 "$runner" | tr -d '\r' | tee "$logs/recovery-instrumentation.log"
-python3 .github/scripts/verify-extended-transport-results.py --process-recovery \
+  -e oldVpnPid "$pid" -e recoveryRunId "$run_id" -e transportTarget 10.0.2.2 "$runner" \
+  | tr -d '\r' | tee "$logs/recovery-instrumentation.log"
+python3 "$validator" --process-recovery \
   "$logs/recovery-instrumentation.log" "$logs/TEST-VpnProcessRecovery.xml" "$logs/junit-results.json"
-printf '{"scenario":"S1-VPN-PROCESS-01","passed":true,"sessionId":"%s"}\n' "$session" > "$logs/result.json"

@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import uuid
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -27,6 +28,30 @@ SAF_TESTS = {
 
 STATUS_FIELDS = {"id", "numtests", "current", "class", "test"}
 OUTCOMES = {0: None, -1: "error", -2: "failure", -3: "skipped", -4: "skipped"}
+READY = re.compile(r"^I/VpnRecoveryTest\(\s*([1-9][0-9]*)\): READY (.*)$")
+
+
+def canonical_uuid(value):
+    return str(uuid.UUID(value)) == value
+
+
+def read_ready(text, run_id):
+    if not canonical_uuid(run_id):
+        raise ValueError("Некорректный идентификатор эксперимента")
+    records = []
+    for line in text.splitlines():
+        match = READY.fullmatch(line)
+        if not match:
+            continue
+        fields = match[2].split()
+        if not fields or fields[0] != run_id:
+            continue
+        if len(fields) != 3 or fields[1] != match[1] or not canonical_uuid(fields[2]):
+            raise ValueError("Некорректная запись READY текущего эксперимента")
+        records.append((fields[1], fields[2]))
+    if len(records) > 1:
+        raise ValueError("Повтор READY текущего эксперимента")
+    return records[0] if records else None
 
 
 def read_protocol(text, suite=SUITE, tests=TESTS):
@@ -126,10 +151,24 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--process-recovery", action="store_true")
     mode.add_argument("--saf-fixture", action="store_true")
+    mode.add_argument("--ready-run", metavar="RUN_ID")
     parser.add_argument("instrumentation", type=Path)
-    parser.add_argument("junit", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("junit", type=Path, nargs="?")
+    parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
+    if args.ready_run is not None:
+        if args.junit is not None or args.output is not None:
+            parser.error("Для READY укажите только журнал")
+        try:
+            result = read_ready(args.instrumentation.read_text(encoding="utf-8"), args.ready_run)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"Готовность не подтверждена: {error}\n")
+        if result is None:
+            parser.exit(3)
+        print(*result)
+        return
+    if args.junit is None or args.output is None:
+        parser.error("Укажите протокол, JUnit XML и JSON")
     if args.process_recovery:
         suite = "org.adaptivedpi.android.DiagnosticsInstrumentedTest"
         tests = {"anAbortedVpnProcessIsReportedAfterTheNextLaunch"}

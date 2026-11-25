@@ -622,7 +622,10 @@ class DiagnosticsInstrumentedTest {
 
     @Test(timeout = 75_000)
     fun armsVpnForExternalProcessDeath() {
-        val target = checkNotNull(InstrumentationRegistry.getArguments().getString("transportTarget"))
+        val arguments = InstrumentationRegistry.getArguments()
+        val experiment = checkNotNull(arguments.getString("recoveryRunId"))
+        require(UUID.fromString(experiment).toString() == experiment)
+        val target = checkNotNull(arguments.getString("transportTarget"))
         ActivityScenario.launch(TransportTestActivity::class.java).use { scenario ->
             try {
                 scenario.onActivity {
@@ -634,7 +637,7 @@ class DiagnosticsInstrumentedTest {
                 assertFixtureEcho(target)
                 assertTrue(androidVpnExists())
                 await { File(context.noBackupFilesDir, "diagnostics/active-vpn").length() > 0L }
-                Log.i("VpnRecoveryTest", "READY ${android.os.Process.myPid()} $session")
+                Log.i("VpnRecoveryTest", "READY $experiment ${android.os.Process.myPid()} $session")
                 CountDownLatch(1).await(40, TimeUnit.SECONDS)
                 error("Управляющий сценарий не уничтожил процесс")
             } finally {
@@ -660,6 +663,8 @@ class DiagnosticsInstrumentedTest {
             val type = if (code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession
             await { VpnEventHistory.state.value.entries.any { it.id == event.id && it.type == type } }
             if (session != null && target != null) {
+                val experiment = checkNotNull(InstrumentationRegistry.getArguments().getString("recoveryRunId"))
+                require(UUID.fromString(experiment).toString() == experiment)
                 val oldPid = checkNotNull(InstrumentationRegistry.getArguments().getString("oldVpnPid")).toInt()
                 assertTrue(android.os.Process.myPid() != oldPid)
                 ActivityScenario.launch(MainActivity::class.java).use {
