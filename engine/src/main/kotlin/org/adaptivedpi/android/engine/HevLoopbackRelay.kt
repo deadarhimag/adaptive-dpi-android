@@ -624,21 +624,32 @@ class HevLoopbackRelay internal constructor(
         transport.retryUnconfirmedClosures()
     }
 
-    /** Владелец ждёт фактического освобождения на фоновом потоке. */
+    /** Ожидает владельцев ресурсов. Если серия повторов исчерпана, оставляет очистку неподтверждённой. */
     fun awaitDrained() {
         val owner = Thread.currentThread()
         try {
             drainWait = owner to "closeCompleted.await"
             closeCompleted.await()
             retryUnconfirmedClosures()
-            drainWait = owner to "acceptThread.join"
-            acceptThread.join()
-            drainWait = owner to "requests.awaitTermination"
-            requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-            drainWait = owner to "responses.awaitTermination"
-            responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-            drainWait = owner to "idleTimers.awaitTermination"
-            idleTimers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            fun awaitStage(label: String, finished: () -> Boolean, wait: () -> Unit): Boolean {
+                drainWait = owner to label
+                while (!finished()) {
+                    if (closures.hasExhaustedRetries() || transport.hasExhaustedClosures()) return false
+                    wait()
+                }
+                return true
+            }
+            if (!awaitStage("acceptThread.join", { !acceptThread.isAlive }) { acceptThread.join(DRAIN_CHECK_MILLIS) }) return
+            if (!awaitStage("requests.awaitTermination", { requests.isTerminated }) {
+                    requests.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            if (!awaitStage("responses.awaitTermination", { responses.isTerminated }) {
+                    responses.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            if (!awaitStage("idleTimers.awaitTermination", { idleTimers.isTerminated }) {
+                    idleTimers.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            retryUnconfirmedClosures()
         } finally {
             drainWait = null
         }
@@ -684,7 +695,7 @@ class HevLoopbackRelay internal constructor(
         if (acceptThread.isAlive) pending = pending or 1
         if (!requests.isTerminated) pending = pending or 2
         if (!responses.isTerminated) pending = pending or 4
-        if (closeCompleted.count != 0L) pending = pending or 8
+        if (closeCompleted.count != 0L || !socketClosures().confirmed) pending = pending or 8
         if (!idleTimers.isTerminated) pending = pending or 16
         return pending
     }
@@ -737,6 +748,7 @@ class HevLoopbackRelay internal constructor(
     private companion object {
         val relayIds = AtomicInteger()
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
+        private const val DRAIN_CHECK_MILLIS = 200L
         const val TCP_BUFFER = 8 * 1_024
         const val SLOT_WAIT_MILLIS = 5_000L
         // UDP_BUF_SIZE закреплённой версии HEV. lwIP может фрагментировать IPv4 при MTU 1280.

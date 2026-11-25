@@ -45,7 +45,7 @@ class HevLoopbackRelayTest {
                 transport, ip, 1, TransportFailureReporter(),
                 { socket, thread -> listener = socket; thread.start() },
                 closeRelaySocket = { socket ->
-                    if (socket === listener && ++attempts == 1) throw IOException("Первое закрытие не удалось")
+                    if (socket === listener && ++attempts <= 2) throw IOException("Временный отказ закрытия")
                     socket.close()
                 },
             ) { error("Неожиданная остановка релея") }
@@ -64,11 +64,46 @@ class HevLoopbackRelayTest {
                 stop.get(2, TimeUnit.SECONDS)
                 assertTrue(relay.isTerminated)
                 assertTrue(relay.socketClosures().confirmed)
-                assertEquals(2, attempts)
+                assertEquals(3, attempts)
             } finally {
                 listener.close()
                 executor.shutdownNow()
                 relay.close()
+            }
+        }
+    }
+
+    @Test
+    fun drainReportsPermanentListenerFailureWithoutWaitingForAnImpossibleJoin() {
+        lateinit var listener: ServerSocket
+        val executor = Executors.newSingleThreadExecutor()
+        var attempts = 0
+        OutboundTransport().use { transport ->
+            val relay = HevLoopbackRelay(
+                transport, ip, 1, TransportFailureReporter(),
+                { socket, thread -> listener = socket; thread.start() },
+                closeRelaySocket = { socket ->
+                    if (socket === listener) {
+                        attempts++
+                        throw IOException("Постоянный отказ закрытия")
+                    }
+                    socket.close()
+                },
+            ) { error("Неожиданная остановка релея") }
+            try {
+                executor.submit { relay.close(); relay.awaitDrained() }.get(2, TimeUnit.SECONDS)
+                assertEquals(3, attempts)
+                assertFalse(relay.isTerminated)
+                assertFalse(relay.socketClosures().confirmed)
+                assertTrue(relay.shutdownStatus().pendingMask and 8 != 0)
+                listener.close()
+                relay.awaitDrained()
+                assertTrue(relay.isTerminated)
+                assertEquals(3, attempts)
+            } finally {
+                listener.close()
+                relay.close()
+                executor.shutdownNow()
             }
         }
     }

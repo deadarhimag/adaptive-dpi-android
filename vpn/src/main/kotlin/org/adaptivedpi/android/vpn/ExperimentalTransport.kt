@@ -177,6 +177,7 @@ internal class ExperimentalTransport(
     fun awaitRelayRelease() {
         relay.awaitDrained()
         // Агрегаты полны только после завершения всех соединений релея.
+        if (!relay.isTerminated) return
         runCatching { diagnostics.recordFlowSummary(flowRecorder.snapshot().text(sessionLimit)) }
             .onFailure { failures.recordError(NATIVE_RUN, it, fallback = TransportCategory.INTERNAL) }
     }

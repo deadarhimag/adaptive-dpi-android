@@ -112,6 +112,8 @@ class OutboundTransport(
     fun socketClosures(): SocketCloseSummary = closures.snapshot()
 
     /** Повтор закрытия сокетов, освобождение которых не подтвердилось; ошибки - в журнал транспорта. */
+    internal fun hasExhaustedClosures() = closures.hasExhaustedRetries()
+
     fun retryUnconfirmedClosures() = closures.retryUnconfirmed { error ->
         failures.recordError(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE), error, fallback = TransportCategory.CLEANUP)
     }

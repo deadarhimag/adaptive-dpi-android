@@ -5,6 +5,7 @@ import java.net.DatagramSocket
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -37,7 +38,8 @@ internal class SocketClosures {
     @Volatile private var draining = false
 
     private class Pending(val operation: () -> Unit, val isClosed: () -> Boolean) {
-        val retried = AtomicBoolean()
+        val retryStarted = AtomicBoolean()
+        @Volatile var exhausted = false
     }
 
     fun close(socket: Closeable, operation: (Closeable) -> Unit = Closeable::close, onError: (Exception) -> Unit) {
@@ -81,22 +83,45 @@ internal class SocketClosures {
         if (draining) retry(pending, onError)
     }
 
-    /** Один повтор на сокет. Закрытия, начавшиеся после снимка очереди, обработает retain. */
+    /** Ограниченная серия повторов. Закрытия после снимка очереди обработает retain. */
     fun retryUnconfirmed(onError: (Exception) -> Unit) {
         draining = true
         unconfirmed.toList().forEach { retry(it, onError) }
     }
 
     private fun retry(pending: Pending, onError: (Exception) -> Unit) {
-        if (!pending.isClosed() && pending.retried.compareAndSet(false, true)) {
+        if (!pending.isClosed() && pending.retryStarted.compareAndSet(false, true)) {
+            var interrupted = false
             try {
-                pending.operation()
-            } catch (error: Exception) {
-                onError(error)
+                for (attempt in 0 until RETRY_ATTEMPTS) {
+                    if (attempt > 0 && !pending.isClosed()) {
+                        try {
+                            TimeUnit.MILLISECONDS.sleep(RETRY_DELAY_MILLIS)
+                        } catch (_: InterruptedException) {
+                            interrupted = true
+                        }
+                    }
+                    if (pending.isClosed()) break
+                    try {
+                        pending.operation()
+                    } catch (error: Exception) {
+                        onError(error)
+                    }
+                }
+            } finally {
+                pending.exhausted = !pending.isClosed()
+                if (interrupted) Thread.currentThread().interrupt()
             }
         }
         if (pending.isClosed()) unconfirmed.remove(pending)
     }
 
+    fun hasExhaustedRetries() = unconfirmed.any { it.exhausted && !it.isClosed() }
+
     fun snapshot() = SocketCloseSummary(closed.get(), alreadyClosed.get(), failed.get(), unknown.get(), unconfirmed.size.toLong())
+
+    private companion object {
+        const val RETRY_ATTEMPTS = 2
+        const val RETRY_DELAY_MILLIS = 50L
+    }
 }
