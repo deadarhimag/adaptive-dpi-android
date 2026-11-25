@@ -134,7 +134,9 @@ Always-on VPN и автозапуск (`SUPPORTS_ALWAYS_ON = true`, измене
 
 Совместимость со старым журналом проверяется тестом, а не только сборкой: `recordWrittenBeforeCodeCleanupWithRetainedValuesIsStillReadable` (`DiagnosticCenterTest`) читает строку журнала прежнего формата с `EngineHung`, `EngineMonitor` и `EngineTunnel`.
 
-#### 1.3 Проба ресурса различает причины
+#### 1.3 Проба ресурса различает причины - реализовано, ожидает CI
+
+**Состояние (25.11.2026).** Шаги 1-11 и JVM-тесты написаны (`ResourceProbe`, `ProbeNetwork`, `ProbeAddress`, `SystemDns`; `PROBE_UNAVAILABLE` и `NOT_RUN_DEADLINE` добавлены к списку статусов шага 1: отказ `protect` и пропущенные попытки). Не сделано: инструментальный тест с положительным контролем в TUN (счётчики HEV): `ResourceProbe` помечен `internal` в `:vpn`, из `app/src/androidTest` он не виден - нужен либо тестовый вход в `:vpn` (как `TransportTestHooks`), либо отдельное решение пользователя о видимости. Статус `TLS_ALERT` определяется по тексту сообщения TLS-библиотеки (у JSSE и Conscrypt нет типизированного признака alert); текст в результат не попадает. Задача закрывается после зелёного CI и этого теста.
 
 **Цель.** `ResourceProbe` - инструмент П3 ([ENGINE.md](ENGINE.md), раздел 15) и основа исполнителя проб 2.2. Сейчас он сводит разные причины к общим статусам (`TLS_ERROR`, `NETWORK_ERROR`, `TIMEOUT`), резолвит через `InetAddress.getAllByName` (без привязки к сети и без отмены) и не знает RTT. Движку нужен ответ, отличающий вмешательство на пути от отказа сервера.
 

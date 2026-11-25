@@ -57,6 +57,20 @@ internal class VpnOutboundSocketPolicy(
         }
     }
 
+    /** Тайм-аут чтения TCP на уровне ядра (`SO_RCVTIMEO`): `close()` из другого потока будит чтение. */
+    fun configureTcpReadTimeout(socket: Socket, timeoutMillis: Int) {
+        ParcelFileDescriptor.fromSocket(socket).use { descriptor ->
+            try {
+                Os.setsockoptTimeval(
+                    descriptor.fileDescriptor, OsConstants.SOL_SOCKET, OsConstants.SO_RCVTIMEO,
+                    StructTimeval.fromMillis(timeoutMillis.toLong()),
+                )
+            } catch (error: ErrnoException) {
+                throw IOException("Не удалось настроить тайм-аут TCP.", error)
+            }
+        }
+    }
+
     private fun rejectProtection(protocol: String): Nothing {
         Log.w("AdaptiveTun", "protect отклонён: $protocol")
         throw TransportSocketException(TransportCode.PROTECT_REJECTED, TransportCategory.PROTECTION, TransportOperation.PROTECT)
