@@ -428,6 +428,7 @@ class AdaptiveVpnService : VpnService() {
                 transportDiagnostics?.reporter()?.record(TransportFailure(LIFECYCLE_STOP,
                     TransportCategory.CANCELLED, TransportCode.VPN_PERMISSION_REVOKED))
                 finishSession(VpnEvent.SystemConsentRevoked)
+                VpnRevokedNotice.show(this)
             }
         }
     }
@@ -666,6 +667,7 @@ class AdaptiveVpnService : VpnService() {
 
     private fun showForegroundNotification(id: String?, experiment: Boolean) {
         val manager = checkNotNull(getSystemService(NotificationManager::class.java))
+        VpnRevokedNotice.cancel(this)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.vpn_channel_name), NotificationManager.IMPORTANCE_LOW),
         )

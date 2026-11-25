@@ -1,5 +1,6 @@
 package org.adaptivedpi.android.vpn.diagnostics
 
+import android.app.ApplicationExitInfo
 import org.adaptivedpi.android.vpn.VpnState
 import org.adaptivedpi.android.engine.RelayShutdownStatus
 import org.adaptivedpi.android.engine.SocketCloseSummary
@@ -345,6 +346,75 @@ class DiagnosticCenterTest {
         now += 61_000
         second.record(DiagnosticCode.EngineHung, running)
         assertEquals(2, notifications)
+    }
+
+    @Test
+    fun processExitsWithTheSameTimeAreAllRecordedAndRereadingAddsNothing() {
+        val now = 1_000_000_000L
+        val journal = DiagnosticJournal(temporary.root, clock = { now })
+        val records = listOf(
+            ProcessExitRecord(11, now - 5_000, ApplicationExitInfo.REASON_CRASH_NATIVE, "app"),
+            ProcessExitRecord(12, now - 5_000, ApplicationExitInfo.REASON_CRASH_NATIVE, "app"),
+            ProcessExitRecord(11, now - 5_000, ApplicationExitInfo.REASON_ANR, "app"),
+        )
+        var notifications = 0
+        val first = center(journal) { notifications++; true }
+        first.recordProcessExits(records)
+        first.recordProcessExits(records)
+
+        assertEquals(3, first.events.value.size)
+        assertEquals(setOf(now - 5_000), first.events.value.map { it.timeMillis }.toSet())
+        assertEquals(3, journal.read().size)
+        val restarted = center(DiagnosticJournal(temporary.root, clock = { now }))
+        restarted.recordProcessExits(records)
+        assertEquals(3, restarted.events.value.size)
+        assertEquals(0, notifications)
+    }
+
+    @Test
+    fun onlyReasonsTheCrashHandlerMissesAreRecordedAndOldRecordsAreSkipped() {
+        val now = 10L * 24 * 60 * 60 * 1_000
+        val week = 7L * 24 * 60 * 60 * 1_000
+        val journal = DiagnosticJournal(temporary.root, clock = { now })
+        val center = center(journal)
+        val wanted = mapOf(
+            ApplicationExitInfo.REASON_CRASH_NATIVE to DiagnosticCode.ProcessExitNative,
+            ApplicationExitInfo.REASON_ANR to DiagnosticCode.ProcessExitAnr,
+            ApplicationExitInfo.REASON_LOW_MEMORY to DiagnosticCode.ProcessExitLowMemory,
+            ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE to DiagnosticCode.ProcessExitResources,
+            ApplicationExitInfo.REASON_SIGNALED to DiagnosticCode.ProcessExitSignaled,
+        )
+        val ignored = listOf(
+            ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_EXIT_SELF,
+            ApplicationExitInfo.REASON_USER_REQUESTED, ApplicationExitInfo.REASON_UNKNOWN,
+        )
+        val records = (wanted.keys + ignored).mapIndexed { index, reason ->
+            ProcessExitRecord(100 + index, now - 1_000L - index, reason, "app")
+        } + ProcessExitRecord(1, now - week - 1, ApplicationExitInfo.REASON_ANR, "app")
+        center.recordProcessExits(records)
+
+        assertEquals(wanted.values.toSet(), center.events.value.map { it.code }.toSet())
+        assertEquals(wanted.size, center.events.value.size)
+        assertTrue(center.events.value.none { it.requiresNotification || it.vpnStopped })
+    }
+
+    @Test
+    fun processExitIsRecordedOnceEvenWhenTheFirstWriteFailed() {
+        val now = 1_000_000_000L
+        val journal = DiagnosticJournal(temporary.root, clock = { now })
+        val record = ProcessExitRecord(7, now - 100, ApplicationExitInfo.REASON_LOW_MEMORY, "app")
+        val blocker = File(temporary.root, "journal.tmp")
+        assertTrue(blocker.mkdir())
+        center(journal).recordProcessExits(listOf(record))
+        assertTrue(journal.read().isEmpty())
+
+        // Неудачная запись сама убирает пустой каталог-помеху (finally в writeDiagnosticFile): дальше путь свободен.
+        blocker.delete()
+        assertFalse(blocker.exists())
+        val retry = center(DiagnosticJournal(temporary.root, clock = { now }))
+        retry.recordProcessExits(listOf(record))
+        center(DiagnosticJournal(temporary.root, clock = { now })).recordProcessExits(listOf(record))
+        assertEquals(listOf(ExitReasonReader.idOf(record)), journal.read().map { it.id })
     }
 
     private fun center(journal: DiagnosticJournal, notify: (DiagnosticEvent) -> Boolean = { false }) =

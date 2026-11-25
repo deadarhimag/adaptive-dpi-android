@@ -140,6 +140,19 @@ internal fun AdaptiveDpiApp(
         ) {
             when (screen) {
                 Screen.Home -> ScreenContent(R.string.app_name) {
+                    crashBannerEvent(diagnosticEvents)?.let { notice ->
+                        CrashBanner(
+                            event = notice,
+                            canStartVpn = vpnState.canStart && !resourcesBlocked,
+                            onStartVpn = onStartVpn,
+                            onSave = onSaveDiagnostic,
+                            onShare = onShareDiagnostic,
+                            onClose = {
+                                diagnosticEvents.filter { it.isCrashNotice && !it.acknowledged }
+                                    .forEach { onDiagnosticAcknowledge(it.id) }
+                            },
+                        )
+                    }
                     HomeScreen(
                         vpnState = vpnState,
                         resourcesBlocked = resourcesBlocked,
@@ -197,7 +210,7 @@ internal fun AdaptiveDpiApp(
         }
     }
     val event = diagnosticEvents.firstOrNull { it.id.toString() == selectedEventId }
-        ?: diagnosticEvents.firstOrNull { !it.acknowledged && it.code != DiagnosticCode.VpnCleanupDelayed }
+        ?: diagnosticEvents.firstOrNull { !it.acknowledged && it.code != DiagnosticCode.VpnCleanupDelayed && !it.isCrashNotice }
     if (event != null) {
         DiagnosticErrorDialog(
             event = event,
