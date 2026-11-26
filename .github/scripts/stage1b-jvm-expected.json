@@ -1,0 +1,241 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "7f54b456687b0b642eb91347cb6609176b87cf95",
+  "modules": {
+    "engine": {
+      "org.adaptivedpi.android.engine.ClientHelloInspectorTest": [
+        "echIsReportedSeparatelyFromTheVisibleNameAndIdentification",
+        "nameRangesAndOffsetsPointAtTheNameBytesEvenWhenARecordBoundaryCutsIt",
+        "parsingTimeGrowsLinearlyWithTheInputSize",
+        "randomAndMutatedPrefixesNeverThrowAndStayWithinTheBuffer",
+        "readsRealHelloAcrossInputAndRecordBoundaries",
+        "rejectsInvalidLengthsAndKeepsNoNameWithoutExtensions",
+        "sameHelloThroughRecordsAndThroughAssembledMessageGivesTheSameFeatures"
+      ],
+      "org.adaptivedpi.android.engine.FlowTelemetryTest": [
+        "abandonmentRequiresAnObservedDisconnectAtOrAfterTheResponse",
+        "anIncompleteTlsPrefixKeepsTheExistingCaptureBehavior",
+        "captureRetainsTheFirstReadAndSurvivesFailureOfReporting",
+        "classifierFailureIsReportedButTheConnectionKeepsWorking",
+        "clientResetIsNotCountedAsAKeyFailure",
+        "failureBeforeConfirmedWriteNeverProducesANegativeInterval",
+        "helloSentInThreePiecesIsClassifiedOnceAndReachesTheServerUnchanged",
+        "httpClassificationRequiresACompleteMethodInTheFirstRead",
+        "internalRefusalsAreCountedSeparatelyFromKeyFailures",
+        "nonTlsStreamIsForwardedWithoutWaitingForTheCaptureDeadline",
+        "portionsSlowerThanTheDeadlineStopTheCaptureAndKeepByteOrder",
+        "recorderCountsKindsStagesHelloSizesAndRatesWithoutNames",
+        "recorderSeparatesUdp443AndCountsUnansweredAssociationsAndPeak",
+        "serverResetIsAKeyFailureWithoutResponse",
+        "stopDuringCaptureReleasesTheConnection",
+        "thousandRandomFlowsPassThroughTheRelayByteForByte"
+      ],
+      "org.adaptivedpi.android.engine.HevLoopbackRelayTest": [
+        "activeDownloadSurvivesSixtySecondsOfSilenceInRequestDirection",
+        "activeUploadOutlivesBothReadTimeoutsThenIdleClosesBothSockets",
+        "applicationRelayRejectsLoopbackMulticastAndIpv6BeforeOpeningSockets",
+        "auditConcurrentStopsDrainEightUdpAssociationsWaitingForReplies",
+        "auditMixedLoopbackTrafficTransfersOneThousandTcpAndUdpAndFiveHundredDnsExchanges",
+        "clientScopeAttemptsAllClosesAndPreservesOriginalFailure",
+        "clientScopeClosesConnectedSocketWhenConfigurationFails",
+        "clientScopeClosesSocketsWhenAnyConnectionFails",
+        "clientScopeClosesSocketsWhenRegistrationOrAssertionFails",
+        "closingTheRelayAlsoSignalsWorkersThatAreWaitingOutsideSocketIo",
+        "drainReportsPermanentListenerFailureWithoutWaitingForAnImpossibleJoin",
+        "drainRetriesListenerCloseBeforeJoiningAcceptThread",
+        "failedStartOfAcceptThreadClosesTheListener",
+        "hevUdpFramesGoThroughRealDatagramSocketWithoutChangingContents",
+        "incomingUdpKeepsAssociationThenStopRecordsBothDirectionsOnce",
+        "mixedTcpAndUdpChurnKeepsBothDirectionsAndReleasesWorkersOnEveryStop",
+        "observationsShowUnfinishedPoolAndLaterReleaseWithoutFalseCleanupError",
+        "oversizedFrameIsRejectedBeforeOpeningADatagramSocket",
+        "oversizedOutboundUdpFrameIsDroppedAndSameAssociationStillExchangesData",
+        "oversizedUdpReplyIsDroppedAndFollowingLargeValidReplyKeepsAssociation",
+        "peerCountDropsAfterConfirmedCloseEvenWhenCloseThrowsAfterward",
+        "peerCountDropsOnceWhenRetryClosesSocketDuringConcurrentStop",
+        "peerCountKeepsExhaustedSocketUntilClosureIsConfirmed",
+        "saturatedRelayAuthenticatesQueuedConnectionAndWaitsForSlotBeforeCommand",
+        "silentClientsDoNotBlockAuthenticationOfLegitimateClient",
+        "stopClosesActiveTcpAndUdpAndDrainsBothPools",
+        "tcpHandshakeTransfersPayloadAndClosesBothDirections",
+        "truncatedOversizedUdpFrameIsAProtocolError",
+        "udpKeepsForwardingOneWayTrafficBeyondReceiveTimeout",
+        "unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes",
+        "wrongCredentialAndOtherDestinationNeverOpenOutboundSockets"
+      ],
+      "org.adaptivedpi.android.engine.OutboundTransportTest": [
+        "backgroundStopClosesPendingTcpWithoutClosingActiveConnections",
+        "closingTransportReportsCancelledDatagramReceiveOnce",
+        "inProgressConnectionsConsumeTheSharedBudgetAndAreInvalidatedOnNetworkChange",
+        "networkLossClosesBlockedReadAndRestoredNetworkCanOpenNewFlows",
+        "pendingTcpPreparationCannotConnectAfterStopEvenBeforeBackgroundCleanup",
+        "pendingUdpPreparationStaysUnconnectedWhenStopIsAcceptedDuringPreparation",
+        "policyRejectionClosesTcpAndUdpWithoutContactingThePeer",
+        "stopIsIdempotentAndANewSessionCanSendAgain",
+        "stopRejectsNewConnectionsBeforeClosingExistingSockets",
+        "tcpCarriesBytesInBothDirectionsAfterPolicyAndPreservesHalfClose",
+        "udpForwardsDnsWireBytesToLocalFixtureAndCountsDatagrams",
+        "udpRejectsExcessAndTruncationAndCanContinueAfterTheError"
+      ],
+      "org.adaptivedpi.android.engine.RelayHandshakeInputTest": [
+        "successfulReadDoesNotResetDeadline"
+      ],
+      "org.adaptivedpi.android.engine.SocketClosuresTest": [
+        "aLateSocketHasTheSameBoundedRetryBudget",
+        "confirmedAndRepeatedCloseAllowRestart",
+        "confirmedRetryReleasesTheBlockButKeepsTheFirstFailureAsWarning",
+        "failedAndUnverifiedCloseRemainVisibleInResult",
+        "retryClosesARealSocketThatWasNotClosed"
+      ],
+      "org.adaptivedpi.android.engine.TransportFailureReporterTest": [
+        "badDescriptorAndNativeCancellationRequireEvidenceOfClose",
+        "classifiesTypedCausesAndLinuxErrnoWithoutReadingMessages",
+        "kernelReadTimeoutKeepsItsCategoryWithEagainCause",
+        "notConnectedDuringHalfCloseIsExpectedOnlyAfterPeerEofOrExplicitClose"
+      ]
+    },
+    "vpn": {
+      "org.adaptivedpi.android.vpn.NativeTransportObserverTest": [
+        "expectedOutcomesDoNotCountAsProblemsButALaterSetupFailureDoes",
+        "nativeAggregatesAndDiscardedRecordsKeepExactTotals"
+      ],
+      "org.adaptivedpi.android.vpn.TransportPollTest": [
+        "fastPollCancelsWarning",
+        "warnsOnOwnerContextWhileIoIsBlockedThenReturnsActualResult"
+      ],
+      "org.adaptivedpi.android.vpn.VpnAvailabilityTest": [
+        "aKnownRestrictionTakesPriorityOverAnObservedVpn",
+        "missingNetworkInformationDoesNotProveAnotherVpnOrARestriction",
+        "ownSessionOrItsTeardownNeverLooksLikeAnotherVpn"
+      ],
+      "org.adaptivedpi.android.vpn.VpnLifecycleAuditTest": [
+        "delayRetainsOwnerUntilActualCompletionAndRejectsStaleCallbacks",
+        "oneHundredCyclesIsolateLateCommandsAcrossStopRevokeAndFailures",
+        "serviceDestructionCannotClearUnknownResourceOwnership"
+      ],
+      "org.adaptivedpi.android.vpn.VpnLifecycleJournalTest": [
+        "distinguishesFailuresAndDoesNotInventSystemRevocationOrTunCreation",
+        "logsConsentThenActualStartAndOnlyTheFirstStopSource",
+        "logsSystemRevocationOnceAndKeepsTheSuccessorSeparate",
+        "restorationRecordsUiAndLeavesVpnStateAlone"
+      ],
+      "org.adaptivedpi.android.vpn.VpnLifecycleTest": [
+        "abandoningConsentIgnoresItsLateResult",
+        "acceptsOnlyMatchingConsentAndServiceCommands",
+        "declinedSwitchCannotAttachAServiceAndRetryUsesASeparateSession",
+        "freshProcessRejectsQueuedServiceStartButCanRecoverDeliveredConsent",
+        "manualStopCanCompleteAnAlreadyStartedCriticalShutdownOnlyOnce",
+        "permissionRevocationEndsOnlyTheCurrentSession",
+        "repeatedStopRequestsInvokeCleanupOnceAndKeepTheTokenUntilServiceEnds",
+        "runningTestSessionRejectsTransportStartUntilItStops",
+        "runningTunDoesNotConfirmEngineAndAConfirmedEngineCanBeStopped",
+        "serviceFailureWhileStoppingLeavesIdleAndAllowsRetry",
+        "staleStopAndCleanupLeaveNewSessionIntact",
+        "stopBeforeServiceAttachmentDoesNotRestoreRunningState"
+      ],
+      "org.adaptivedpi.android.vpn.VpnShutdownTest": [
+        "blockedTransportPollDoesNotDelayStopSignalOrReleaseOwnershipEarly",
+        "blockedWorkerDoesNotHoldCommandOrDeadlineAndIsReleasedOnlyOnce",
+        "completionCancelsDeadlineObserver",
+        "criticalStopMakesManualRestartAvailableAfterTheOldServiceEnds",
+        "idleRequiresBothResourceAndServiceConfirmationAt100ms3sAnd6s",
+        "oneFailedReleaseDoesNotPreventOtherCleanupStepsOrReporting",
+        "restartRequiresConfirmationForEachCriticalCleanupStep",
+        "sharedBridgeLockModelDelaysStopSignalUntilPollUnlocksWithoutReleasingOwnershipEarly"
+      ],
+      "org.adaptivedpi.android.vpn.VpnStateTest": [
+        "alreadyGrantedConsentStartsDirectly",
+        "canRetryAfterConsentDenial",
+        "preservesStartErrorAndAllowsRetry",
+        "rejectsDuplicateStarts",
+        "revokeDuringStartOrRunSurvivesServiceDestruction",
+        "startsAfterGrantAndStops",
+        "tracksUnexpectedStopWithoutRevocation"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.CombinedDiagnosticReportTest": [
+        "aCrashDoesNotInheritTheMarkerOfAnUnrelatedSession",
+        "buildIdentityDistinguishesApksWithTheSameVersionName",
+        "errorRecoveryProvidesTheOldSessionOnce",
+        "explainsMissingEntriesAndHistoryReadFailure",
+        "includesAggregatesAndDistinguishesEngineReadinessFromBidirectionalTraffic",
+        "includesMetadataAndBothJournalsWithRedactedErrorDetails"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.DiagnosticAuditTest": [
+        "criticalHistorySurvivesOrdinaryFloodAndTracksLossOfCriticalOverflow",
+        "lateFailureRefreshesPersistedSummaryAfterFirstFlush"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.DiagnosticCenterTest": [
+        "aClockJumpCannotDiscardAProcessExitOrReimportItAfterExpiry",
+        "aLateCriticalWriteCannotClearTheMarkerOfANewerSession",
+        "aPersistedCriticalReasonReplacesTheInterruptedSessionMarker",
+        "abandonedProcessLeavesMarkerButAnOrdinaryStopDoesNot",
+        "anEventRemainsUnreadWhenNotificationsAreDeniedAndIsPostedOnlyOnceAfterPermission",
+        "clockJumpForwardAcrossProcessRestartKeepsCrashAndJournal",
+        "clockMovedBackwardsKeepsRecentRecordsAndCrashSlot",
+        "corruptedSlotsStayCountedAcrossRecoveryAndReplacement",
+        "crashIsRecoveredOnceAndMatchedWithTheActiveSessionMarker",
+        "expiredRecordsAndCrashSlotAreDeletedFromTheDisk",
+        "journalReadsBothEventVersionsAlongsideExitIdsAndHonorsItsQuota",
+        "persistenceAndNotificationFailuresDoNotCrashTheRecorder",
+        "processExitIsRecordedOnceEvenWhenTheFirstWriteFailed",
+        "processExitsFilterByReasonButAcceptOldReportedTimestamps",
+        "processExitsWithTheSameTimeAreAllRecordedAndRereadingAddsNothing",
+        "recordWrittenBeforeCodeCleanupWithRetainedValuesIsStillReadable",
+        "recoveringActiveMarkerDoesNotDiscardAnUnreadCrashSlot",
+        "recoveryWriteFailurePreservesCrashSlotUntilItCanBeRecovered",
+        "repeatedFaultsKeepJournalEntriesButShareAnAlertCooldown",
+        "reportAndJournalExcludeExceptionMessagesFileNamesAndUntrustedFrames",
+        "rotatesByByteSizeAndKeepsTheLatestEntry",
+        "rotatesByCountAndPreservesTheMostRecentItems",
+        "socketCloseWarningDoesNotBlockWhenTheRetryConfirmedRelease",
+        "theDeadlineAndFinalRelayStateAreIndependentAndSurviveJournalReload",
+        "unreadableErrorsRemainRecordedAfterRewriteAndRestart",
+        "unreadableHistoryIsRetriedAndMergedBeforeNewEventsReplaceIt",
+        "writesAndReadsAnEventWithItsMetadataAndAcknowledgement"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.ResourceProbeTest": [
+        "cancellationClosesSocketWhileResponseIsPendingAndReturnsQuickly",
+        "cancellationDuringDnsReturnsControlWithoutWaitingForTheResolver",
+        "distinguishesCorrectContentFromMismatchAndServerRefusals",
+        "followsSameOriginRedirect",
+        "foreignRedirectIsReportedWithOnlyTheTargetHost",
+        "localCleartextPolicyIsNotReportedAsAServerRestriction",
+        "mismatchedContentOnFirstAddressDoesNotHideAWorkingAddress",
+        "onlyAddressModeSkipsDnsAndDoesNotFollowRedirects",
+        "overallDeadlineEndingOnTheSecondAddressDoesNotStartTheThird",
+        "probeAddressPolicyRejectsPrivateAndServiceRanges",
+        "reportsDnsFailureAndUsesAnIndependentHeaderDeadline",
+        "secondAddressGivesTheContentAfterTheFirstRejectsTls",
+        "serverAlertResetAndSilenceAfterClientHelloGetTheirOwnStatuses",
+        "specialAddressIsRejectedBeforeAnySocketIsOpenedIncludingAfterARedirect",
+        "tcpFailuresKeepResetTimeoutAndUnreachableApart",
+        "unavailableResolverIsNotADnsObservation",
+        "untrustedOrMismatchedCertificatesAreReportedSeparatelyFromTlsFailures",
+        "usesOverallDeadlineWhenStageBudgetIsLonger"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.TransportJournalTest": [
+        "flowSummaryIsSavedWithTheSessionSummaryAndOversizedTextIsCutAtACharacterBoundary",
+        "fullPendingWindowDropsDistinctRecordsButStillMergesAndCountsEveryOperation",
+        "slowExportDoesNotBlockProducersOrSessionStopAndContainsConsistentRecordsWithoutSecrets",
+        "tenThousandIdenticalFailuresRemainOneRecordAndFullCounters"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.TransportLogStoreTest": [
+        "malformedOversizedAndIncompleteLinesAreIgnoredAndNewEventsSurvive",
+        "rotationRetainsNewestRecordsWithinFiveMebibytesAndRamBudget"
+      ],
+      "org.adaptivedpi.android.vpn.diagnostics.VpnEventHistoryTest": [
+        "aStaleActiveMarkerDoesNotReportAnAlreadyStoppedSessionAsInterrupted",
+        "clearIsPersistedAndDoesNotDeleteSubsequentEventsOrErrorLog",
+        "confirmedCrashSupersedesRecoveredInterruptionWithTheSameId",
+        "criticalEventSurvivesOrdinaryRotationDuringDiskFailureAndIsSavedOnRecovery",
+        "failedDiskWritesKeepLiveEventsAndDoNotStopFutureWrites",
+        "failedReadIsReportedAndDamagedLinesDoNotHideValidRows",
+        "partiallyDamagedHistoryKeepsValidEventsAndReportsTheLoss",
+        "preservesClockOffsetSessionAndInsertionOrderAcrossProcesses",
+        "retriesInitialReadBeforeReplacingOlderHistory",
+        "rotatesByEntryCountAndByEncodedFileSize",
+        "usesTheActiveSessionWhenAnOlderStartAppearsAfterTheNextRequest"
+      ]
+    }
+  }
+}
