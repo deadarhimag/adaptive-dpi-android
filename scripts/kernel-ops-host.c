@@ -1,7 +1,7 @@
 /*
  * Задача 1.6, шаг 5: те же функции adaptive_ops.c на Linux-хосте, сценарии на loopback-паре.
  * Запускается из scripts/kernel-ops-pcap.py, который параллельно захватывает пакеты на lo.
- * Каждая строка вывода: "<сценарий> <порт клиента> <ключ=значение>...".
+ * Пары портов и полезная нагрузка задаются seed текущего эксперимента.
  */
 #define ADAPTIVE_OPS_HOST
 #include "../vpn/src/main/hev/adaptive_ops.c"
@@ -9,10 +9,13 @@
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <time.h>
 
 static const unsigned char loopback[4] = { 127, 0, 0, 1 };
+static uint64_t seed;
+static int next_port;
 
 static void fail(const char *what)
 {
@@ -20,16 +23,13 @@ static void fail(const char *what)
     exit(2);
 }
 
-static int listener(int *port)
+static void bind_loopback(int fd, int port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in address = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    socklen_t length = sizeof(address);
-    if (fd < 0 || bind(fd, (struct sockaddr *) &address, sizeof(address)) || listen(fd, 1)
-        || getsockname(fd, (struct sockaddr *) &address, &length))
-        fail("listener");
-    *port = ntohs(address.sin_port);
-    return fd;
+    struct sockaddr_in address = {
+        .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)
+    };
+    if (bind(fd, (struct sockaddr *) &address, sizeof(address)))
+        fail("bind");
 }
 
 static int client_socket(void)
@@ -40,21 +40,18 @@ static int client_socket(void)
     return fd;
 }
 
-/* connect клиента и accept сервера; возвращает порт клиента. */
-static int connect_pair(int client, int server_listener, int server_port, int *server)
+static int connect_pair(int client, int server_listener, int server_port)
 {
     struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(server_port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     if (connect(client, (struct sockaddr *) &address, sizeof(address)))
         fail("connect");
-    *server = accept(server_listener, NULL, NULL);
-    if (*server < 0)
+    int server = accept(server_listener, NULL, NULL);
+    if (server < 0)
         fail("accept");
     struct timeval timeout = { .tv_sec = 3 };
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(*server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    socklen_t length = sizeof(address);
-    getsockname(client, (struct sockaddr *) &address, &length);
-    return ntohs(address.sin_port);
+    setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    return server;
 }
 
 static void read_exact(int fd, size_t size)
@@ -70,13 +67,16 @@ static void read_exact(int fd, size_t size)
 
 static void write_all(int fd, size_t size, char value)
 {
-    char buffer[4096];
-    memset(buffer, value, sizeof(buffer));
-    while (size > 0) {
-        ssize_t count = send(fd, buffer, size < sizeof(buffer) ? size : sizeof(buffer), 0);
+    unsigned char buffer[4096];
+    size_t offset = 0;
+    while (offset < size) {
+        size_t chunk = size - offset < sizeof(buffer) ? size - offset : sizeof(buffer);
+        for (size_t i = 0; i < chunk; i++)
+            buffer[i] = (unsigned char) (value ^ (seed >> (8 * ((offset + i) % 8))));
+        ssize_t count = send(fd, buffer, chunk, 0);
         if (count <= 0)
             fail("send");
-        size -= (size_t) count;
+        offset += (size_t) count;
     }
 }
 
@@ -90,19 +90,32 @@ static long elapsed_micros(const struct timespec *start)
 /* Общий каркас: before - до connect, остальное - сценарий на паре (запятые в нём допустимы). */
 #define PAIR(before, ...)                                                        \
     do {                                                                         \
-        int port, server;                                                        \
-        int listen_fd = listener(&port);                                         \
+        int port = next_port++;                                                  \
+        int client_port = next_port++;                                           \
+        int listen_fd = client_socket();                                         \
         int client = client_socket();                                            \
+        bind_loopback(listen_fd, port);                                           \
+        bind_loopback(client, client_port);                                      \
+        if (listen(listen_fd, 1))                                                 \
+            fail("listen");                                                      \
         before;                                                                  \
-        int client_port = connect_pair(client, listen_fd, port, &server);        \
+        int server = connect_pair(client, listen_fd, port);                       \
         __VA_ARGS__;                                                             \
         close(client);                                                           \
         close(server);                                                           \
         close(listen_fd);                                                        \
     } while (0)
 
-int main(void)
+int main(int argc, char **argv)
 {
+    char *end;
+    if (argc != 2 || argv[1][0] == '\0')
+        return 2;
+    errno = 0;
+    seed = strtoumax(argv[1], &end, 16);
+    if (errno || *end)
+        return 2;
+    next_port = 40000 + (int) (seed % 1000) * 20;
     int one = 1;
 
     PAIR((void) 0, {
@@ -172,6 +185,9 @@ int main(void)
         char urgent = 'U';
         ssize_t sent = send(client, &urgent, 1, MSG_OOB);
         read_exact(server, 10);
+        char received = 0;
+        if (sent != 1 || recv(server, &received, 1, MSG_OOB) != 1 || received != urgent)
+            fail("urgent payload");
         printf("oob %d sent=%zd\n", client_port, sent < 0 ? (ssize_t) -errno : sent);
     });
 

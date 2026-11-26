@@ -1,0 +1,28 @@
+import groovy.json.JsonOutput
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
+def observed = [':engine:test': 'engine', ':vpn:testDebugUnitTest': 'vpn']
+def output = new File(System.getenv('STAGE1B_TASK_EVENTS'))
+def identity = new groovy.json.JsonSlurper().parseText(System.getenv('STAGE1B_IDENTITY'))
+def record = { task, phase, details ->
+    def module = observed[task.path]
+    if (module != null) {
+        def event = new File(output, "${module}-${phase}.json")
+        def temporary = new File(output, "${module}-${phase}.tmp")
+        temporary.setText(JsonOutput.toJson([
+            task: task.path, identity: identity, gradle: gradle.gradleVersion
+        ] + details), 'UTF-8')
+        Files.move(temporary.toPath(), event.toPath(), StandardCopyOption.ATOMIC_MOVE)
+    }
+}
+
+gradle.taskGraph.beforeTask { task -> record(task, 'start', [:]) }
+gradle.taskGraph.afterTask { task, state ->
+    if (observed.containsKey(task.path)) {
+        def outcome = state.failure != null ? 'failed' :
+            (state.skipped || !state.didWork ? 'skipped' : 'passed')
+        def reason = outcome == 'skipped' ? (state.skipMessage ?: 'NO-WORK') : null
+        record(task, 'finish', [outcome: outcome, skipReason: reason])
+    }
+}
