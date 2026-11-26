@@ -1,0 +1,542 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "S1-RELAY-AUTH-01",
+      "stage": 1,
+      "requirements": [
+        "1.1",
+        "REV25-013"
+      ],
+      "mechanism": "Квота неаутентифицированных подключений",
+      "preconditions": "Релей слушает loopback, известны верные учётные данные",
+      "inputs": "32 молчащих клиента и один легитимный при лимите 32, три молчащих клиента при лимите 2",
+      "events": "В первом сценарии дождаться регистрации всех 32 и проверить их присутствие в очереди. Во втором удержать запуск accept до первого connect, затем подтверждать регистрацию каждого клиента перед следующим подключением",
+      "expected": "При 32 молчащих клиентах все 32 прикладных слота свободны, легитимный клиент аутентифицируется менее чем за секунду. При лимите 2 вытесняется первый, второй и третий аутентифицируются",
+      "forbidden": "Начинать проверку с неполной очередью, считать успешный connect регистрацией или принимать истечение дедлайна за вытеснение",
+      "acceptance": "События регистрации совпадают с адресами и портами тестовых клиентов. На сокетах проверяются EOF первого и подлинный обмен SOCKS5. Решающий исход проверяется внутри бюджета аутентификации",
+      "environment": "JVM",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#silentClientsDoNotBlockAuthenticationOfLegitimateClient",
+        "HevLoopbackRelayTest#unauthenticatedOverflowClosesOldestConnectionAndKeepsNewerOnes"
+      ],
+      "limitations": "Локальный loopback JVM. Размер системной очереди зависит от ОС. Windows-серия дополняет проверку порядка, планирование Android проверяется на AVD."
+    },
+    {
+      "id": "S1-RELAY-FIXTURE-01",
+      "stage": 1,
+      "requirements": [
+        "1.1",
+        "REV25-013"
+      ],
+      "mechanism": "Владение клиентскими сокетами JVM-фикстуры релея",
+      "preconditions": "Локальный TCP-слушатель, управляемые отказы создания подключения, настройки и закрытия",
+      "inputs": "До трёх клиентских сокетов и управляемый результат ожидания регистрации",
+      "events": "Поочерёдно отказать первому, второму и третьему connect, настройке после connect, ожиданию регистрации, проверке и закрытию двух сокетов",
+      "expected": "Уже созданные сокеты закрываются, при ошибке закрытия предпринимаются остальные попытки, исходное исключение сохраняется",
+      "forbidden": "Начинать владение после connect, прерывать очистку на первом отказе или подменять основное исключение",
+      "acceptance": "Проверяются isClosed каждого сокета, идентичность основного исключения и цепочка suppressed. Отрицательные контроли с поздним владением и прерыванием очистки должны упасть",
+      "environment": "JVM",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#clientScopeClosesSocketsWhenAnyConnectionFails",
+        "HevLoopbackRelayTest#clientScopeClosesConnectedSocketWhenConfigurationFails",
+        "HevLoopbackRelayTest#clientScopeClosesSocketsWhenRegistrationOrAssertionFails",
+        "HevLoopbackRelayTest#clientScopeAttemptsAllClosesAndPreservesOriginalFailure"
+      ],
+      "limitations": "Отказ close вводится после закрытия дескриптора. Проверяются обход остальных ресурсов и сохранение ошибок."
+    },
+    {
+      "id": "S1-BUILD-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "1.6a"
+      ],
+      "mechanism": "Сборка и границы комплектов APK",
+      "preconditions": "Gradle, JDK, SDK, NDK и закреплённый HEV",
+      "inputs": "Исходники конкретного дерева Git",
+      "events": "Собрать debug, AndroidTest и release, прогнать lint и валидаторы, сверить манифест и JNI",
+      "expected": "Обязательные тесты собраны, debug-пробы отсутствуют в release",
+      "forbidden": "Выпуск артефакта с чужим SHA либо тестовыми точками входа",
+      "acceptance": "Валидаторы проверяют пакеты, раннер, ресурсы, SHA, подпись и символы двух ABI",
+      "environment": "Android SDK на хосте",
+      "suites": [
+        "Android CI",
+        "локальная сборка"
+      ],
+      "implementation": [
+        ".github/scripts/verify-debug-apk.sh",
+        ".github/scripts/verify-release-apk.py",
+        ".github/workflows/android-build.yml"
+      ],
+      "limitations": "Сборка AndroidTest не подтверждает запуск сценариев."
+    },
+    {
+      "id": "S1-PROBE-TUN-01",
+      "stage": 1,
+      "requirements": [
+        "1.3"
+      ],
+      "mechanism": "Диагностическая проба через физическую сеть",
+      "preconditions": "Обычный трафик к стенду попадает в TUN",
+      "inputs": "Управляемый TLS-сервер с известным сертификатом и ответом",
+      "events": "Выполнить контрольную пробу без обхода TUN, затем штатную пробу",
+      "expected": "Обе получают ожидаемое содержимое, штатная не учитывается в TUN",
+      "forbidden": "Считать TLS или HTTP-статус доказательством содержимого",
+      "acceptance": "Точное содержимое и различие счётчиков с контролем",
+      "environment": "AVD API 34",
+      "suites": [
+        "Android CI, базовый",
+        "JVM"
+      ],
+      "implementation": [
+        "TunTransportInstrumentedTest#protectedResourceProbeAvoidsTunAndVerifiesFixtureContent",
+        "ResourceProbeTest"
+      ],
+      "limitations": "Сценарий подтверждает локальную конфигурацию маршрута, поведение оператора остаётся открытым."
+    },
+    {
+      "id": "S1-CLIENTHELLO-01",
+      "stage": 1,
+      "requirements": [
+        "1.4",
+        "1.5"
+      ],
+      "mechanism": "Разбор префикса и пассивные исходы",
+      "preconditions": "Управляемые часы и искусственные префиксы",
+      "inputs": "ECH, SNI, неполные TLS-записи, повторы и не-TLS",
+      "events": "Отдать разбиения потока и проверить протокол, смещения, отмену и байты",
+      "expected": "Есть ограниченный захват и корректный итог выхода",
+      "forbidden": "Утрата префикса, присвоение подлинного ключа по одному внешнему признаку",
+      "acceptance": "Сверка полного входа и выхода, известных смещений, результатов и счётчиков",
+      "environment": "JVM",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "ClientHelloInspectorTest",
+        "FlowTelemetryTest"
+      ],
+      "limitations": "Общий вход QUIC/TCP из 1.4 отдельно проверить, когда у него появится исполняемый критерий. Результат не подтверждает механизм DPI."
+    },
+    {
+      "id": "S1-TUN-CONTENT-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "1.5"
+      ],
+      "mechanism": "Транспорт через TUN из отдельного UID",
+      "preconditions": "Дано системное согласие, стенд запущен",
+      "inputs": "TCP, UDP, DNS, HTTPS с фиксированным содержимым",
+      "events": "Два сеанса Start/Stop, обмен через VPN, проверка сети из отдельного пакета",
+      "expected": "Данные совпадают и исходный маршрут возвращается",
+      "forbidden": "Устаревший маршрут, незакрытые соединения, перехват лишнего семейства",
+      "acceptance": "Независимый UID наблюдает активную сеть VPN только между Start и Stop, содержимое и чистые итоговые счётчики",
+      "environment": "AVD API 34",
+      "suites": [
+        "Android CI, базовый"
+      ],
+      "implementation": [
+        "ApplicationTransportInstrumentedTest#separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions",
+        "TunTransportInstrumentedTest#tcpUdpAndDnsTraverseTunAcrossTwoSessions"
+      ],
+      "limitations": "Проверка на коротких потоках. Односторонняя длительная UDP-активность выделена отдельно."
+    },
+    {
+      "id": "S1-STOP-HUNG-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "1.5"
+      ],
+      "mechanism": "Разделение владения TUN и внешними сокетами при задержке close",
+      "preconditions": "Системное согласие и подтверждённый VPN-маршрут стенда",
+      "inputs": "Две независимые защёлки перед закрытием ожидающих TCP и релея рабочего потока",
+      "events": "Start, заблокировать закрытие, Stop, наблюдать сеть и состояние, отпустить защёлки, Start",
+      "expected": "Маршрут VPN исчезает после выхода HEV, приложение остаётся Stopping до реального освобождения",
+      "forbidden": "Создание нового TUN поверх старого сеанса или удержание TUN только из-за Kotlin-очистки",
+      "acceptance": "ConnectivityManager не видит сеть с TRANSPORT_VPN при закрытых защёлках, тот же ID и запрет Start, после освобождения новый ID",
+      "environment": "AVD API 34",
+      "suites": [
+        "Android CI, расширенный"
+      ],
+      "implementation": [
+        "ExtendedTunTransportInstrumentedTest#blockedSocketCleanupDoesNotHoldVpnRouteOrAdmitAnotherSession",
+        "VpnShutdownTest",
+        "SocketClosuresTest"
+      ],
+      "limitations": "Отказ JNI или TUN close может задержать исчезновение маршрута. JVM-исключение не моделирует не возвращающийся close."
+    },
+    {
+      "id": "S1-RELAY-CLOSE-COUNT-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "REV25-014"
+      ],
+      "mechanism": "Диагностический счётчик сокетов релея",
+      "preconditions": "Релей принял и аутентифицировал реальный TCP-клиент",
+      "inputs": "Исключение до или после закрытия, удержание повтора и операция без закрытия",
+      "events": "Остановить релей, дождаться первого close и повтора, вызвать второй Stop либо исчерпать повторы и подтвердить закрытие",
+      "expected": "До подтверждённого освобождения учитывается один сокет. После него счётчик равен нулю при любом количестве вызовов Stop",
+      "forbidden": "Обнулять счётчик по Stop, учитывать один сокет дважды либо допускать отрицательное значение",
+      "acceptance": "Сверить openClients, isClosed, EOF, число попыток и подтверждение завершения",
+      "environment": "JVM, TCP loopback",
+      "suites": [
+        "JVM"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#peerCountDropsAfterConfirmedCloseEvenWhenCloseThrowsAfterward",
+        "HevLoopbackRelayTest#peerCountDropsOnceWhenRetryClosesSocketDuringConcurrentStop",
+        "HevLoopbackRelayTest#peerCountKeepsExhaustedSocketUntilClosureIsConfirmed"
+      ],
+      "limitations": "Счётчик диагностический. Гарантии допуска Start проверяются по подтверждению очистки и состоянию транспорта."
+    },
+    {
+      "id": "S1-STOP-TRAFFIC-01",
+      "stage": 1,
+      "requirements": [
+        "1.2",
+        "1.5"
+      ],
+      "mechanism": "Stop во время установления и передачи данных",
+      "preconditions": "Контролируемый поток активен, известен ID VPN",
+      "inputs": "TCP prepare, блокируемый SYN, ожидающий UDP и TCP-передача",
+      "events": "Остановить каждую фазу, сверить время, рабочие ресурсы, журнал и вернуть сетевой маршрут",
+      "expected": "Сессия закрывается, повторный Start создаёт новый ID",
+      "forbidden": "Потерянный контрольный ответ, преждевременный Idle, утечка FD",
+      "acceptance": "Проверка активного syscall и фактического ответа, состояния Android и итоговых записей с верным ID",
+      "environment": "AVD API 34 и JVM",
+      "suites": [
+        "Android CI, расширенный",
+        "JVM"
+      ],
+      "implementation": [
+        "ExtendedTunTransportInstrumentedTest#stopClosesTcpHeldInPrepareBeforeServerAccepts",
+        "ExtendedTunTransportInstrumentedTest#stopCancelsAnAlreadyBlockingSystemConnect",
+        "ExtendedTunTransportInstrumentedTest#repeatedSessionsCarryTcpUdpAndDnsWithoutAccumulatingResources",
+        "HevLoopbackRelayTest#auditConcurrentStopsDrainEightUdpAssociationsWaitingForReplies"
+      ],
+      "limitations": "Строгие отдельные варианты Stop в середине длительной двусторонней TCP/UDP-передачи открыты. Ожидание ответа и уже текущая передача — разные сценарии."
+    },
+    {
+      "id": "S1-UDP-ONEWAY-01",
+      "stage": 1,
+      "requirements": [
+        "1.5"
+      ],
+      "mechanism": "UDP остаётся активным по одному направлению",
+      "preconditions": "Одно подтверждённое UDP-соединение через TUN",
+      "inputs": "Управляемая серия порядковых датаграмм и отдельный канал проверки счётчика стенда",
+      "events": "Провести только upload и только download более одного интервала UDP-простоя каждый. Отдельно выдержать полный простой, затем отправить новый маркированный обмен",
+      "expected": "Непрерывность каждой серии, затем закрытие после общего простоя. Новый обмен работает как новая ассоциация",
+      "forbidden": "Завершение из-за молчания другого направления, новый сеанс для каждой датаграммы, отсутствие итоговой записи",
+      "acceptance": "Независимое сравнение номеров и интервалов у отправителя и получателя, счётчик создания ассоциаций и один итог по каждому направлению",
+      "environment": "JVM и AVD API 34",
+      "suites": [
+        "JVM",
+        "проект расширения AVD"
+      ],
+      "implementation": [
+        "HevLoopbackRelayTest#udpKeepsForwardingOneWayTrafficBeyondReceiveTimeout",
+        "HevLoopbackRelayTest#incomingUdpKeepsAssociationThenStopRecordsBothDirectionsOnce",
+        "scripts/transport-fixture.py"
+      ],
+      "limitations": "Через TUN длительные односторонние варианты и полное истечение общего UDP-простоя пока не реализованы. Критерий не требует Pixel 7."
+    },
+    {
+      "id": "S1-NATIVE-01",
+      "stage": 1,
+      "requirements": [
+        "1.6"
+      ],
+      "mechanism": "Доступность операций и фактический результат на проводе",
+      "preconditions": "Тестовая сборка и локальная пара сокетов",
+      "inputs": "Известные размеры и настройки на отдельном сокете",
+      "events": "Снять Android ok/errno, на Linux независимо захватить сегменты, затем повторить проверку доступности на Pixel 7",
+      "expected": "Значение операции и измеряемый эффект документируются раздельно",
+      "forbidden": "Перенос результата Linux или AVD на устройство",
+      "acceptance": "Захват с контролями и отдельная таблица ok/errno для каждого окружения",
+      "environment": "Linux + AVD + Pixel 7",
+      "suites": [
+        "native/PCAP",
+        "Android CI, базовый",
+        "физическая приёмка"
+      ],
+      "implementation": [
+        "KernelCapabilitiesInstrumentedTest#everyOperationReportsOkOrErrnoOnALoopbackPair",
+        "scripts/kernel-ops-pcap.py",
+        "docs/PIXEL7_TESTING_RU.md"
+      ],
+      "limitations": "Ядро и сетевые настройки устройства отличны от Linux-хоста и AVD."
+    },
+    {
+      "id": "S1-FIXTURE-01",
+      "stage": 1,
+      "requirements": [
+        "1.3",
+        "1.5",
+        "1.6a"
+      ],
+      "mechanism": "Самопроверка независимого локального стенда",
+      "preconditions": "Хост со свободным loopback и краткоживущим сертификатом",
+      "inputs": "Фиксированные payload и контрольный сертификат",
+      "events": "Выполнить корректные и ошибочные обмены с фикстурой",
+      "expected": "Можно воспроизвести ожидаемые ответы контролируемой стороны",
+      "forbidden": "Приписать этот результат Android VPN",
+      "acceptance": "Фикстура возвращает известный TCP/UDP/DNS/HTTPS ответ только при корректном обмене",
+      "environment": "Linux-хост",
+      "suites": [
+        "transport-host CI"
+      ],
+      "implementation": [
+        "scripts/transport-host-lab.py",
+        ".github/workflows/transport-host.yml"
+      ],
+      "limitations": "Приложение в этом прогоне не участвует."
+    },
+    {
+      "id": "S1-VPN-PROCESS-01",
+      "stage": 1,
+      "requirements": [
+        "1.7",
+        "1.5",
+        "REV25-011"
+      ],
+      "mechanism": "Гибель активного процесса и восстановление",
+      "preconditions": "Отдельный AVD, согласие, Known TCP echo и разрешённые уведомления",
+      "inputs": "UUID запуска, PID, ID сеанса и приватный активный маркер",
+      "events": "Подтвердить TCP через TUN, дождаться единственной READY с UUID запуска, сверить PID и маркер, послать SIGKILL с хоста, дождаться удаления маршрута, запустить приложение повторно и очистить эксперимент",
+      "expected": "Новый PID, TUN исчез, TCP снова проходит, одна запись и уведомление с ID потерянного сеанса",
+      "forbidden": "SIGKILL по старой или неоднозначной READY, старый PID, самопроизвольный Start, дубликат, зависший маршрут, отчёт об успехе без проверки очистки",
+      "acceptance": "ADB видит присутствие и затем исчезновение адреса TUN, независимый сервер сверяет содержимое, тест проверяет журнал и уведомление, итоговый JSON связывает UUID, PID и ID сеанса",
+      "environment": "AVD API 34, внешний управляющий сценарий",
+      "suites": [
+        "Android CI, системный"
+      ],
+      "implementation": [
+        ".github/scripts/test-vpn-process-recovery.sh",
+        "DiagnosticsInstrumentedTest#armsVpnForExternalProcessDeath",
+        "DiagnosticsInstrumentedTest#anAbortedVpnProcessIsReportedAfterTheNextLaunch"
+      ],
+      "limitations": "SIGKILL без штатного onDestroy. Java crash, системный LMK, Always-on и lockdown требуют отдельных вариантов."
+    },
+    {
+      "id": "S1-VPN-PROCESS-HOST-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-011"
+      ],
+      "mechanism": "Изоляция управляющего эксперимента и валидация протоколов",
+      "preconditions": "Bash и Python на хосте",
+      "inputs": "Управляемый ADB, READY разных запусков, протокол AndroidJUnitRunner",
+      "events": "Первый и повторный запуск, старый READY без нового, дубли, некорректные идентификаторы, несовпавшие PID и маркер, ранний выход, тайм-ауты, ошибки до и после SIGKILL и сбой очистки",
+      "expected": "Только единичная корректная READY влияет на текущий эксперимент, аварийный и неполный протокол отклоняются, ошибки ведут к очистке",
+      "forbidden": "SIGKILL до проверки принадлежности, запуск на физическом устройстве, успешный отчёт при сбое очистки",
+      "acceptance": "Хост-проверка сверяет вызовы ADB, артефакты, завершение управляемого процесса и отказ валидатора на отрицательных входах",
+      "environment": "Хост без Android",
+      "suites": [
+        "Android CI, хост"
+      ],
+      "implementation": [
+        ".github/scripts/test-vpn-process-recovery-host.py",
+        ".github/scripts/verify-extended-transport-results.py"
+      ],
+      "limitations": "Фиктивный ADB проверяет управляющую логику. Реальное восстановление TCP и TUN требует S1-VPN-PROCESS-01."
+    },
+    {
+      "id": "S1-VPN-REVOKE-01",
+      "stage": 1,
+      "requirements": [
+        "1.7"
+      ],
+      "mechanism": "Реальный системный отзыв VPN",
+      "preconditions": "Согласие и рабочий VPN приложения",
+      "inputs": "Второй управляемый VPN либо выключение через системные настройки одноразового AVD",
+      "events": "Внешний сценарий подтверждает TUN, меняет активный VPN через систему, наблюдает устранение маршрута и нейтральное уведомление",
+      "expected": "Старый TUN освобождён, приложение предлагает обычное повторное согласие",
+      "forbidden": "Ручной вызов onRevoke как доказательство системного сценария, ложная конкретная причина",
+      "acceptance": "Независимое наблюдение маршрута и состояния второго VPN, старый ID больше не активен, по кнопке новый запрос согласия",
+      "environment": "AVD API 34",
+      "suites": [
+        "проект системной проверки"
+      ],
+      "implementation": [],
+      "limitations": "Открыто. Смена Wi‑Fi и LTE, Always-on и поведение конкретной настройки Pixel 7 проверяются отдельно."
+    },
+    {
+      "id": "S1-SAF-FIXTURE-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-009",
+        "REV25-010",
+        "REV25-006",
+        "REV25-007"
+      ],
+      "mechanism": "Самостоятельный провайдер тестового APK и его канал",
+      "preconditions": "Собранные debug, release и AndroidTest APK; оба подписанных APK установлены на свежем AVD",
+      "inputs": "Реальный content URI тестового пакета, известные байты и управляемые сбои канала",
+      "events": "Проверить DEX, обратиться к провайдеру до больших наборов, проверить блокировку, открытие, запись, обрыв, повторный open, тайм-аут и reset при двух стадиях работы",
+      "expected": "UID тестового APK, другой PID, точный размер и SHA-256 после release, наблюдаемый исход для каждого отказа и завершение работника перед сменой назначения",
+      "forbidden": "Зависимость от классов APK приложения, попадание фикстуры в release, успешный digest при обрыве или ошибке, авария процесса или зависший поток",
+      "acceptance": "DEX-валидатор подтверждает границу классов, четыре строго именованных Android-теста завершаются успешно, отрицательные контроли возвращают нужное состояние",
+      "environment": "Android SDK на хосте и свежий AVD API 34",
+      "suites": [
+        "Android CI, DEX",
+        "Android CI, предварительный на обоих AVD"
+      ],
+      "implementation": [
+        ".github/scripts/verify-test-apk-dex.py",
+        "SafFixtureInstrumentedTest#startsInTestPackageAndReceivesExactBytesAfterRelease",
+        "SafFixtureInstrumentedTest#requestedOpenAndWriteFailuresAreObservableWithoutFixtureError",
+        "SafFixtureInstrumentedTest#prematureAndFaultedPipesFailWithoutPublishingADigest",
+        "SafFixtureInstrumentedTest#resetRetiresBothReadingAndBlockedWorkersAndTimeoutIsAnError"
+      ],
+      "limitations": "Проверка DEX не заменяет старт процесса Android. Фикстура моделирует сбои канала и не описывает семантику всех внешних SAF-поставщиков."
+    },
+    {
+      "id": "S1-SAF-LIFECYCLE-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-006",
+        "1.7"
+      ],
+      "mechanism": "Сохранение конкретного снимка при пересоздании и отказах",
+      "preconditions": "Приватный снимок и тестовый content URI",
+      "inputs": "Контролируемый тестовый поставщик, буфер и ошибки открытия и записи",
+      "events": "Пересоздать до чтения после URI и во время записи. Отменить picker. Принять новые URI после ошибок",
+      "expected": "Ровно один исходный запуск на попытку, неизменные байты, новый экспорт доступен, повтор по запросу",
+      "forbidden": "Двойная запись, очистка снимка после отказа, зависший pending ID",
+      "acceptance": "Количество фактических открытий и запусков, точные байты или SHA-256, файловая очистка и успешная вторая операция",
+      "environment": "AVD API 34",
+      "suites": [
+        "Android CI, базовый"
+      ],
+      "implementation": [
+        "DiagnosticsInstrumentedTest#recreatingDuringSnapshotPreparationLaunchesSafOnceAndSavesTheSameText",
+        "DiagnosticsInstrumentedTest#recreatingAfterSafResultBeforeReadPreservesThePendingWrite",
+        "DiagnosticsInstrumentedTest#recreatingDuringSafWriteKeepsOneWriteAndUnblocksAnotherExport",
+        "DiagnosticsInstrumentedTest#failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry",
+        "DiagnosticsInstrumentedTest#cancelSafClearsSnapshotAndAllowsAnotherSave"
+      ],
+      "limitations": "ActivityScenario моделирует пересоздание, а не завершение процесса. Фикстура не равна всем поставщикам документов."
+    },
+    {
+      "id": "S1-SAF-PROCESS-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-006",
+        "REV25-012",
+        "REV25-015",
+        "1.7"
+      ],
+      "mechanism": "Продолжение SAF после гибели процесса",
+      "preconditions": "Сохранённое состояние системной задачи и отдельный поставщик",
+      "inputs": "Состояние registry и два request code, готовый снимок и маркер .writing, URI с известным содержимым",
+      "events": "Восстановить ViewModel и Registry. Раздельно проверить очередь до регистрации, результат во время удержанного чтения, отсутствие результата, старый callback в retry и после нового запуска, отмену при .writing, отсутствующий снимок и два пересоздания Activity при удержанном чтении. В запланированном сквозном тесте хост убивает PID при открытом picker или начатой записи",
+      "expected": "Результат активного ключа до завершения восстановления на Main относится к исходной попытке. После завершения доступен явный повтор сохранённого снимка, при отсутствующем снимке доступен новый экспорт",
+      "forbidden": "Применение старого URI или отмены к новой попытке, удаление .writing старой отменой, возобновление retry устаревшим чтением, двойное восстановление и автоматическое открытие picker",
+      "acceptance": "Каждый порядок задан сигналами и имеет отдельную проверку состояния Registry, точных байтов, состояний ViewModel и дисковых маркеров. Для сквозного случая поставщик сверяет количество открытий и байты, ADB подтверждает новый PID",
+      "environment": "AVD с AndroidX Registry; для системного прогона нужен реальный picker и внешний управляющий сценарий",
+      "suites": [
+        "Android CI, базовый контракт результата и файла",
+        "проект сквозной системной проверки"
+      ],
+      "implementation": [
+        "DiagnosticsInstrumentedTest#consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry",
+        "DiagnosticsInstrumentedTest#queuedSafResultUsesItsRestoredSnapshotBeforeFallback",
+        "DiagnosticsInstrumentedTest#registeredSafResultWinsOverInFlightRecovery",
+        "DiagnosticsInstrumentedTest#restoringSafWithoutResultOffersExplicitRetry",
+        "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelWhileRetryWaits",
+        "DiagnosticsInstrumentedTest#lateSafResultCannotWriteOrCancelANewAttempt",
+        "DiagnosticsInstrumentedTest#restoredSafCancellationPreservesTheInterruptedWrite",
+        "DiagnosticsInstrumentedTest#restoringSafWithoutSnapshotUnblocksFutureExport",
+        "DiagnosticsInstrumentedTest#recreatingActivityTwiceKeepsOneSafRecovery",
+        "DiagnosticsInstrumentedTest#clearingSafRecoveryOwnerLeavesSnapshotForFreshRecovery"
+      ],
+      "limitations": "Сквозная гибель процесса в обоих SAF-сценариях открыта. Обычный SAF не даёт атомарного подтверждения результата для стороннего документа."
+    },
+    {
+      "id": "S1-SAF-PREPARE-ERROR-01",
+      "stage": 1,
+      "requirements": [
+        "1.7",
+        "REV25-016"
+      ],
+      "mechanism": "Открытие сохранённого снимка и явный повтор",
+      "preconditions": "Приватный снимок с известным текстом, состояние подготовки или прерванной записи",
+      "inputs": "Временный отказ чтения, занятое имя назначения, отсутствующий файл, неверный UTF-8 и отказ создания",
+      "events": "Восстановить подготовку или подтвердить повтор. Внести управляемый отказ, затем снять препятствие и выполнить явный повтор либо новый экспорт",
+      "expected": "Готовый снимок сохраняет точные байты при временном отказе. Готовность следующего экспорта восстанавливается после отсутствующего, негодного или несозданного снимка",
+      "forbidden": "Удаление готового файла из-за ошибки чтения или переименования, автоматический показ диалога после отказа и запись повреждённого содержимого",
+      "acceptance": "Исходные байты и маркер на месте после ошибки, документ остаётся пустым, после явного повтора новая запись одна и точная",
+      "environment": "AVD API 34 и изолированный JVM-контроль файлов",
+      "suites": [
+        "Android CI, базовый"
+      ],
+      "implementation": [
+        "DiagnosticsInstrumentedTest#failedSafRetryPreparationKeepsInterruptedSnapshot",
+        "DiagnosticsInstrumentedTest#failedReadingRestoredPreparationKeepsSnapshot",
+        "DiagnosticsInstrumentedTest#missingCorruptAndUncreatedSnapshotsLeaveExportAvailable"
+      ],
+      "limitations": "JVM-контроль подменяет Android Lifecycle и picker. Сквозная гибель процесса с системным диалогом остаётся открыта."
+    },
+    {
+      "id": "S1-SAF-QUOTA-01",
+      "stage": 1,
+      "requirements": [
+        "REV25-007",
+        "1.7"
+      ],
+      "mechanism": "Квота активных и бесхозных снимков",
+      "preconditions": "Подлинное приватное хранилище снимков",
+      "inputs": "Файлы с датой в будущем, просроченный активный снимок и временный файл",
+      "events": "Имитировать хвост предыдущего процесса, заполнить каталог, очистить и начать новый экспорт",
+      "expected": "Новый снимок доступен, активные байты сохранены, каталог в пределах квоты",
+      "forbidden": "Удаление используемого снимка или блокировка от бесхозных файлов",
+      "acceptance": "Проверка реального содержимого, доступности свободной квоты и удаления хотя бы одного бесхозного файла",
+      "environment": "AVD API 34",
+      "suites": [
+        "Android CI, базовый"
+      ],
+      "implementation": [
+        "DiagnosticsInstrumentedTest#recentOrFutureOrphansCannotBlockExportAndActiveSnapshotsSurviveReclamation",
+        "DiagnosticsInstrumentedTest#finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot"
+      ],
+      "limitations": "Закрытие Activity после ошибки проверяется. Переключение системных часов на AVD остаётся открытым. Дата файла моделирует влияние часов на сортировку и удаление."
+    },
+    {
+      "id": "S1-PIXEL-01",
+      "stage": 1,
+      "requirements": [
+        "1.5",
+        "1.6",
+        "1.6a"
+      ],
+      "mechanism": "Агрегаты и условия конкретного устройства",
+      "preconditions": "Допуск, разрешение пользователя, проверенный APK с SHA, серийно изолированный доступ",
+      "inputs": "Pixel 7, Chrome, целевая физическая сеть, режимы Wi-Fi и LTE",
+      "events": "Проверить реальную сеть, агрегаты, возможности сокетов, повторяемые Stop/Start и исходное состояние телефона",
+      "expected": "Сохраняется связь и обезличенность, есть доказательства по каждой операции и сети",
+      "forbidden": "Автоматический запуск или вывод по AVD о сети оператора",
+      "acceptance": "Зафиксированные APK, контрольная группа, параметры сети и подтверждение восстановления",
+      "environment": "Pixel 7",
+      "suites": [
+        "физическая приёмка"
+      ],
+      "implementation": [
+        "docs/PIXEL7_TESTING_RU.md",
+        ".github/workflows/pixel7.yml",
+        "scripts/test-pixel7.ps1"
+      ],
+      "limitations": "Требуются реальное ядро, маршруты, интерфейсы, разрешение пользователя и отдельное решение по безопасности раннера."
+    }
+  ]
+}

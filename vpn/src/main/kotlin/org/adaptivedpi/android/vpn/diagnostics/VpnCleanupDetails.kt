@@ -35,7 +35,12 @@ internal data class VpnCleanupDetails(
     val incomplete get() = tunClosed == false || nativeReleased == false || relay?.terminated == false ||
         sockets?.confirmed == false || waitingFor != null ||
         (activeConnections ?: 0) > 0 || (pendingConnections ?: 0) > 0 ||
-        issues.any { it.step != CleanupStep.ActiveMarker && it.step != CleanupStep.TransportSnapshot }
+        issues.any {
+            when (it.step) {
+                CleanupStep.ActiveMarker, CleanupStep.TransportSnapshot, CleanupStep.ForegroundNotification -> false
+                else -> true
+            }
+        }
 
     fun text(): String = buildString {
         appendLine("Остановка сеанса: ${session ?: "—"}. Время: $elapsedMillis мс.")
@@ -69,7 +74,7 @@ internal data class VpnCleanupDetails(
         if (mask and 2 != 0) add("пул запросов")
         if (mask and 4 != 0) add("пул ответов")
         if (mask and 8 != 0) add("закрытие сокетов и пулов")
-        if (mask and 16 != 0) add("завершение таймеров простоя TCP")
+        if (mask and 16 != 0) add("завершение таймеров простоя TCP и UDP")
     }.joinToString(", ")
 
     companion object {

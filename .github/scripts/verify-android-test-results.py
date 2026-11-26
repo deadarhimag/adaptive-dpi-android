@@ -31,7 +31,10 @@ CLASSES = {
         "missingTargetPackageFailsStartupAndAllowsAnotherSession",
         "activeSessionSurvivesRecreationAndOldNotificationCannotStopItsSuccessor",
     ),
-    PACKAGE + "TunTransportInstrumentedTest": ("tcpUdpAndDnsTraverseTunAcrossTwoSessions",),
+    PACKAGE + "TunTransportInstrumentedTest": (
+        "tcpUdpAndDnsTraverseTunAcrossTwoSessions",
+        "protectedResourceProbeAvoidsTunAndVerifiesFixtureContent",
+    ),
     PACKAGE + "ApplicationTransportInstrumentedTest": ("separatePackageUsesTcpUdpDnsAndHttpsAcrossTwoVpnSessions",),
     PACKAGE + "KernelCapabilitiesInstrumentedTest": ("everyOperationReportsOkOrErrnoOnALoopbackPair",),
 }
@@ -43,6 +46,26 @@ DIAGNOSTICS_METHODS = (
     "parallelLargeTxtAttachmentsKeepIndependentUrisNamesAndBytes",
     "criticalErrorPostsOneNotificationAndOpensItsDiagnosticEvent",
     "pendingCombinedReportSnapshotIsAPrivateFileUntilDeleted",
+    "recreatingDuringSnapshotPreparationLaunchesSafOnceAndSavesTheSameText",
+    "recreatingDuringSafWriteKeepsOneWriteAndUnblocksAnotherExport",
+    "recreatingAfterSafResultBeforeReadPreservesThePendingWrite",
+    "consumedSafSnapshotCannotBeClaimedAgainUntilExplicitRetry",
+    "queuedSafResultUsesItsRestoredSnapshotBeforeFallback",
+    "registeredSafResultWinsOverInFlightRecovery",
+    "restoringSafWithoutResultOffersExplicitRetry",
+    "lateSafResultCannotWriteOrCancelWhileRetryWaits",
+    "lateSafResultCannotWriteOrCancelANewAttempt",
+    "restoredSafCancellationPreservesTheInterruptedWrite",
+    "restoringSafWithoutSnapshotUnblocksFutureExport",
+    "recreatingActivityTwiceKeepsOneSafRecovery",
+    "clearingSafRecoveryOwnerLeavesSnapshotForFreshRecovery",
+    "cancelSafClearsSnapshotAndAllowsAnotherSave",
+    "failingSafOpenOrWriteRetainsTheSnapshotForExplicitRetry",
+    "failedSafRetryPreparationKeepsInterruptedSnapshot",
+    "failedReadingRestoredPreparationKeepsSnapshot",
+    "missingCorruptAndUncreatedSnapshotsLeaveExportAvailable",
+    "recentOrFutureOrphansCannotBlockExportAndActiveSnapshotsSurviveReclamation",
+    "finishingAfterSafFailureStopsRetainingTheAbandonedSnapshot",
 )
 
 

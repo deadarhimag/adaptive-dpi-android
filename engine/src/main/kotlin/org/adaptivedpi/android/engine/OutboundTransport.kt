@@ -8,6 +8,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 /** Подготавливает ещё не подключённый сокет. Любой отказ должен завершаться исключением. */
@@ -111,6 +112,8 @@ class OutboundTransport(
     fun socketClosures(): SocketCloseSummary = closures.snapshot()
 
     /** Повтор закрытия сокетов, освобождение которых не подтвердилось; ошибки - в журнал транспорта. */
+    internal fun hasExhaustedClosures() = closures.hasExhaustedRetries()
+
     fun retryUnconfirmedClosures() = closures.retryUnconfirmed { error ->
         failures.recordError(TransportSite(TransportSubsystem.SOCKET, TransportOperation.CLOSE), error, fallback = TransportCategory.CLEANUP)
     }
@@ -187,11 +190,20 @@ class OutboundTransport(
         }
 
         /** Буфер вмещает минимум на один байт больше ожидаемой датаграммы. */
-        fun receive(buffer: ByteArray): Int {
+        fun receive(buffer: ByteArray): Int = checkNotNull(receive(buffer, waitForActivity = false))
+
+        internal fun receiveWhileActive(buffer: ByteArray): Int? = receive(buffer, waitForActivity = true)
+
+        private fun receive(buffer: ByteArray, waitForActivity: Boolean): Int? {
             require(buffer.size in 1..MAX_UDP_PAYLOAD + 1)
             val datagram = DatagramPacket(buffer, buffer.size)
             return countFailures(receiveSite, { lease.cancellation }) {
-                socket.receive(datagram)
+                try {
+                    socket.receive(datagram)
+                } catch (error: SocketTimeoutException) {
+                    if (waitForActivity && lease.cancellation == null) return@countFailures null
+                    throw error
+                }
                 if (datagram.length == buffer.size) throw TransportSocketException(TransportCode.DATAGRAM_LIMIT, TransportCategory.LIMIT)
                 receivedBytes.addAndGet(datagram.length.toLong())
                 receivedDatagrams.incrementAndGet()

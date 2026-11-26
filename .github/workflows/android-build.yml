@@ -64,6 +64,9 @@ jobs:
       - name: Подготовить Gradle Wrapper
         run: chmod +x ./gradlew
 
+      - name: Проверить управляющий сценарий восстановления и валидаторы Android
+        run: python3 .github/scripts/test-vpn-process-recovery-host.py
+
       - name: Запустить модульные тесты, lint и сборку APK
         env:
           ANDROID_CI_DEBUG_STORE_PASSWORD: ${{ secrets.ANDROID_CI_DEBUG_STORE_PASSWORD }}
@@ -74,6 +77,13 @@ jobs:
 
       - name: Проверить влияние операций над своим сокетом на сегменты (Linux-хост, loopback)
         run: sudo python3 scripts/kernel-ops-pcap.py
+
+      - name: Проверить DEX самостоятельных компонентов AndroidTest APK
+        run: |
+          python3 .github/scripts/verify-test-apk-dex.py "$ANDROID_HOME/build-tools/35.0.0/dexdump" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
 
       - name: Проверить системное согласие, жизненный цикл, Compose и транспорт через Android TUN
         id: device_tests
@@ -101,6 +111,8 @@ jobs:
           path: |
             ${{ runner.temp }}/tun-ci/results.json
             ${{ runner.temp }}/tun-ci/consent.log
+            ${{ runner.temp }}/tun-ci/saf-fixture/
+            ${{ runner.temp }}/tun-ci/process-recovery/
             app/build/outputs/androidTest-results/connected/**/TEST-*.xml
           if-no-files-found: error
 

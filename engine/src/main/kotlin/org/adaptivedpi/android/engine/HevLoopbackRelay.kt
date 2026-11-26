@@ -7,6 +7,7 @@ import org.adaptivedpi.android.engine.flow.FlowObserver
 import org.adaptivedpi.android.engine.flow.FlowPipeline
 import org.adaptivedpi.android.engine.flow.FlowTracker
 import org.adaptivedpi.android.engine.flow.PrefixSource
+import org.adaptivedpi.android.engine.flow.UdpEnd
 import org.adaptivedpi.android.engine.flow.UdpRecord
 import java.io.Closeable
 import java.io.DataInputStream
@@ -18,6 +19,7 @@ import java.net.InetAddress
 import java.net.ProtocolException
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketAddress
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -32,6 +34,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -57,6 +60,9 @@ class HevLoopbackRelay internal constructor(
     flows: FlowObserver = FlowObserver.None,
     flowCaptureMillis: Long = FlowPipeline.CAPTURE_MILLIS,
     flowClassify: ((ByteArray, Int) -> ClientHelloInspector.Result)? = null,
+    private val udpIdleTimeoutMillis: Long = 60_000,
+    private val closeRelaySocket: (Closeable) -> Unit = Closeable::close,
+    private val onPreAuthRegistered: ((SocketAddress) -> Unit)? = null,
     private val onListenerFailure: () -> Unit,
 ) : Closeable {
     constructor(
@@ -71,11 +77,11 @@ class HevLoopbackRelay internal constructor(
         onListenerFailure = onListenerFailure,
     )
 
-    init { require(maxSessions > 0 && tcpIdleTimeoutMillis > 0) }
+    init { require(maxSessions > 0 && tcpIdleTimeoutMillis > 0 && udpIdleTimeoutMillis > 0) }
 
     private val lock = Any()
     private val relayId = relayIds.incrementAndGet()
-    private val idleThreadName = "HEV TCP idle #$relayId"
+    private val idleThreadName = "HEV relay idle #$relayId"
     private val requestThreadName = "HEV request #$relayId"
     private val responseThreadName = "HEV response #$relayId"
     private val tcpIdleNanos = TimeUnit.MILLISECONDS.toNanos(tcpIdleTimeoutMillis)
@@ -116,6 +122,12 @@ class HevLoopbackRelay internal constructor(
     val configSecret: String get() = secret
     val isTerminated: Boolean get() = pendingShutdownSteps() == 0
 
+    internal fun preAuthState(): Pair<Set<SocketAddress>, Int> = synchronized(lock) {
+        val pending = unauthenticated.filterNot { it.socket.isClosed }
+            .mapTo(mutableSetOf()) { it.socket.remoteSocketAddress }
+        pending to permits.availablePermits()
+    }
+
     init {
         try {
             startAccepting(listener, acceptThread)
@@ -155,7 +167,12 @@ class HevLoopbackRelay internal constructor(
                     }
                 }
                 evicted?.let(::closePeer)
-                if (!scheduled) closePeer(peer)
+                if (scheduled) {
+                    // Сигнал идентифицирует клиента после регистрации и обработки вытеснения.
+                    onPreAuthRegistered?.invoke(peer.socket.remoteSocketAddress)
+                } else {
+                    closePeer(peer)
+                }
             }
         } catch (error: Exception) {
             failures.recordError(ACCEPT, error, if (closing) TransportCancellation.SESSION else null)
@@ -191,7 +208,7 @@ class HevLoopbackRelay internal constructor(
                 requireProtocol(input.readUnsignedByte() == 0)
                 val endpoint = readEndpoint(input)
                 requireProtocol(command == 1 || command == 5)
-                socket.soTimeout = if (command == 1) 0 else 60_000
+                socket.soTimeout = 0
                 command to endpoint
             }
             when (command) {
@@ -242,7 +259,7 @@ class HevLoopbackRelay internal constructor(
         val connectNanos = System.nanoTime() - connectStarted
         connection.use {
             connection.useRelayIdleTimeout()
-            val idle = TcpIdle {
+            val idle = RelayIdle(tcpIdleNanos) {
                 try {
                     failures.record(TransportFailure(TCP_IDLE, TransportCategory.TIMEOUT, TransportCode.TIMEOUT))
                     peer.flow?.idleTimeout()
@@ -253,6 +270,7 @@ class HevLoopbackRelay internal constructor(
             }
             val flow = pipeline.begin(key, connectNanos)
             peer.flow = flow
+            val completion = DirectionCompletion(flow::finish)
             // Отказ ключа - только отказ на стороне сервера; ошибки сокета клиента к ключу не относятся.
             connection.failureObserver = { failure -> if (failure.code != TransportCode.PEER_EOF) flow.failed(flowFailure(failure)) }
             var response: Future<*>? = null
@@ -273,6 +291,8 @@ class HevLoopbackRelay internal constructor(
                     } catch (error: Exception) {
                         closePeer(peer)
                         throw error
+                    } finally {
+                        completion.done()
                     }
                 }
                 val buffer = ByteArray(TCP_BUFFER)
@@ -294,52 +314,50 @@ class HevLoopbackRelay internal constructor(
                                 if (flow.kind == FlowKind.TLS) peer.socket.soTimeout = 0
                             }
                         }
+                        val writeStartedAt = pipeline.clock()
                         connection.write(captured.bytes, 0, captured.size)
-                        flow.sentToServer(captured.size)
+                        flow.sentToServer(captured.size, writeStartedAt)
                         flow.firstPortionSent()
                         idle.forwarded()
                         if (captured.eof) {
                             peer.eof = true
-                            flow.clientClosed()
                             break
                         }
                     } else {
+                        val writeStartedAt = pipeline.clock()
                         connection.write(buffer, 0, size)
-                        flow.sentToServer(size)
+                        flow.sentToServer(size, writeStartedAt)
                         idle.forwarded()
                     }
                 }
                 connection.shutdownOutput()
                 response.get()
             } finally {
-                // Исход записывается, даже если Stop прервал ожидание ответа в finishDirections.
+                idle.close()
                 try {
-                    idle.close()
-                    if (response != null) {
-                        finishDirections(peer, connection, response)
-                    }
+                    if (response != null) finishDirections(peer, connection, response)
+                    else completion.done()
                 } finally {
-                    flow.finish()
+                    completion.done()
                 }
             }
         }
     }
 
-    /** Чтение от клиента. Закрытие клиентом отмечается в исходе, закрытие самим релеем - нет. */
-    private fun readClient(peer: Peer, input: DataInputStream, buffer: ByteArray, flow: FlowTracker): Int {
-        val size = try {
-            observe(TCP_READ, peer) { input.read(buffer) }
-        } catch (error: Exception) {
-            if (peer.cancellation.get() == null) flow.clientClosed()
-            throw error
+    /** EOF может быть штатным полузакрытием. В исход попадает только наблюдённый сброс клиента. */
+    private fun readClient(peer: Peer, input: DataInputStream, buffer: ByteArray, flow: FlowTracker): Int = try {
+        observe(TCP_READ, peer) { input.read(buffer) }
+    } catch (error: IOException) {
+        if (peer.cancellation.get() == null && failures.classify(TCP_READ, error).category == TransportCategory.RESET) {
+            flow.clientClosed()
         }
-        if (size < 0) flow.clientClosed()
-        return size
+        throw error
     }
 
-    private fun flowFailure(failure: TransportFailure) = FlowFailure(failure.category, failure.code, failure.errno)
+    private fun flowFailure(failure: TransportFailure) =
+        FlowFailure(failure.category, failure.code, failure.errno, failure.site.operation)
 
-    private inner class TcpIdle(private val onTimeout: () -> Unit) : Closeable {
+    private inner class RelayIdle(private val timeoutNanos: Long, private val onTimeout: () -> Unit) : Closeable {
         private var lastForwarded = 0L
         private var nextCheck: ScheduledFuture<*>? = null
         private var finished = false
@@ -347,7 +365,7 @@ class HevLoopbackRelay internal constructor(
         @Synchronized
         fun start() {
             lastForwarded = System.nanoTime()
-            schedule(tcpIdleNanos)
+            schedule(timeoutNanos)
         }
 
         @Synchronized
@@ -362,7 +380,7 @@ class HevLoopbackRelay internal constructor(
         private fun checkDeadline() {
             synchronized(this) {
                 if (finished || closing) return
-                val remaining = tcpIdleNanos - (System.nanoTime() - lastForwarded)
+                val remaining = timeoutNanos - (System.nanoTime() - lastForwarded)
                 if (remaining > 0) {
                     schedule(remaining)
                     return
@@ -380,92 +398,115 @@ class HevLoopbackRelay internal constructor(
     }
 
     private fun udp(peer: Peer, input: DataInputStream, output: DataOutputStream) {
-        observe(CONTROL_WRITE, peer) { reply(output, 0) }
-        val payload = ByteArray(MAX_DATAGRAM)
-        val first = observe(UDP_READ, peer) {
-            readDatagram(peer, input, payload)
-        } ?: return
-        transport.connectUdp(first.endpoint.address, first.endpoint.port).use { connection ->
-            val received = AtomicLong()
-            var sent = 0L
-            val response = submit(UDP_SCHEDULE) {
+        val end = AtomicReference(UdpEnd.FINISHED)
+        val idle = RelayIdle(TimeUnit.MILLISECONDS.toNanos(udpIdleTimeoutMillis)) {
+            if (end.compareAndSet(UdpEnd.FINISHED, UdpEnd.IDLE)) {
+                try { failures.record(TransportFailure(UDP_READ, TransportCategory.TIMEOUT, TransportCode.TIMEOUT)) }
+                finally { closePeer(peer) }
+            }
+        }
+        idle.use {
+            observe(CONTROL_WRITE, peer) { reply(output, 0) }
+            idle.start()
+            val payload = ByteArray(MAX_DATAGRAM)
+            val first = observe(UDP_READ, peer) { readDatagram(peer, input, payload) } ?: return
+            val connection = try {
+                transport.connectUdp(first.endpoint.address, first.endpoint.port)
+            } catch (error: IOException) {
+                pipeline.udpEnded(UdpRecord(first.endpoint.port, 0, 0, if (closing) UdpEnd.CANCELLED else UdpEnd.ERROR))
+                throw error
+            }
+            connection.use {
+                val received = AtomicLong()
+                var sent = 0L
+                val completion = DirectionCompletion {
+                    val status = if (closing) UdpEnd.CANCELLED else end.get()
+                    pipeline.udpEnded(UdpRecord(first.endpoint.port, sent, received.get(), status))
+                }
+                var response: Future<*>? = null
                 try {
-                    val buffer = ByteArray(MAX_DATAGRAM + 1)
-                    while (peer.cancellation.get() == null) {
-                        val size = try {
-                            connection.receive(buffer)
-                        } catch (error: TransportSocketException) {
-                            // Отбрасываем одну слишком большую датаграмму. Ассоциация сохраняется.
-                            if (error.code == TransportCode.DATAGRAM_LIMIT) continue
+                    response = submit(UDP_SCHEDULE) {
+                        try {
+                            val buffer = ByteArray(MAX_DATAGRAM + 1)
+                            while (peer.cancellation.get() == null) {
+                                val size = try {
+                                    connection.receiveWhileActive(buffer) ?: continue
+                                } catch (error: TransportSocketException) {
+                                    if (error.code == TransportCode.DATAGRAM_LIMIT) continue
+                                    throw error
+                                }
+                                observe(UDP_WRITE, peer) {
+                                    output.writeShort(size)
+                                    output.writeByte(10)
+                                    output.writeByte(1)
+                                    output.write(first.endpoint.address.address)
+                                    output.writeShort(first.endpoint.port)
+                                    output.write(buffer, 0, size)
+                                }
+                                received.incrementAndGet()
+                                idle.forwarded()
+                            }
+                        } catch (error: Exception) {
+                            if (peer.cancellation.get() == null) end.compareAndSet(UdpEnd.FINISHED, UdpEnd.ERROR)
+                            closePeer(peer)
                             throw error
-                        }
-                        received.incrementAndGet()
-                        observe(UDP_WRITE, peer) {
-                            output.writeShort(size)
-                            output.writeByte(10)
-                            output.writeByte(1)
-                            output.write(first.endpoint.address.address)
-                            output.writeShort(first.endpoint.port)
-                            output.write(buffer, 0, size)
+                        } finally {
+                            completion.done()
                         }
                     }
-                } catch (error: Exception) {
-                    closePeer(peer)
-                    throw error
-                }
-            }
-            try {
-                connection.send(payload, length = first.length)
-                sent++
-                while (peer.cancellation.get() == null) {
-                    val next = observe(UDP_READ, peer) {
-                        readDatagram(peer, input, payload, first.endpoint)
-                    } ?: break
-                    connection.send(payload, length = next.length)
+                    connection.send(payload, length = first.length)
                     sent++
+                    idle.forwarded()
+                    while (peer.cancellation.get() == null) {
+                        val next = observe(UDP_READ, peer) { readDatagram(peer, input, payload, first.endpoint) } ?: break
+                        connection.send(payload, length = next.length)
+                        sent++
+                        idle.forwarded()
+                    }
+                } catch (error: Exception) {
+                    if (peer.cancellation.get() == null) end.compareAndSet(UdpEnd.FINISHED, UdpEnd.ERROR)
+                    throw error
+                } finally {
+                    idle.close()
+                    try {
+                        if (response != null) finishDirections(peer, connection, response)
+                        else completion.done()
+                    } finally {
+                        completion.done()
+                    }
                 }
-            } finally {
-                finishDirections(peer, connection, response)
-                pipeline.udpEnded(UdpRecord(first.endpoint.port, sent, received.get()))
             }
         }
     }
 
     private fun readDatagram(peer: Peer, input: DataInputStream, payload: ByteArray, expected: Endpoint? = null): Frame? {
         while (peer.cancellation.get() == null) {
+            // Начало нового кадра ждёт таймер всей ассоциации. После первого байта срок только у этого кадра.
+            peer.socket.soTimeout = 0
             val firstByte = input.read()
             if (firstByte == -1) return null
+            val frame = DataInputStream(RelayHandshakeInput(input, { peer.socket.soTimeout = it }, System.nanoTime()))
             try {
-                val length = firstByte * 256 + input.readUnsignedByte()
+                val length = firstByte * 256 + frame.readUnsignedByte()
                 requireProtocol(length <= OutboundTransport.MAX_UDP_PAYLOAD)
-                val endpoint = readEndpoint(input, input.readUnsignedByte())
+                val endpoint = readEndpoint(frame, frame.readUnsignedByte())
                 if (expected == null) checkDestination(endpoint) else requireProtocol(endpoint == expected)
                 if (length <= payload.size) {
-                    input.readFully(payload, 0, length)
+                    frame.readFully(payload, 0, length)
                     return Frame(endpoint, length)
                 }
-                discardDatagram(peer.socket, input, payload, length)
+                var remaining = length
+                while (remaining > 0) {
+                    val count = frame.read(payload, 0, minOf(remaining, payload.size))
+                    if (count < 0) throw EOFException()
+                    remaining -= count
+                }
                 failures.record(TransportFailure(UDP_READ, TransportCategory.LIMIT, TransportCode.DATAGRAM_LIMIT))
             } catch (error: EOFException) {
                 throw ProtocolException("Неполный UDP-кадр.").apply { initCause(error) }
             }
         }
         return null
-    }
-
-    private fun discardDatagram(socket: Socket, input: DataInputStream, buffer: ByteArray, length: Int) {
-        val originalTimeout = socket.soTimeout
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        var remaining = length
-        while (remaining > 0) {
-            val timeLeft = deadline - System.nanoTime()
-            if (timeLeft <= 0) throw SocketTimeoutException("Не завершено чтение крупного UDP-кадра.")
-            socket.soTimeout = TimeUnit.NANOSECONDS.toMillis(timeLeft).coerceAtLeast(1).toInt()
-            val count = input.read(buffer, 0, minOf(remaining, buffer.size))
-            if (count < 0) throw EOFException()
-            remaining -= count
-        }
-        socket.soTimeout = originalTimeout
     }
 
     private fun readEndpoint(input: DataInputStream, headerLength: Int? = null): Endpoint {
@@ -535,18 +576,27 @@ class HevLoopbackRelay internal constructor(
     private fun closePeer(peer: Peer) {
         val reason = if (closing) TransportCancellation.SESSION else TransportCancellation.FLOW
         if (peer.cancellation.compareAndSet(null, reason)) {
+            // Эта проверка остаётся у SocketClosures и после ухода Peer из рабочих очередей.
+            fun confirmed(): Boolean {
+                if (!peer.socket.isClosed) return false
+                if (peer.closureCounted.compareAndSet(false, true)) openClients.decrementAndGet()
+                return true
+            }
             try {
-                closeRelay(peer.socket)
+                closures.close({ closeRelaySocket(peer.socket) }, ::confirmed, ::reportCloseFailure)
             } finally {
-                if (peer.socket.isClosed) openClients.decrementAndGet()
+                // close может выбросить исключение уже после освобождения сокета.
+                confirmed()
             }
         }
     }
 
     private fun closeRelay(socket: Closeable) {
-        closures.close(socket) {
-            failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP)
-        }
+        closures.close(socket, closeRelaySocket, ::reportCloseFailure)
+    }
+
+    private fun reportCloseFailure(error: Exception) {
+        failures.recordError(CLOSE, error, fallback = TransportCategory.CLEANUP)
     }
 
     override fun close() {
@@ -592,25 +642,37 @@ class HevLoopbackRelay internal constructor(
     fun socketClosures(): SocketCloseSummary = closures.snapshot() + transport.socketClosures()
 
     /** Повтор закрытия сокетов релея и исходящего транспорта, освобождение которых не подтвердилось. */
-    fun retryUnconfirmedClosures() {
-        closures.retryUnconfirmed { failures.recordError(CLOSE, it, fallback = TransportCategory.CLEANUP) }
+    private fun retryUnconfirmedClosures() {
+        closures.retryUnconfirmed(::reportCloseFailure)
         transport.retryUnconfirmedClosures()
     }
 
-    /** Владелец ждёт фактического освобождения на фоновом потоке. */
+    /** Ожидает владельцев ресурсов. Если серия повторов исчерпана, оставляет очистку неподтверждённой. */
     fun awaitDrained() {
         val owner = Thread.currentThread()
         try {
             drainWait = owner to "closeCompleted.await"
             closeCompleted.await()
-            drainWait = owner to "acceptThread.join"
-            acceptThread.join()
-            drainWait = owner to "requests.awaitTermination"
-            requests.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-            drainWait = owner to "responses.awaitTermination"
-            responses.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
-            drainWait = owner to "idleTimers.awaitTermination"
-            idleTimers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            retryUnconfirmedClosures()
+            fun awaitStage(label: String, finished: () -> Boolean, wait: () -> Unit): Boolean {
+                drainWait = owner to label
+                while (!finished()) {
+                    if (closures.hasExhaustedRetries() || transport.hasExhaustedClosures()) return false
+                    wait()
+                }
+                return true
+            }
+            if (!awaitStage("acceptThread.join", { !acceptThread.isAlive }) { acceptThread.join(DRAIN_CHECK_MILLIS) }) return
+            if (!awaitStage("requests.awaitTermination", { requests.isTerminated }) {
+                    requests.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            if (!awaitStage("responses.awaitTermination", { responses.isTerminated }) {
+                    responses.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            if (!awaitStage("idleTimers.awaitTermination", { idleTimers.isTerminated }) {
+                    idleTimers.awaitTermination(DRAIN_CHECK_MILLIS, TimeUnit.MILLISECONDS)
+                }) return
+            retryUnconfirmedClosures()
         } finally {
             drainWait = null
         }
@@ -656,12 +718,22 @@ class HevLoopbackRelay internal constructor(
         if (acceptThread.isAlive) pending = pending or 1
         if (!requests.isTerminated) pending = pending or 2
         if (!responses.isTerminated) pending = pending or 4
-        if (closeCompleted.count != 0L) pending = pending or 8
+        if (closeCompleted.count != 0L || !socketClosures().confirmed) pending = pending or 8
         if (!idleTimers.isTerminated) pending = pending or 16
         return pending
     }
 
+    /** При Stop ожидающий поток может прерваться. Снимок публикует последнее завершившееся направление. */
+    private class DirectionCompletion(private val publish: () -> Unit) {
+        private val remaining = AtomicInteger(2)
+
+        fun done() {
+            if (remaining.decrementAndGet() == 0) publish()
+        }
+    }
+
     private class Peer(val socket: Socket) {
+        val closureCounted = AtomicBoolean()
         val acceptedAt = System.nanoTime()
         val cancellation = AtomicReference<TransportCancellation?>()
         @Volatile var eof = false
@@ -700,6 +772,7 @@ class HevLoopbackRelay internal constructor(
     private companion object {
         val relayIds = AtomicInteger()
         val USER = "adaptive".toByteArray(Charsets.US_ASCII)
+        private const val DRAIN_CHECK_MILLIS = 200L
         const val TCP_BUFFER = 8 * 1_024
         const val SLOT_WAIT_MILLIS = 5_000L
         // UDP_BUF_SIZE закреплённой версии HEV. lwIP может фрагментировать IPv4 при MTU 1280.

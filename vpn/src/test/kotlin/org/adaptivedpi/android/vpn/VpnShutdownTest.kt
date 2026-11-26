@@ -7,7 +7,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import org.adaptivedpi.android.vpn.diagnostics.CleanupIssue
 import org.adaptivedpi.android.vpn.diagnostics.CleanupStep
+import org.adaptivedpi.android.vpn.diagnostics.ExceptionKind
+import org.adaptivedpi.android.vpn.diagnostics.VpnCleanupDetails
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -232,6 +235,52 @@ class VpnShutdownTest {
             CleanupStep.ActiveMarker to { steps += "marker" },
         )
         assertEquals(listOf("foreground", "marker", "cleanup error TunClose"), steps)
+    }
+
+    @Test
+    fun restartRequiresConfirmationForEachCriticalCleanupStep() = runBlocking {
+        val steps = CleanupStep.entries
+        val auxiliary = setOf(CleanupStep.ActiveMarker, CleanupStep.TransportSnapshot, CleanupStep.ForegroundNotification)
+        for (failed in steps) {
+            val lifecycle = VpnLifecycle()
+            val completed = CompletableDeferred<VpnCleanupDetails>()
+            val visited = mutableListOf<CleanupStep>()
+            val shutdown = VpnShutdown(
+                scope = this,
+                delayMillis = 2_000,
+                clock = { System.nanoTime() / 1_000_000 },
+                release = {
+                    val issues = mutableListOf<CleanupIssue>()
+                    val operations = steps.map { step ->
+                        step to {
+                            visited.add(step)
+                            if (step == failed) throw IOException("Тестовый отказ")
+                        }
+                    }
+                    releaseVpnResources(
+                        { step, _ -> issues.add(CleanupIssue(step, ExceptionKind.IOException)) },
+                        *operations.toTypedArray(),
+                    )
+                    VpnCleanupDetails(null, 0, true, true, 0, null, 0, 0, issues)
+                },
+                onDelay = { error("Задержка очистки $failed") },
+                onComplete = { result ->
+                    val details = result.getOrThrow()
+                    val terminal = if (details.incomplete) VpnEvent.CleanupFailed else VpnEvent.ServiceDestroyed
+                    lifecycle.serviceEnded("session", terminal, released = !details.incomplete)
+                    completed.complete(details)
+                },
+            )
+            assertTrue(lifecycle.beginConsent("session"))
+            lifecycle.update("session", VpnEvent.StartRequested)
+            assertTrue(lifecycle.attachService("session", shutdown::start))
+            lifecycle.stop()
+            assertFalse(lifecycle.beginConsent("early"))
+            val details = withTimeout(2_000) { completed.await() }
+            assertEquals(steps, visited)
+            assertEquals(listOf(failed), details.issues.map { it.step })
+            assertEquals(failed in auxiliary, lifecycle.beginConsent("next"))
+        }
     }
 
     @Test

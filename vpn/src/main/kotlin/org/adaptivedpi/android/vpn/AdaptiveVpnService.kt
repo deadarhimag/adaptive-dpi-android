@@ -254,6 +254,7 @@ class AdaptiveVpnService : VpnService() {
                     started.start { failed ->
                         if (failed) mainExecutor.execute { failTransport(attachedId) }
                     }
+                    if (target != null) TransportTestHooks.fixtureRouteStarted(this@AdaptiveVpnService, physical)
                     watchPhysicalNetwork(attachedId, physical)
                 }
                 if (!shutdown.started) stopHandler.post(refreshTransport)
@@ -576,6 +577,7 @@ class AdaptiveVpnService : VpnService() {
     private suspend fun releaseResources(): Released {
         sessionStart?.join()
         sessionStart = null
+        TransportTestHooks.fixtureRouteEnded(this)
         val runningTransport = transport
         transport = null
         closingTransport = runningTransport

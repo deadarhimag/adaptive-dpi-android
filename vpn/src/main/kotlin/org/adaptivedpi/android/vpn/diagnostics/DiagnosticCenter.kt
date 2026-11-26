@@ -15,6 +15,7 @@ internal class DiagnosticCenter(
     private val notify: (DiagnosticEvent) -> Boolean,
 ) {
     val events = current.asStateFlow()
+    val unreadableRecords get() = journal.unreadableRecords
     private val collectingCrash = AtomicBoolean()
     private var historyRead = false
 
@@ -38,14 +39,20 @@ internal class DiagnosticCenter(
      */
     @Synchronized
     fun recordProcessExits(records: List<ProcessExitRecord>) {
-        val known = current.value.mapTo(HashSet<UUID>()) { it.id }
-        val added = records.mapNotNull { record ->
+        if (!historyRead) readHistory()?.let { current.value = journal.bounded(current.value + it) }
+        val processed = journal.processExitIds
+        val known = current.value.mapTo(processed.toHashSet()) { it.id }
+        val observed = mutableListOf<UUID>()
+        val added = records.take(ExitReasonReader.MAX_RECORDS).mapNotNull { record ->
             val code = ExitReasonReader.codeOf(record.reason) ?: return@mapNotNull null
+            if (record.timestampMillis < 0) return@mapNotNull null
             val id = ExitReasonReader.idOf(record)
-            if (!journal.retains(record.timestampMillis) || !known.add(id)) return@mapNotNull null
+            observed += id
+            if (!known.add(id)) return@mapNotNull null
+            // Android даёт календарную отметку. Срок хранения отсчитываем с момента наблюдения.
             newEvent(code, VpnSnapshot(VpnState.Idle), id = id, timeMillis = record.timestampMillis)
         }
-        if (added.isNotEmpty()) store(added + current.value)
+        if (observed.any { it !in processed }) store(added + current.value, observed)
     }
 
     @Synchronized
@@ -111,7 +118,7 @@ internal class DiagnosticCenter(
         val recovered = buildList {
             if (crash != null) add(crash)
             if (interrupted != null && crash?.vpn?.mayHaveActiveVpn != true) {
-                add(interrupted.copy(timeMillis = journal.now()))
+                add(journal.stamp(interrupted.copy(timeMillis = journal.now())))
             }
         }
         // Уже прочитанные события сохраняют свои отметки, если удаление слота не удалось.
@@ -134,11 +141,14 @@ internal class DiagnosticCenter(
         }
     }
 
-    private fun store(entries: List<DiagnosticEvent>): Boolean {
+    private fun store(entries: List<DiagnosticEvent>, observedExits: List<UUID> = emptyList()): Boolean {
         val unread = if (historyRead) emptyList() else readHistory()
-        val bounded = journal.bounded(entries + unread.orEmpty())
+        val previous = journal.processExitIds
+        val ids = if (observedExits.isEmpty()) previous else
+            (observedExits + previous).distinct().take(ExitReasonReader.MAX_RECORDS)
+        val bounded = journal.bounded(entries + unread.orEmpty(), ids)
         current.value = bounded
-        return historyRead && runCatching { journal.write(bounded) }.isSuccess
+        return historyRead && runCatching { journal.write(bounded, ids) }.isSuccess
     }
 
     private fun readHistory() = runCatching(journal::read).onSuccess { historyRead = true }.getOrNull()
@@ -150,7 +160,7 @@ internal class DiagnosticCenter(
         id: UUID = UUID.randomUUID(),
         cleanup: VpnCleanupDetails? = null,
         timeMillis: Long = journal.now(),
-    ) = DiagnosticEvent.create(code, version, api, vpn, error, id, timeMillis, androidVersion, cleanup)
+    ) = journal.stamp(DiagnosticEvent.create(code, version, api, vpn, error, id, timeMillis, androidVersion, cleanup))
 
     private companion object {
         const val ALERT_INTERVAL_MILLIS = 60_000L

@@ -3,6 +3,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application>
+        <provider
+            android:name="org.adaptivedpi.android.SafTestProvider"
+            android:authorities="org.adaptivedpi.android.test.saf"
+            android:exported="true"
+            android:permission="org.adaptivedpi.android.permission.TRANSPORT_PROBE" />
         <receiver
             android:name="org.adaptivedpi.android.AppTransportProbe"
             android:exported="true"

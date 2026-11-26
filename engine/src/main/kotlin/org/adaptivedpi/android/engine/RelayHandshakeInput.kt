@@ -5,7 +5,7 @@ import java.io.InputStream
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
-/** Один бюджет на весь обмен аутентификации, включая ожидание рабочего потока. */
+/** Один бюджет на весь обмен аутентификации или на начатый UDP-кадр. */
 internal class RelayHandshakeInput(
     input: InputStream,
     private val setTimeoutMillis: (Int) -> Unit,

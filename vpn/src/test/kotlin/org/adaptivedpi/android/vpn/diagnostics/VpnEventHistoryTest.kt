@@ -214,7 +214,15 @@ class VpnEventHistoryTest {
             assertEquals(1L, state.unreadableRecords)
             assertFalse(state.storageError)
             assertEquals(0L, state.droppedInformational)
+            val appended = VpnJournalEvent.create(VpnEventType.Started)
+            assertTrue(writer.record(appended))
+            withTimeout(5_000) { writer.state.first { it.entries.any { event -> event.id == appended.id } } }
         }
+        withWriter(store) { restarted ->
+            assertEquals(1L, withTimeout(5_000) { restarted.state.first { it.loaded } }.unreadableRecords)
+            assertTrue(restarted.clear())
+        }
+        assertEquals(0, store.readStored().unreadable)
     }
 
     @Test

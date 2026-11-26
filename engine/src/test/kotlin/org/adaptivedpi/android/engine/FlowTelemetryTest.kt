@@ -3,6 +3,8 @@ package org.adaptivedpi.android.engine
 import org.adaptivedpi.android.engine.flow.FlowFailure
 import org.adaptivedpi.android.engine.flow.FlowHello
 import org.adaptivedpi.android.engine.flow.FlowKind
+import org.adaptivedpi.android.engine.flow.FlowKey
+import org.adaptivedpi.android.engine.flow.FlowPipeline
 import org.adaptivedpi.android.engine.flow.FlowObserver
 import org.adaptivedpi.android.engine.flow.FlowOutcomeRecorder
 import org.adaptivedpi.android.engine.flow.FlowRecord
@@ -53,6 +55,99 @@ class FlowTelemetryTest {
         abandoned: Boolean = false,
         rate: Long? = null,
     ) = FlowRecord(1, 443, kind, hello, stage, failure, 5, null, 10, 20, abandoned, rate)
+
+    @Test
+    fun abandonmentRequiresAnObservedDisconnectAtOrAfterTheResponse() {
+        val outcomes = Outcomes()
+        var now = 1_000_000L
+        val pipeline = FlowPipeline(outcomes, {}, clock = { now })
+        listOf(-1L to false, 0L to true, 500_000L to true, 2_000_000L to false).forEach { (delta, expected) ->
+            val flow = pipeline.begin(FlowKey(ip, 443), 1_000_000)
+            if (delta < 0) flow.clientClosed()
+            now += 10_000_000
+            flow.receivedFromServer(10)
+            if (delta >= 0) {
+                now += delta
+                flow.clientClosed()
+            }
+            flow.finish()
+            assertEquals(expected, outcomes.queue.remove().clientAbandoned)
+        }
+        val cancelled = pipeline.begin(FlowKey(ip, 443), 1_000_000)
+        cancelled.receivedFromServer(10)
+        cancelled.clientClosed()
+        cancelled.failed(FlowFailure(TransportCategory.CANCELLED, TransportCode.SESSION_CANCELLED, null))
+        cancelled.finish()
+        assertFalse(outcomes.queue.remove().clientAbandoned)
+        val unanswered = pipeline.begin(FlowKey(ip, 443), 1_000_000)
+        unanswered.clientClosed()
+        unanswered.finish()
+        assertFalse(outcomes.queue.remove().clientAbandoned)
+    }
+
+    @Test
+    fun failureBeforeConfirmedWriteNeverProducesANegativeInterval() {
+        val outcomes = Outcomes()
+        var now = 1_000_000L
+        val pipeline = FlowPipeline(outcomes, {}, clock = { now })
+        val flow = pipeline.begin(FlowKey(ip, 443), 1_000_000)
+        flow.failed(FlowFailure(TransportCategory.RESET, TransportCode.UNKNOWN, 104))
+        now += 2_000_000
+        flow.firstPortionSent()
+        flow.finish()
+        assertNull(outcomes.queue.remove().millisToFailure)
+    }
+
+    @Test
+    fun captureRetainsTheFirstReadAndSurvivesFailureOfReporting() {
+        val pipeline = FlowPipeline(Outcomes(), { error("Журнал недоступен") },
+            classify = { _, _ -> error("Классификатор недоступен") })
+        val flow = pipeline.begin(FlowKey(ip, 443), 0)
+        val bytes = ByteArray(ClientHelloInspector.MAX_PREFIX + 9) { 0x16 }
+        val captured = pipeline.capture(flow, bytes, bytes.size) { _, _, _, _ -> error("Лишнее чтение") }
+        assertArrayEquals(bytes, captured.bytes.copyOf(captured.size))
+        flow.finish()
+    }
+
+    @Test
+    fun httpClassificationRequiresACompleteMethodInTheFirstRead() {
+        val outcomes = Outcomes()
+        val pipeline = FlowPipeline(outcomes, {})
+        val cases = listOf(
+            "G" to FlowKind.OTHER,
+            "P" to FlowKind.OTHER,
+            "POS" to FlowKind.OTHER,
+            "GET" to FlowKind.OTHER,
+            "GET " to FlowKind.HTTP,
+            "POST /resource HTTP/1.1\r\n" to FlowKind.HTTP,
+            "GE\u0000\u0017" to FlowKind.OTHER,
+            "GET \u0000\u0017" to FlowKind.OTHER,
+            "ordinary bytes" to FlowKind.OTHER,
+        )
+        for ((text, expected) in cases) {
+            val flow = pipeline.begin(FlowKey(ip, 80), 0)
+            val bytes = text.toByteArray()
+            val captured = pipeline.capture(flow, bytes, bytes.size) { _, _, _, _ -> error("Лишнее чтение") }
+            assertArrayEquals(bytes, captured.bytes.copyOf(captured.size))
+            flow.finish()
+            assertEquals(text, expected, outcomes.queue.remove().kind)
+        }
+    }
+
+    @Test
+    fun anIncompleteTlsPrefixKeepsTheExistingCaptureBehavior() {
+        val outcomes = Outcomes()
+        val pipeline = FlowPipeline(outcomes, {})
+        val flow = pipeline.begin(FlowKey(ip, 443), 0)
+        val prefix = byteArrayOf(0x16, 0x03)
+        var reads = 0
+        val captured = pipeline.capture(flow, prefix, prefix.size) { _, _, _, _ -> reads++; -1 }
+        flow.finish()
+        assertEquals(1, reads)
+        assertTrue(captured.eof)
+        assertArrayEquals(prefix, captured.bytes.copyOf(captured.size))
+        assertEquals(FlowKind.TLS, outcomes.queue.remove().kind)
+    }
 
     @Test
     fun recorderCountsKindsStagesHelloSizesAndRatesWithoutNames() {

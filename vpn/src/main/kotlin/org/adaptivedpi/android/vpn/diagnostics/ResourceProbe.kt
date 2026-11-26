@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.adaptivedpi.android.engine.TransportCategory
+import org.adaptivedpi.android.engine.TransportCode
 import org.adaptivedpi.android.engine.TransportDirection
 import org.adaptivedpi.android.engine.TransportFailure
 import org.adaptivedpi.android.engine.TransportFailureReporter
@@ -46,8 +47,8 @@ internal enum class ProbeStatus {
     TLS_ALERT,
     /** Сброс соединения после отправки ClientHello. */
     TLS_RESET,
-    /** Нет ни одного байта от сервера после ClientHello дольше порога. */
-    TLS_SILENCE,
+    /** Истёк срок TLS-обмена. Наличие частичного ответа до тайм-аута неизвестно. */
+    TLS_TIMEOUT,
     /** Сброс на этапе установления TCP (включая отказ в подключении). */
     TCP_RESET,
     TCP_TIMEOUT,
@@ -95,6 +96,7 @@ internal class ResourceProbe(
     private val addressAllowed: (InetAddress) -> Boolean = ::isProbeAddressAllowed,
     private val minSilenceMillis: Int = MIN_SILENCE_MILLIS,
     private val errnoOf: (Throwable) -> Int? = ::errnoOfCause,
+    private val connectSocket: (Socket, InetSocketAddress, Int) -> Unit = Socket::connect,
 ) {
     /**
      * [onlyAddress] - режим «только этот адрес»: DNS не вызывается, редиректы не выполняются.
@@ -112,6 +114,7 @@ internal class ResourceProbe(
         require(expectedSha256 == null || expectedSha256.matches(Regex("[0-9a-fA-F]{64}")))
         require(timeouts.values.all { it in 1..30_000 })
         require(totalTimeoutMillis in 1..60_000)
+        require(onlyAddress == null || onlyAddress.address.size == family.addressSize)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(totalTimeoutMillis.toLong())
         val results = mutableListOf<ProbeResult>()
         var target = uri
@@ -209,7 +212,7 @@ internal class ResourceProbe(
         } catch (error: CancellationException) {
             throw error
         } catch (error: IOException) {
-            finish(ProbeStatus.DNS_ERROR, error)
+            finish(if (error is TransportSocketException) ProbeStatus.PROBE_UNAVAILABLE else ProbeStatus.DNS_ERROR, error)
             null
         }
     }
@@ -235,6 +238,7 @@ internal class ResourceProbe(
         }
         var socket: Socket? = null
         var rtt: Long? = null
+        val connectStarted = java.util.concurrent.atomic.AtomicBoolean()
         fun closeSocket() { runCatching { socket?.close() } }
 
         suspend fun <T : Any> stage(
@@ -261,7 +265,11 @@ internal class ResourceProbe(
             return try {
                 val value = withTimeoutOrNull(timeout.toLong()) { action(timeout) }
                 if (value == null) {
-                    finish(if (stage == ProbeStage.TCP) ProbeStatus.TCP_TIMEOUT else ProbeStatus.TIMEOUT)
+                    finish(when (stage) {
+                        ProbeStage.TCP -> if (connectStarted.get()) ProbeStatus.TCP_TIMEOUT else ProbeStatus.PROBE_UNAVAILABLE
+                        ProbeStage.TLS -> ProbeStatus.TLS_TIMEOUT
+                        else -> ProbeStatus.TIMEOUT
+                    })
                     null
                 } else {
                     val result = status(value)
@@ -285,22 +293,23 @@ internal class ResourceProbe(
 
         try {
             val candidate = Socket(Proxy.NO_PROXY).also { socket = it }
-            val connectStart = System.nanoTime()
-            val raw = stage(ProbeStage.TCP, { timeout ->
+            val connectMillis = stage(ProbeStage.TCP, { timeout ->
                 runIo({ closeSocket() }) {
-                    network.prepare(candidate)
-                    candidate.connect(InetSocketAddress(address, port), timeout)
-                    candidate
+                    setup(TransportOperation.BIND) { network.prepare(candidate) }
+                    connectStarted.set(true)
+                    val connectStart = System.nanoTime()
+                    connectSocket(candidate, InetSocketAddress(address, port), timeout)
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - connectStart).coerceAtLeast(1)
                 }
             }) ?: return Attempt(finished = false)
-            val connectMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - connectStart).coerceAtLeast(1)
+            val raw = candidate
             rtt = connectMillis
             results[results.lastIndex] = results.last().copy(rttMillis = connectMillis)
             val silence = maxOf(3 * connectMillis, minSilenceMillis.toLong()).coerceAtMost(MAX_SILENCE_MILLIS).toInt()
             val wire = if (https) {
                 stage(ProbeStage.TLS, { _ ->
                     runIo({ closeSocket() }) {
-                        network.configureReadTimeout(raw, silence)
+                        setup(TransportOperation.INIT) { network.configureReadTimeout(raw, silence) }
                         val tls = tlsFactory.createSocket(raw, host, port, true) as SSLSocket
                         try {
                             tls.sslParameters = tls.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
@@ -316,7 +325,7 @@ internal class ResourceProbe(
             try {
                 val response = stage(ProbeStage.HTTP, { timeout ->
                     runIo({ closeSocket() }) {
-                        network.configureReadTimeout(raw, timeout)
+                        setup(TransportOperation.INIT) { network.configureReadTimeout(raw, timeout) }
                         val authority = asciiUri.rawAuthority
                         wire.getOutputStream().write(
                             ("GET $path HTTP/1.0\r\nHost: $authority\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n")
@@ -332,17 +341,20 @@ internal class ResourceProbe(
                         in 200..299 -> ProbeStatus.OK
                         else -> ProbeStatus.HTTP_ERROR
                     }
-                }, httpStatus = Response::code) ?: return Attempt(finished = results.last().status in HTTP_ANSWERED)
+                }, httpStatus = Response::code) ?: return Attempt(
+                    finished = expectedSha256 == null && results.last().status in HTTP_ANSWERED,
+                )
                 if (response.code in REDIRECT_CODES) return Attempt(finished = true, redirect = response.location)
                 if (expectedSha256 == null) {
                     results.add(ProbeResult(ProbeStage.CONTENT, ProbeStatus.INDETERMINATE, 0, hop = hop, attempt = attempt, rttMillis = rtt))
                 } else {
-                    stage(ProbeStage.CONTENT, { timeout ->
+                    val verified = stage(ProbeStage.CONTENT, { timeout ->
                         runIo({ closeSocket() }) {
-                            network.configureReadTimeout(raw, timeout)
+                            setup(TransportOperation.INIT) { network.configureReadTimeout(raw, timeout) }
                             response.hash().equals(expectedSha256, ignoreCase = true)
                         }
                     }, status = { if (it) ProbeStatus.OK else ProbeStatus.CONTENT_MISMATCH })
+                    if (verified == null) return Attempt(finished = false)
                 }
             } finally {
                 closeSocket()
@@ -354,8 +366,15 @@ internal class ResourceProbe(
         }
     }
 
+    private inline fun <T> setup(operation: TransportOperation, block: () -> T): T = try {
+        block()
+    } catch (error: Exception) {
+        if (error is TransportSocketException || error is CancellationException) throw error
+        throw TransportSocketException(TransportCode.UNKNOWN, TransportCategory.SOCKET_SETUP, operation, error)
+    }
+
     private fun classify(stage: ProbeStage, error: Throwable): Pair<ProbeStatus, Int?> {
-        if (error is TransportSocketException) return ProbeStatus.PROBE_UNAVAILABLE to null
+        if (error is TransportSocketException) return ProbeStatus.PROBE_UNAVAILABLE to errnoOf(error)
         val site = TransportSite(TransportSubsystem.SOCKET, TransportOperation.CONNECT, TransportProtocol.TCP, TransportDirection.OUTBOUND)
         var failure = TransportFailure(site, TransportCategory.UNKNOWN)
         TransportFailureReporter(errnoOf) { failure = it }.recordError(site, error)
@@ -375,7 +394,7 @@ internal class ResourceProbe(
                 // сообщения библиотеки. Текст в результат не попадает; источник alert не аутентифицирован.
                 causes.any { it is SSLException && it.message?.contains("alert", ignoreCase = true) == true } -> ProbeStatus.TLS_ALERT
                 failure.category == TransportCategory.RESET || failure.category == TransportCategory.CLOSED -> ProbeStatus.TLS_RESET
-                timedOut -> ProbeStatus.TLS_SILENCE
+                timedOut -> ProbeStatus.TLS_TIMEOUT
                 else -> ProbeStatus.TLS_ERROR
             }
             else -> if (timedOut) ProbeStatus.TIMEOUT else ProbeStatus.NETWORK_ERROR

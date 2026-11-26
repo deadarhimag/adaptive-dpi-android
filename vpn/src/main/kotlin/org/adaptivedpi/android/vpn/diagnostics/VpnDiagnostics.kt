@@ -11,6 +11,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
+import android.provider.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,8 @@ object VpnDiagnostics {
     @Volatile private var startup: Deferred<DiagnosticCenter>? = null
     @Volatile private var activeVpn: Pair<UUID, VpnSnapshot>? = null
     private var notifications: CriticalNotifications? = null
+    @Volatile private var center: DiagnosticCenter? = null
+    val unreadableRecords get() = center?.unreadableRecords ?: 0L
 
     val events = current.asStateFlow()
 
@@ -53,13 +57,19 @@ object VpnDiagnostics {
             app.packageManager.getPackageInfo(app.packageName, 0).versionName
         }.getOrNull()
         val initialized = DiagnosticCenter(
-            DiagnosticJournal(File(app.noBackupFilesDir, "diagnostics")),
+            DiagnosticJournal(
+                File(app.noBackupFilesDir, "diagnostics"),
+                monotonicMillis = SystemClock::elapsedRealtime,
+                bootCount = runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, -1) }
+                    .getOrNull()?.takeIf { it >= 0 },
+            ),
             version,
             Build.VERSION.SDK_INT,
             Build.VERSION.RELEASE,
             current,
             dispatcher::post,
         )
+        center = initialized
         notifications = dispatcher
         initialized.recovered.forEach { (event, sessionId) ->
             val type = if (event.code == DiagnosticCode.AppCrash) VpnEventType.ProcessCrash else VpnEventType.InterruptedSession

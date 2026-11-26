@@ -47,8 +47,28 @@ class SocketClosuresTest {
         closures.retryUnconfirmed { reported += it }
         assertEquals(SocketCloseSummary(alreadyClosed = 1, failed = 1), closures.snapshot())
         assertTrue(closures.snapshot().confirmed)
-        assertEquals(2, attempts)
-        assertEquals(2, reported.size)
+        assertEquals(3, attempts)
+        assertEquals(3, reported.size)
+    }
+
+    @Test
+    fun aLateSocketHasTheSameBoundedRetryBudget() {
+        val closures = SocketClosures()
+        val socket = Socket()
+        try {
+            var attempts = 0
+            closures.retryUnconfirmed { throw AssertionError(it) }
+            closures.close({
+                if (++attempts < 3) throw IOException("Временный отказ")
+                socket.close()
+            }, socket::isClosed) {}
+            assertTrue(socket.isClosed)
+            assertTrue(closures.snapshot().confirmed)
+            assertFalse(closures.hasExhaustedRetries())
+            assertEquals(3, attempts)
+        } finally {
+            socket.close()
+        }
     }
 
     @Test

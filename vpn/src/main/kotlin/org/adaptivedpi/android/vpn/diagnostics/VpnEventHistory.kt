@@ -82,7 +82,7 @@ internal class VpnEventWriter(
         scope.launch {
             val stored = runCatching(store::readStored)
             diskHistoryRead = stored.isSuccess
-            stored.getOrNull()?.let { unreadableRecords.addAndGet(it.unreadable.toLong()) }
+            stored.getOrNull()?.let { unreadableRecords.set(it.unreadable.toLong()) }
             publish(VpnEventHistoryState(stored.getOrNull()?.entries.orEmpty(), true, stored.isFailure))
             for (command in commands) {
                 when (command) {
@@ -92,7 +92,7 @@ internal class VpnEventWriter(
                     }
                     is Command.Clear -> {
                         ordinarySlots.release()
-                        val saved = persist(emptyList(), keepOnError = true)
+                        val saved = persist(emptyList(), keepOnError = true, clearLosses = true)
                         if (saved) diskHistoryRead = true
                         command.completed.complete(saved)
                     }
@@ -138,7 +138,7 @@ internal class VpnEventWriter(
     private fun append(event: VpnJournalEvent) {
         val existing = current.value.entries
         val restored = if (diskHistoryRead) emptyList() else runCatching(store::readStored).getOrNull()?.let {
-            unreadableRecords.addAndGet(it.unreadable.toLong())
+            unreadableRecords.set(it.unreadable.toLong())
             it.entries
         }
         if (restored == null) {
@@ -164,9 +164,12 @@ internal class VpnEventWriter(
         persist(store.bounded(listOf(event) + history))
     }
 
-    private fun persist(entries: List<VpnJournalEvent>, keepOnError: Boolean = false): Boolean {
-        val saved = runCatching { store.write(entries) }.isSuccess
-        val visible = if (!saved && keepOnError) current.value.entries else entries
+    private fun persist(entries: List<VpnJournalEvent>, keepOnError: Boolean = false, clearLosses: Boolean = false): Boolean {
+        val losses = if (clearLosses) 0L else unreadableRecords.get()
+        val bounded = store.bounded(entries, losses)
+        val saved = runCatching { store.write(bounded, losses) }.isSuccess
+        if (saved && clearLosses) unreadableRecords.set(0)
+        val visible = if (!saved && keepOnError) current.value.entries else bounded
         if (!keepOnError) countEvictedCritical(visible)
         if (saved) unpersistedCritical.clear()
         publish(VpnEventHistoryState(visible, loaded = true, storageError = !saved))
