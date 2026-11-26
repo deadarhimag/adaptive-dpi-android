@@ -203,6 +203,8 @@ class PcapEvidence(unittest.TestCase):
                   "rst_filter": "attach=0 outcome=silence detach=0", "splice": "sent=1 received=S"}
         self.metadata = {
             "schemaVersion": 1, "fixtureVersion": pcap.FIXTURE_VERSION, "identity": IDENTITY,
+            "generator": "kernel-ops-host.c", "captureClock": "userspace UNIX microseconds",
+            "limits": {"seconds": 60, "bytes": wire.MAX_PCAP},
             "seed": seed, "kernel": "synthetic", "startedUs": 1_000_000, "endedUs": 2_000_000,
             "fixtureExitCode": 0, "dropped": 0, "network": {
                 "freshNamespace": True, "interfaces": ["lo"], "mainRoutes": [], "addresses": ["127.0.0.1/8"],
@@ -326,6 +328,273 @@ class PcapEvidence(unittest.TestCase):
             launch.assert_not_called()
         self.assertEqual(["status.json"], sorted(path.name for path in output.iterdir()))
         self.assertEqual("failed", json.loads((output / "status.json").read_text())["outcome"])
+
+
+class CaptureReview(unittest.TestCase):
+    def setUp(self):
+        self.fixture = PcapEvidence("test_success_and_report_matches_capture")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.ports = wire.ports(self.fixture.metadata["seed"])
+
+    def test_reused_port_pair_and_second_handshake(self):
+        client, server = self.ports["tcpinfo"]
+        second_syn = ("tcpinfo", frame(client, server, 300, 0, wire.SYN))
+        second_handshake = [
+            second_syn, ("tcpinfo", frame(server, client, 400, 301, wire.SYN | wire.ACK)),
+            ("tcpinfo", frame(client, server, 301, 401, wire.ACK)),
+        ]
+        empty_close = [
+            ("tcpinfo", frame(client, server, 301, 401, wire.FIN | wire.ACK)),
+            ("tcpinfo", frame(server, client, 401, 302, wire.FIN | wire.ACK)),
+        ]
+        for extra in ([second_syn], second_handshake, second_handshake + empty_close):
+            with self.subTest(packets=len(extra)):
+                self.fixture.write(self.fixture.frames + extra)
+                with self.assertRaises(ValueError):
+                    self.fixture.verify()
+
+    def test_foreign_ack_fin_rst_on_expected_ports(self):
+        for name, flags in (("tcpinfo", wire.ACK), ("tcpinfo", wire.FIN | wire.ACK),
+                            ("rst_filter", wire.RST | wire.ACK)):
+            client, server = self.ports[name]
+            for seq, ack in ((900, 101), (201, 901)):
+                with self.subTest(flags=flags, seq=seq, ack=ack):
+                    packet = frame(server, client, seq, ack, flags)
+                    self.fixture.write(self.fixture.frames + [(name, packet)])
+                    with self.assertRaises(ValueError):
+                        self.fixture.verify()
+            if flags & (wire.FIN | wire.RST):
+                with self.subTest(replacement=flags):
+                    packets = [(flow, data) for flow, data in self.fixture.frames
+                               if not (flow == name and wire.parse_frame(data)["src"] == server
+                                       and wire.parse_frame(data)["flags"] & (wire.FIN | wire.RST))]
+                    self.fixture.write(packets + [(name, frame(server, client, 900, 101, flags))])
+                    with self.assertRaises(ValueError):
+                        self.fixture.verify()
+
+    def test_retransmissions_and_wrapping_sequence_numbers(self):
+        packets = []
+        for name, data in self.fixture.frames:
+            packet = wire.parse_frame(data)
+            if name == "split":
+                # Move both ISNs near the sequence space boundary without changing payload.
+                data = bytearray(data)
+                seq = (packet["seq"] - (105 if packet["src"] == self.ports[name][0] else 205)) & 0xFFFFFFFF
+                ack = (packet["ack"] - (205 if packet["src"] == self.ports[name][0] else 105)) & 0xFFFFFFFF
+                struct.pack_into("!II", data, 38, seq, ack if packet["flags"] & wire.ACK else 0)
+            packets.append((name, data))
+            if name == "split" and (packet["flags"] & wire.SYN or packet["data"]):
+                packets.append((name, data))
+        self.fixture.write(packets)
+        self.fixture.verify()
+        # The filtered client can send FIN after the first reset. The peer's
+        # response is then a bare reset with the SEQ acknowledged by the FIN.
+        client, server = self.ports["rst_filter"]
+        self.fixture.write(packets + [
+            ("rst_filter", frame(client, server, 101, 201, wire.FIN | wire.ACK)),
+            ("rst_filter", frame(server, client, 201, 0, wire.RST)),
+        ])
+        self.fixture.verify()
+
+    def test_required_capture_contract(self):
+        for key, invalid in (
+            ("generator", "other.c"), ("captureClock", "monotonic"),
+            ("limits", {"seconds": 61, "bytes": wire.MAX_PCAP}),
+            ("limits", {"seconds": 60, "bytes": wire.MAX_PCAP + 1}),
+            ("fixtureVersion", True), ("seed", float(self.fixture.metadata["seed"])),
+            ("kernel", ""), ("network", {**self.fixture.metadata["network"], "mtu": True}),
+            ("startedUs", True), ("endedUs", 999_999),
+            ("dropped", False), ("fixtureExitCode", False),
+        ):
+            current = self.fixture.metadata[key]
+            try:
+                with self.subTest(field=key, dynamic=invalid):
+                    self.fixture.metadata[key] = invalid
+                    with self.assertRaises(ValueError):
+                        self.fixture.verify()
+                with self.subTest(missing=key):
+                    self.fixture.metadata.pop(key)
+                    with self.assertRaises(ValueError):
+                        self.fixture.verify()
+            finally:
+                self.fixture.metadata[key] = current
+
+
+class CollectionReview(unittest.TestCase):
+    def setUp(self):
+        self.fixture = PcapEvidence("test_success_and_report_matches_capture")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.mark_passed()
+        self.run = self.fixture.root
+        self.public = self.run / "publish"
+        evidence.save(self.run / "start.json", {"schemaVersion": 1, "identity": IDENTITY, "environment": {}})
+        evidence.save(self.run / "jvm-start.json", {"identity": IDENTITY})
+        evidence.save(self.run / "jvm-process.json", {"identity": IDENTITY, "exitCode": 0})
+        (self.run / "jvm-gradle.log").write_text("synthetic Gradle process\n", encoding="utf-8")
+        self.outputs = {}
+        self.catalog = self.run / "catalog.json"
+        evidence.save(self.catalog, {"schemaVersion": 1, "modules": {
+            "engine": {"Fixture": ["one"]}, "vpn": {"Fixture": ["one"]},
+        }})
+        for module, task in junit.TASKS.items():
+            self.outputs[module] = self.run / module
+            self.outputs[module].mkdir()
+            (self.outputs[module] / "TEST-Fixture.xml").write_bytes(xml([("one", None)]))
+            event = {"identity": IDENTITY, "task": task, "gradle": "8.13"}
+            evidence.save(self.run / "task-events" / f"{module}-start.json", event)
+            evidence.save(self.run / "task-events" / f"{module}-finish.json", {**event, "outcome": "passed"})
+
+    def finalize(self):
+        with mock.patch.object(junit, "RESULTS", self.outputs), mock.patch.object(evidence, "CATALOG", self.catalog):
+            return evidence.finalize(self.run, IDENTITY, "success", "success", None)
+
+    def test_pcap_oserror_keeps_both_jvm_modules(self):
+        with mock.patch.object(evidence, "collect_pcap", side_effect=OSError("fixture PCAP")):
+            self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "jvm/vpn/TEST-Fixture.xml").is_file())
+        self.assertTrue((self.public / "jvm/engine/TEST-Fixture.xml").is_file())
+
+    def test_unreadable_xml_keeps_other_files_and_pcap(self):
+        engine = self.outputs["engine"] / "TEST-Unreadable.xml"
+        engine.write_bytes(b"denied")
+        copy_file = evidence.shutil.copyfile
+
+        def deny(source, target):
+            if source == engine:
+                raise PermissionError("injected read denial")
+            return copy_file(source, target)
+
+        with mock.patch.object(evidence.shutil, "copyfile", side_effect=deny):
+            self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+        self.assertTrue((self.public / "jvm/engine/TEST-Fixture.xml").is_file())
+        self.assertTrue((self.public / "jvm/vpn/TEST-Fixture.xml").is_file())
+        result = evidence.read(self.public / "jvm/validation.json")["modules"]["engine"]
+        self.assertIn(engine.name, str(result["metadataErrors"]))
+
+    def test_module_collection_error_keeps_peer_and_pcap(self):
+        validate = junit.validate
+
+        def fail_engine(module, *args):
+            if module == "engine":
+                raise OSError("injected module error")
+            return validate(module, *args)
+
+        with mock.patch.object(junit, "validate", side_effect=fail_engine):
+            self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+        self.assertTrue((self.public / "jvm/vpn/TEST-Fixture.xml").is_file())
+
+    def test_manifest_write_failure_keeps_publishable_material(self):
+        write = evidence.save
+
+        def fail_manifest(path, value):
+            if path.name == "manifest.json":
+                raise OSError("injected manifest error")
+            return write(path, value)
+
+        with mock.patch.object(evidence, "save", side_effect=fail_manifest):
+            self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+        status = evidence.read(self.public / "collection-status.json")
+        self.assertEqual("failed", status["manifest"])
+
+    def test_corrupt_metadata_keeps_independent_collections(self):
+        (self.run / "start.json").write_bytes(b"{")
+        self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+        self.assertTrue((self.public / "jvm/vpn/TEST-Fixture.xml").is_file())
+
+    def test_interrupted_jvm_and_missing_module_keep_existing_artifacts(self):
+        (self.run / "jvm-process.json").unlink()
+        (self.run / "task-events/engine-finish.json").unlink()
+        self.outputs["vpn"] = self.run / "absent"
+        self.assertEqual(1, self.finalize())
+        modules = evidence.read(self.public / "jvm/validation.json")["modules"]
+        self.assertEqual(("interrupted", "missing"), (modules["engine"]["execution"], modules["vpn"]["results"]))
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+
+    def test_pcap_copy_error_does_not_publish_incomplete_capture(self):
+        copy_file = evidence.shutil.copyfile
+
+        def fail_report(source, target):
+            if source == self.run / "pcap/report.txt":
+                raise OSError("injected copy error")
+            return copy_file(source, target)
+
+        with mock.patch.object(evidence.shutil, "copyfile", side_effect=fail_report):
+            self.assertEqual(1, self.finalize())
+        self.assertTrue((self.public / "jvm/engine/TEST-Fixture.xml").is_file())
+        self.assertEqual(["status.json"], sorted(path.name for path in (self.public / "pcap").iterdir()))
+
+    def test_complete_collection_hashes_status_and_raw_material(self):
+        self.assertEqual(0, self.finalize())
+        manifest = evidence.read(self.public / "manifest.json")
+        files = {item["path"]: item["sha256"] for item in manifest["artifacts"]}
+        self.assertEqual(files, {path.relative_to(self.public).as_posix(): wire.digest(path.read_bytes())
+                                 for path in self.public.rglob("*") if path.is_file() and path.name != "manifest.json"})
+
+    def test_broken_identity_record_can_be_recovered_without_green_status(self):
+        (self.run / "identity.json").write_bytes(b"{")
+        arguments = ["stage1b-evidence.py", "finalize", str(self.run),
+                     "--jvm-step", "success", "--pcap-step", "success"]
+        context = {field: value for field, value in IDENTITY.items() if field != "experimentId"}
+        with mock.patch.object(sys, "argv", arguments), mock.patch.object(
+            evidence, "checkout_identity", return_value=context
+        ), mock.patch.object(junit, "RESULTS", self.outputs), mock.patch.object(evidence, "CATALOG", self.catalog):
+            self.assertEqual(1, evidence.main())
+        status = evidence.read(self.public / "collection-status.json")
+        self.assertIn("identity record", status["problems"][0])
+        self.assertTrue((self.public / "jvm/engine/TEST-Fixture.xml").is_file())
+        self.assertTrue((self.public / "pcap/synthetic.pcap").is_file())
+
+
+class WorkerReview(unittest.TestCase):
+    def test_verified_worker_outputs_are_readable_from_private_staging(self):
+        fixture = PcapEvidence("test_success_and_report_matches_capture")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        metadata = fixture.metadata
+        offload = metadata["network"]["offload"]
+        isolated = {key: value for key, value in metadata["network"].items() if key != "offload"}
+        read_offload = "\n".join(f"{key}: {value}" for key, value in offload.items())
+        capture_result = "\n".join(metadata["fixtureOutput"]), metadata["startedUs"], metadata["endedUs"], 0
+        with mock.patch.object(pcap.platform, "system", return_value="Linux"), mock.patch.object(
+            pcap.platform, "release", return_value="synthetic"
+        ), mock.patch.object(pcap, "ns_id", return_value="different"), mock.patch.object(
+            pcap, "isolation", side_effect=lambda _: isolated.copy()
+        ), mock.patch.object(pcap, "capture", return_value=capture_result), mock.patch.object(
+            pcap.subprocess, "run"
+        ) as commands, mock.patch.object(pcap.subprocess, "check_output", return_value=read_offload), mock.patch.object(
+            Path, "chmod", autospec=True
+        ) as permissions:
+            pcap.worker(fixture.directory, IDENTITY, "parent")
+        self.assertEqual(["ip", "cc"], [call.args[0][0] for call in commands.call_args_list])
+        self.assertEqual([mock.call(fixture.directory / name, 0o644) for name in pcap.CAPTURE_FILES],
+                         permissions.call_args_list)
+
+    def test_parent_uses_only_unshare_and_cleans_private_failed_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "pcap"
+            worker_dirs = []
+
+            def reject(command, **kwargs):
+                self.assertEqual(["sudo", "-n", "unshare", "--net", "--", "python3", "-B"], command[:7])
+                private = Path(command[command.index("--worker") + 1])
+                worker_dirs.append(private)
+                (private / "synthetic.pcap").write_bytes(b"unverified")
+                return subprocess.CompletedProcess(command, 1, "", "denied")
+
+            with mock.patch.object(pcap.platform, "system", return_value="Linux"), mock.patch.object(
+                pcap.os, "geteuid", return_value=1000, create=True
+            ), mock.patch.object(pcap, "ns_id", return_value="parent"), mock.patch.object(
+                pcap.subprocess, "run", side_effect=reject
+            ):
+                self.assertEqual(1, pcap.run(output, IDENTITY))
+            self.assertEqual(["status.json"], sorted(path.name for path in output.iterdir()))
+            self.assertFalse(worker_dirs[0].exists())
 
 
 if __name__ == "__main__":

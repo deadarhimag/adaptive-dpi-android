@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 
 import stage1b_junit as junit
@@ -20,6 +21,7 @@ SCRIPTS = Path(__file__).resolve().parent
 CATALOG = SCRIPTS / "stage1b-jvm-expected.json"
 PCAP = SCRIPTS.parents[1] / "scripts/kernel-ops-pcap.py"
 NDK = "28.2.13676358"
+EVIDENCE_ERRORS = (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError)
 
 
 def now():
@@ -28,7 +30,7 @@ def now():
 
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
 
@@ -86,6 +88,7 @@ def prepare(run):
     wrapper = Path("gradle/wrapper/gradle-wrapper.properties").read_text(encoding="utf-8")
     gradle = re.search(r"/gradle-([0-9.]+)-bin\.zip", wrapper).group(1)
     run.mkdir(parents=True, exist_ok=False)
+    save(run / "identity.json", identity)
     save(run / "start.json", {
         "schemaVersion": 1, "identity": identity, "fixtureVersion": 1, "startedAt": now(),
         "environment": {
@@ -101,15 +104,17 @@ def prepare(run):
     })
 
 
-def run_identity(run):
-    info = read(run / "start.json")
+def verify_identity(identity):
     context = checkout_identity()
-    identity = info["identity"]
-    if info["schemaVersion"] != 1 or any(identity.get(key) != value for key, value in context.items()):
+    if not isinstance(identity, dict) or any(identity.get(key) != value for key, value in context.items()):
         raise ValueError("evidence directory belongs to another revision or attempt")
     if not re.fullmatch("[0-9a-f]{32}", identity["experimentId"]):
         raise ValueError("invalid experiment ID")
     return identity
+
+
+def run_identity(run):
+    return verify_identity(read(run / "identity.json"))
 
 
 def run_jvm(run, identity, offline):
@@ -151,12 +156,56 @@ def run_jvm(run, identity, offline):
 
 
 def optional_record(path, errors):
-    if path.exists():
-        try:
-            return read(path)
-        except (ValueError, OSError):
-            errors.append(f"unreadable {path.name}")
+    try:
+        return read(path)
+    except FileNotFoundError:
+        pass
+    except (ValueError, OSError) as error:
+        errors.append(f"could not read {path.name}: {type(error).__name__}")
     return None
+
+
+def copy_evidence(source, destination, problems):
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.replace(destination)
+    except OSError as error:
+        problems.append(f"could not copy {source.name}: {type(error).__name__}")
+
+
+def collect_module(run, destination, module, identity, fresh, catalog):
+    destination.mkdir(parents=True)
+    events, problems = {}, []
+    if fresh:
+        try:
+            xml = sorted(path for path in junit.RESULTS[module].iterdir() if path.match("TEST-*.xml"))
+        except OSError as error:
+            xml = []
+            problems.append(f"could not list test results: {type(error).__name__}")
+        for source in xml:
+            try:
+                if not source.is_file() or source.is_symlink() or source.stat().st_size > junit.MAX_XML_BYTES:
+                    problems.append(f"unsafe or oversized {source.name}")
+                    continue
+                copy_evidence(source, destination / source.name, problems)
+            except OSError as error:
+                problems.append(f"could not inspect {source.name}: {type(error).__name__}")
+        for phase in ("start", "finish"):
+            source = run / "task-events" / f"{module}-{phase}.json"
+            value = optional_record(source, problems)
+            if value is not None:
+                events[phase] = value
+                copy_evidence(source, destination / f"{phase}.json", problems)
+    else:
+        problems.append("missing or invalid JVM start provenance")
+    collection = {
+        "identity": identity, "task": junit.TASKS[module], "files": junit.inventory(destination),
+        "collectionError": "; ".join(problems) or None,
+    }
+    save(destination / "collection.json", collection)
+    expected = junit.expected_cases(catalog, module)
+    return junit.validate(module, expected, destination, identity, collection, events), events.get("finish", {})
 
 
 def collect_jvm(run, upload, identity):
@@ -164,59 +213,46 @@ def collect_jvm(run, upload, identity):
     started = optional_record(run / "jvm-start.json", errors)
     process = optional_record(run / "jvm-process.json", errors)
     fresh = started is not None and started.get("identity") == identity
-    catalog = read(CATALOG)
+    catalog = optional_record(CATALOG, errors) or {}
     summaries = {}
     versions = {}
     exit_code = process.get("exitCode") if process and process.get("identity") == identity else None
+    if exit_code is None:
+        errors.append("missing or unbound Gradle process outcome")
     for module, task in junit.TASKS.items():
         destination = upload / "jvm" / module
-        destination.mkdir(parents=True)
-        events = {}
-        problems = []
-        if fresh:
-            for source in sorted(junit.RESULTS[module].glob("TEST-*.xml")):
-                if not source.is_file() or source.is_symlink() or source.stat().st_size > junit.MAX_XML_BYTES:
-                    problems.append(f"unsafe or oversized {source.name}")
-                    continue
-                shutil.copyfile(source, destination / source.name)
-            for phase in ("start", "finish"):
-                source = run / "task-events" / f"{module}-{phase}.json"
-                value = optional_record(source, problems)
-                if value is not None:
-                    events[phase] = value
-                    shutil.copyfile(source, destination / f"{phase}.json")
-        if started is not None and not fresh:
-            problems.append("invalid JVM start provenance")
-        collection = {
-            "identity": identity, "task": task, "files": junit.inventory(destination),
-            "collectionError": "; ".join(problems) or None,
-        }
-        save(destination / "collection.json", collection)
-        expected = junit.expected_cases(catalog, module)
-        summaries[module] = junit.validate(module, expected, destination, identity, collection, events)
-        if "finish" in events:
-            versions[module] = events["finish"].get("gradle")
-    if fresh and (run / "jvm-gradle.log").exists():
-        shutil.copyfile(run / "jvm-gradle.log", upload / "jvm" / "gradle.log")
+        try:
+            summaries[module], finish = collect_module(run, destination, module, identity, fresh, catalog)
+            if finish:
+                versions[module] = finish.get("gradle")
+        except EVIDENCE_ERRORS as error:
+            summaries[module] = {"task": task, "execution": "unknown", "results": "incomplete",
+                                 "metadataErrors": [f"module collection: {type(error).__name__}"], "success": False}
+    if fresh:
+        copy_evidence(run / "jvm-gradle.log", upload / "jvm" / "gradle.log", errors)
     for name, record in (("invocation.json", started), ("process.json", process)):
         if record is not None and record.get("identity") == identity:
-            save(upload / "jvm" / name, record)
-    shutil.copyfile(CATALOG, upload / "jvm" / "expected.json")
+            try:
+                save(upload / "jvm" / name, record)
+            except OSError as error:
+                errors.append(f"could not save {name}: {type(error).__name__}")
+    copy_evidence(CATALOG, upload / "jvm" / "expected.json", errors)
     summary = {"identity": identity, "gradleExitCode": exit_code, "gradleVersions": versions,
                "modules": summaries, "metadataErrors": errors}
-    summary["success"] = exit_code == 0 and not errors and all(result["success"] for result in summaries.values())
+    summary["success"] = type(exit_code) is int and exit_code == 0 and not errors and all(
+        result["success"] for result in summaries.values()
+    )
     save(upload / "jvm" / "validation.json", summary)
     return summary
 
 
 def capture_pcap(run, identity):
-    return subprocess.call([sys.executable, str(PCAP), "--output", str(run / "pcap"),
+    return subprocess.call([sys.executable, "-B", str(PCAP), "--output", str(run / "pcap"),
                             "--identity", json.dumps(identity)])
 
 
 def collect_pcap(run, upload, identity):
     target = upload / "pcap"
-    target.mkdir()
     source = run / "pcap"
     if not source.exists():
         status = {"identity": identity, "outcome": "not_started"}
@@ -224,24 +260,36 @@ def collect_pcap(run, upload, identity):
         errors = []
         status = optional_record(source / "status.json", errors)
         if not status or status.get("identity") != identity:
-            status = {"identity": identity, "outcome": "interrupted", "reason": "missing or unbound capture status"}
+            status = {"identity": identity, "outcome": "interrupted",
+                      "reason": "; ".join(errors) or "missing or unbound capture status"}
         elif status.get("outcome") == "passed":
-            result = subprocess.call([sys.executable, str(PCAP), "--verify", str(source), "--identity", json.dumps(identity)])
-            if result == 0:
-                for name in ("synthetic.pcap", "report.txt", "capture.json"):
-                    shutil.copyfile(source / name, target / name)
-            else:
-                status = {"identity": identity, "outcome": "failed", "reason": "independent publication validation failed"}
+            filename = ""
+            try:
+                with tempfile.TemporaryDirectory(dir=run) as temporary:
+                    staging = Path(temporary) / "pcap"
+                    staging.mkdir()
+                    for filename in ("synthetic.pcap", "report.txt", "capture.json", "status.json"):
+                        shutil.copyfile(source / filename, staging / filename)
+                    filename = "staged PCAP validation"
+                    result = subprocess.call([sys.executable, "-B", str(PCAP), "--verify", str(staging),
+                                              "--identity", json.dumps(identity)])
+                    if result:
+                        raise ValueError("independent publication validation failed")
+                    staging.rename(target)
+                return status
+            except EVIDENCE_ERRORS as error:
+                status = {"identity": identity, "outcome": "failed",
+                          "reason": f"could not publish {filename or 'PCAP'}: {type(error).__name__}"}
+        elif status.get("outcome") != "failed":
+            status = {"identity": identity, "outcome": "failed", "reason": "invalid capture outcome"}
     save(target / "status.json", status)
     return status
 
 
-def finalize(run, identity, jvm_step, pcap_step, avd_api):
-    upload = run / "publish"
-    upload.mkdir()
-    jvm = collect_jvm(run, upload, identity)
-    pcap = collect_pcap(run, upload, identity)
+def create_manifest(run, upload, identity, jvm, pcap, jvm_step, pcap_step, avd_api, problems):
     info = read(run / "start.json")
+    if info.get("schemaVersion") != 1 or info.get("identity") != identity:
+        raise ValueError("start metadata belongs to another experiment")
     ndk = Path(os.environ.get("ANDROID_HOME", ".")) / "ndk" / NDK / "source.properties"
     info["environment"]["ndk"] = next((line.split("=", 1)[1].strip() for line in
         ndk.read_text(encoding="utf-8").splitlines() if line.startswith("Pkg.Revision")), None) if ndk.is_file() else None
@@ -255,17 +303,53 @@ def finalize(run, identity, jvm_step, pcap_step, avd_api):
     info["catalogSha256"] = hashlib.sha256(CATALOG.read_bytes()).hexdigest()
     info["outcomes"] = {"jvm": jvm_step or "not_started", "pcap": pcap_step or "not_started",
                         "jvmEvidencePassed": jvm["success"], "pcapEvidence": pcap["outcome"]}
+    info["collectionProblems"] = problems
     info["artifacts"] = [
         {"path": path.relative_to(upload).as_posix(), "size": path.stat().st_size,
          "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-        for path in sorted(upload.rglob("*")) if path.is_file()
+        for path in sorted(upload.rglob("*")) if path.is_file() and not path.name.startswith(".")
     ]
     save(upload / "manifest.json", info)
+
+
+def finalize(run, identity, jvm_step, pcap_step, avd_api, identity_error=None):
+    upload = run / "publish"
+    upload.mkdir()
+    problems = [identity_error] if identity_error else []
+    try:
+        jvm = collect_jvm(run, upload, identity)
+    except EVIDENCE_ERRORS as error:
+        problems.append(f"JVM collection: {type(error).__name__}")
+        jvm = {"modules": {}, "gradleVersions": {}, "success": False}
+    try:
+        pcap = collect_pcap(run, upload, identity)
+    except EVIDENCE_ERRORS as error:
+        pcap = {"identity": identity, "outcome": "failed", "reason": f"PCAP collection: {type(error).__name__}"}
+        problems.append(pcap["reason"])
+    status = {
+        "identity": identity, "jvm": jvm, "pcap": pcap, "problems": problems,
+        "collectionsSucceeded": not problems and jvm_step == pcap_step == "success"
+        and jvm["success"] and pcap["outcome"] == "passed",
+    }
+    status_file = upload / "collection-status.json"
+    try:
+        save(status_file, status)
+    except OSError as error:
+        problems.append(f"collection status: {type(error).__name__}")
+    try:
+        create_manifest(run, upload, identity, jvm, pcap, jvm_step, pcap_step, avd_api, problems)
+    except EVIDENCE_ERRORS as error:
+        problems.append(f"manifest: {type(error).__name__}")
+        try:
+            save(status_file, {**status, "manifest": "failed"})
+        except OSError as status_error:
+            problems.append(f"collection status: {type(status_error).__name__}")
     for module, outcome in jvm["modules"].items():
-        print(f"{module}: {outcome['execution']}, {outcome['results']}, {outcome['counts']}")
+        print(f"{module}: {outcome['execution']}, {outcome['results']}, {outcome.get('counts', outcome.get('metadataErrors'))}")
     print(f"PCAP: {pcap['outcome']}")
-    return 0 if (jvm_step == pcap_step == "success" and jvm["success"]
-                 and pcap["outcome"] == "passed") else 1
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 0 if status["collectionsSucceeded"] and not problems else 1
 
 
 def main():
@@ -281,12 +365,25 @@ def main():
     if args.command == "prepare":
         prepare(run)
         return 0
-    identity = run_identity(run)
+    identity_error = None
+    try:
+        identity = run_identity(run)
+    except EVIDENCE_ERRORS as error:
+        if args.command != "finalize":
+            raise
+        identity_error = f"identity record: {type(error).__name__}"
+        try:
+            identity = verify_identity(read(run / "start.json")["identity"])
+        except EVIDENCE_ERRORS:
+            message = f"{identity_error}; no verified experiment identity, collection withheld"
+            print(message, file=sys.stderr)
+            save(run / "publish" / "collection-status.json", {"success": False, "problems": [message]})
+            return 1
     if args.command == "jvm":
         return run_jvm(run, identity, args.offline)
     if args.command == "pcap":
         return capture_pcap(run, identity)
-    return finalize(run, identity, args.jvm_step, args.pcap_step, args.avd_api)
+    return finalize(run, identity, args.jvm_step, args.pcap_step, args.avd_api, identity_error)
 
 
 if __name__ == "__main__":

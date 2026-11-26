@@ -23,6 +23,12 @@ FIXTURE_VERSION = 2
 PACKET_OUTGOING = 4
 ROOT = Path(__file__).resolve().parent
 CAPTURE_SECONDS = 60
+GENERATOR = "kernel-ops-host.c"
+CAPTURE_CLOCK = "userspace UNIX microseconds"
+LIMITS = {"seconds": CAPTURE_SECONDS, "bytes": MAX_PCAP}
+OFFLOAD_KEYS = ("rx-checksumming", "tx-checksumming", "generic-segmentation-offload",
+                "generic-receive-offload", "tcp-segmentation-offload")
+CAPTURE_FILES = ("synthetic.pcap", "report.txt", "capture.json")
 
 
 def flag(segment, mask):
@@ -49,7 +55,10 @@ def analyse(lines, packets):
         values = dict(pair.split("=", 1) for pair in pairs)
         port = int(port)
         client = from_client(port)
-        data = [p["payload"] for p in client if p["payload"] > 0]
+        # A byte-identical retransmission does not add a new write boundary.
+        data = [len(content) for _, content in dict.fromkeys(
+            (p["seq"], p["data"]) for p in client if p["data"]
+        )]
         syn = next((p for p in client if flag(p, SYN)), None)
         if name == "tcpinfo":
             rows.append(f"TCP_INFO\tрезультат {values['result']}, notsent {values['notsent']}, rtt {values['rtt']} мкс")
@@ -183,27 +192,51 @@ def build_report(metadata, packets):
     return "\n".join([f"Ядро хоста {metadata['kernel']}, loopback"] + rows) + "\n"
 
 
-def verify_capture(directory, identity, metadata):
-    experiment = identity["experimentId"]
-    network = metadata["network"]
-    if (metadata["identity"] != identity or metadata["schemaVersion"] != 1
-            or metadata["fixtureVersion"] != FIXTURE_VERSION or metadata["seed"] != seed_for(experiment)):
+def verify_metadata(metadata, identity):
+    required = {"identity", "schemaVersion", "fixtureVersion", "generator", "captureClock", "limits",
+                "seed", "kernel", "network", "dropped", "fixtureExitCode", "startedUs", "endedUs",
+                "fixtureOutput"}
+    if missing := required - metadata.keys():
+        raise ValueError(f"missing capture metadata: {', '.join(sorted(missing))}")
+    if (metadata["identity"] != identity or type(metadata["schemaVersion"]) is not int
+            or metadata["schemaVersion"] != 1 or type(metadata["fixtureVersion"]) is not int
+            or metadata["fixtureVersion"] != FIXTURE_VERSION or type(metadata["seed"]) is not int
+            or metadata["seed"] != seed_for(identity["experimentId"])):
         raise ValueError("capture metadata belongs to another experiment or fixture")
-    if (network["freshNamespace"] is not True or network["interfaces"] != ["lo"] or network["mainRoutes"]
-            or not 0 < network["mtu"] <= 65536 or "127.0.0.1/8" not in network["addresses"]
-            or set(network["addresses"]) - {"127.0.0.1/8", "::1/128"}):
+    limits = metadata["limits"]
+    if (metadata["generator"] != GENERATOR or metadata["captureClock"] != CAPTURE_CLOCK
+            or not isinstance(limits, dict) or limits != LIMITS
+            or any(type(value) is not int for value in limits.values())):
+        raise ValueError("capture generator, clock or limits disagree with fixture")
+    kernel = metadata["kernel"]
+    if not isinstance(kernel, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}", kernel):
+        raise ValueError("invalid kernel release label")
+    network = metadata["network"]
+    if (not isinstance(network, dict) or network.get("freshNamespace") is not True
+            or network.get("interfaces") != ["lo"] or network.get("mainRoutes") != []
+            or type(network.get("mtu")) is not int or not 0 < network["mtu"] <= 65536
+            or network.get("addresses") not in (["127.0.0.1/8"], ["127.0.0.1/8", "::1/128"])):
         raise ValueError("invalid isolation metadata")
-    if (set(network["offload"]) != {"rx-checksumming", "tx-checksumming", "generic-segmentation-offload",
-                                    "generic-receive-offload", "tcp-segmentation-offload"}
-            or not all(value in {"on", "off"} for value in network["offload"].values())):
+    offload = network.get("offload")
+    if (not isinstance(offload, dict) or set(offload) != set(OFFLOAD_KEYS)
+            or not all(value in ("on", "off") for value in offload.values())):
         raise ValueError("missing offload metadata")
-    if metadata["dropped"] != 0 or metadata["fixtureExitCode"] != 0:
+    if any(type(metadata[key]) is not int or metadata[key] != 0 for key in ("dropped", "fixtureExitCode")):
         raise ValueError("capture drops or fixture process failure")
     start, end = metadata["startedUs"], metadata["endedUs"]
-    if not 0 <= end - start <= (CAPTURE_SECONDS + 1) * 1_000_000:
+    if type(start) is not int or type(end) is not int or not 0 < start < end:
+        raise ValueError("invalid capture timestamps")
+    if end - start > (CAPTURE_SECONDS + 1) * 1_000_000:
         raise ValueError("invalid time budget")
+    output = metadata["fixtureOutput"]
+    if not isinstance(output, list) or not all(isinstance(line, str) for line in output):
+        raise ValueError("invalid fixture output metadata")
+
+
+def verify_capture(directory, identity, metadata):
+    verify_metadata(metadata, identity)
     packets = read_pcap(directory / "synthetic.pcap")
-    flows = validate_flows(packets, experiment, start, end)
+    flows = validate_flows(packets, identity["experimentId"], metadata["startedUs"], metadata["endedUs"])
     report = build_report(metadata, packets)
     return flows, report
 
@@ -224,9 +257,7 @@ def worker(directory, identity, parent_namespace):
     subprocess.run(["ip", "link", "set", "dev", "lo", "up"], check=True, capture_output=True, timeout=5)
     network = isolation(parent_namespace)
     offloads = subprocess.check_output(["ethtool", "-k", "lo"], text=True, timeout=5)
-    keys = ("rx-checksumming", "tx-checksumming", "generic-segmentation-offload",
-            "generic-receive-offload", "tcp-segmentation-offload")
-    network["offload"] = dict(re.findall(r"^(" + "|".join(keys) + r"): (on|off)\b", offloads, re.M))
+    network["offload"] = dict(re.findall(r"^(" + "|".join(OFFLOAD_KEYS) + r"): (on|off)\b", offloads, re.M))
     binary = directory / "kernel-ops-host"
     subprocess.run(["cc", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror", "-O1", "-o", str(binary),
                     str(ROOT / "kernel-ops-host.c")], check=True, capture_output=True, timeout=15)
@@ -238,14 +269,17 @@ def worker(directory, identity, parent_namespace):
         "schemaVersion": 1, "identity": identity, "fixtureVersion": FIXTURE_VERSION, "seed": seed,
         "kernel": platform.release(), "network": network, "startedUs": start, "endedUs": end,
         "fixtureOutput": output.splitlines(), "fixtureExitCode": 0, "dropped": dropped,
-        "generator": "kernel-ops-host.c", "captureClock": "userspace UNIX microseconds",
-        "limits": {"seconds": CAPTURE_SECONDS, "bytes": MAX_PCAP},
+        "generator": GENERATOR, "captureClock": CAPTURE_CLOCK, "limits": LIMITS,
     }
     flows, report = verify_capture(directory, identity, metadata)
     metadata["flows"] = flows
     metadata["pcapSha256"] = digest((directory / "synthetic.pcap").read_bytes())
     (directory / "report.txt").write_bytes(report.encode("utf-8"))
     save(directory / "capture.json", metadata)
+    # sudo's umask may leave root-owned output unreadable to the caller. The
+    # caller owns the enclosing mode-0700 staging directory.
+    for name in CAPTURE_FILES:
+        (directory / name).chmod(0o644)
 
 
 def run(output, identity):
@@ -257,7 +291,7 @@ def run(output, identity):
         with tempfile.TemporaryDirectory(dir=output) as temporary:
             private = Path(temporary)
             command = ([] if os.geteuid() == 0 else ["sudo", "-n"]) + [
-                "unshare", "--net", "--", "python3", str(Path(__file__).resolve()),
+                "unshare", "--net", "--", "python3", "-B", str(Path(__file__).resolve()),
                 "--worker", str(private), "--parent-namespace", ns_id(), "--identity", json.dumps(identity),
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=100)
@@ -269,7 +303,7 @@ def run(output, identity):
                 raise ValueError(reason)
             save(private / "status.json", {"identity": identity, "outcome": "passed"})
             verify_publication(private, identity)
-            for name in ("synthetic.pcap", "report.txt", "capture.json"):
+            for name in CAPTURE_FILES:
                 shutil.copyfile(private / name, output / name)
         save(output / "status.json", {"identity": identity, "outcome": "passed"})
         print((output / "report.txt").read_text(encoding="utf-8"), end="")

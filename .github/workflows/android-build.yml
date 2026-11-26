@@ -104,7 +104,7 @@ jobs:
           status=0
           python3 -B .github/scripts/stage1b-evidence.py finalize "$STAGE1B_EVIDENCE_DIR" \
             --jvm-step "${JVM_STEP:-not_started}" --pcap-step "${PCAP_STEP:-not_started}" --avd-api 34 || status=$?
-          if test -s "$STAGE1B_EVIDENCE_DIR/publish/manifest.json"; then
+          if test -d "$STAGE1B_EVIDENCE_DIR/publish"; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
           exit "$status"
@@ -116,6 +116,7 @@ jobs:
           name: linux-stage1b-evidence-${{ github.run_id }}.${{ github.run_attempt }}-${{ github.sha }}
           path: ${{ env.STAGE1B_EVIDENCE_DIR }}/publish/
           if-no-files-found: error
+          include-hidden-files: false
 
       - name: Запустить lint и сборку APK
         env:
